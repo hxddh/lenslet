@@ -652,8 +652,9 @@ impl Report {
     }
 
     /// The human report, printed to stderr after the command exits. Paths
-    /// under `home` are shown as `~/…`.
-    pub fn render(&self, home: &Path) -> String {
+    /// under `home` are shown as `~/…`. `updating` is set when this run is
+    /// about to write the lock, so it does not suggest doing that.
+    pub fn render(&self, home: &Path, updating: bool) -> String {
         let mut out = String::new();
         let services = if self.services.is_empty() {
             String::new()
@@ -724,6 +725,10 @@ impl Report {
             }
             Some(lock) => out.push_str(&format!(
                 "  access: within {lock} ({} used)\n",
+                plural(used, "permission")
+            )),
+            None if used > 0 && updating => out.push_str(&format!(
+                "  access: {} observed\n",
                 plural(used, "permission")
             )),
             None if used > 0 => out.push_str(&format!(
@@ -1159,7 +1164,7 @@ mod tests {
         let regressions = now.regressions.clone().unwrap();
         assert_eq!(regressions.new_failures.len(), 1);
         assert_eq!(regressions.fixed[0].code, "NoSuchKey");
-        let text = now.render(Path::new("/home/u"));
+        let text = now.render(Path::new("/home/u"), false);
         assert!(
             text.contains("since run r2: 1 new failure, 1 fixed"),
             "{text}"
@@ -1176,7 +1181,7 @@ mod tests {
         summary.observe(&trace("a", "sqs", 200, None));
         summary.observe(&unmapped);
         let report = report(&summary, None);
-        let text = report.render(Path::new("/home/u"));
+        let text = report.render(Path::new("/home/u"), false);
         let first = text.lines().next().unwrap();
         assert!(
             first.ends_with(" · against moto (started by Lenslet)"),
@@ -1196,7 +1201,7 @@ mod tests {
         let nothing = super::tests::report(&Summary::default(), None);
         assert!(
             nothing
-                .render(Path::new("/home/u"))
+                .render(Path::new("/home/u"), false)
                 .contains("no AWS calls reached Lenslet")
         );
     }
@@ -1219,7 +1224,7 @@ mod tests {
         let mut report = report(&summary, Some(&lock(&[access("s3:GetObject", "*")])));
         report.exit_code = Some(1);
 
-        let text = report.render(Path::new("/home/u"));
+        let text = report.render(Path::new("/home/u"), false);
         assert!(
             text.contains("✗ SQS SendMessage  400  QueueDoesNotExist ×2  no | queue"),
             "{text}"

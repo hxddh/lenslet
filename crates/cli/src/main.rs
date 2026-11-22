@@ -565,7 +565,7 @@ async fn run(args: Vec<String>) -> Result<i32> {
     }
 
     if !quiet {
-        eprint!("{}", report.render(&home));
+        eprint!("{}", report.render(&home, update));
     }
     if update {
         update_lock(
