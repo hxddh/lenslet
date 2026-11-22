@@ -353,7 +353,7 @@ impl AccessView {
             .border_b_1()
             .border_color(rgb(t.border_subtle))
             .child(div().w(px(14.0)))
-            .child(head(ui.t("ACTION", "操作")).w(px(220.0)).flex_shrink_0())
+            .child(head(ui.t("ACTION", "权限")).w(px(220.0)).flex_shrink_0())
             .child(head(ui.t("RESOURCE", "资源")).flex_1().min_w(px(0.0)))
             .child(
                 head(ui.t("CALLS", "调用"))

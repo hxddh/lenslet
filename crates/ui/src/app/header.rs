@@ -313,6 +313,7 @@ impl LensletApp {
                 card = card.child(
                     div()
                         .id(ElementId::named_usize("run", index))
+                        .w_full()
                         .flex()
                         .items_center()
                         .gap(px(8.0))
@@ -333,11 +334,25 @@ impl LensletApp {
                                 .min_w(px(0.0))
                                 .flex()
                                 .flex_col()
-                                .child(widgets::mono(ui, label).text_size(px(text::MD)))
                                 .child(
-                                    widgets::mono(ui, detail.join(" · "))
+                                    div()
+                                        .font(fonts::mono_font())
+                                        .text_size(px(text::MD))
+                                        .text_color(rgb(t.text))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .font(fonts::mono_font())
                                         .text_size(px(text::XS))
-                                        .text_color(rgb(t.text_muted)),
+                                        .text_color(rgb(t.text_muted))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(detail.join(" · ")),
                                 ),
                         )
                         .child(
