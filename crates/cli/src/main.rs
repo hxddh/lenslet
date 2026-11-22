@@ -68,8 +68,8 @@ Usage:
       policy or lock without re-running it: each denied permission and the
       statement that denied it. Exit {changed} if anything is denied.
   lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE]
-      Compile least-privilege IAM JSON, Terraform HCL, CloudFormation, SAM, or CDK
-      TypeScript from lenslet.lock or a recorded run.
+      An IAM policy (JSON, or a Terraform aws_iam_policy_document) from
+      lenslet.lock (without `# test` lines) or a recorded run.
   lenslet env [--shell sh|fish|pwsh|dotenv|docker] [--listen PORT]
       Print shell environment exports pointing SDKs at a running Lenslet proxy.
   lenslet ui

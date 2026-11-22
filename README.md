@@ -3,11 +3,10 @@
 **See, in every pull request, what AWS access your code needs, and why its
 AWS calls failed.**
 
-Lenslet runs your tests against local AWS — using any running local emulator
-(`AWS Emulator`, `LocalStack`, `Moto`, `MinIO`) **or Lenslet's built-in
-zero-dependency stateful AWS sandbox when no emulator is running**. It records
-every AWS call, explains failures, and works out the IAM permissions the code
-uses. It keeps those permissions in `lenslet.lock`, a file you commit. When a
+Lenslet runs your tests against a local AWS emulator: the one you already run
+(AWS Emulator, LocalStack, moto), or moto, which Lenslet starts and stops for
+you when none is running. It records every AWS call, explains failures, and
+works out the IAM permissions the code uses. It keeps those permissions in `lenslet.lock`, a file you commit. When a
 pull request widens AWS access, the PR says so, call by call, and CI fails
 until someone accepts the change.
 
@@ -20,7 +19,7 @@ policy and which statement would deny it.
 
 > **Lenslet · `npm test` passed**
 >
-> 15 AWS calls · 0 errors · 4 services
+> 15 AWS calls · 0 errors · 4 services · against moto
 >
 > **1 permission not in `lenslet.lock`.** Review it; if it is intended, run `lenslet run --update` and commit `lenslet.lock`.
 >
@@ -28,26 +27,35 @@ policy and which statement would deny it.
 > |---|---|---|---|
 > | + | `dynamodb:DeleteItem` | `arn:aws:dynamodb:*:*:table/orders` | DYNAMODB DeleteItem |
 
-## Start (Zero Setup)
+## Start
 
 ```bash
 # CLI only (Linux & macOS):
 curl -fsSL https://github.com/hxddh/lenslet/releases/latest/download/install.sh | sh
 
-# Or Desktop App + CLI together (macOS /Applications/Lenslet.app + ~/.local/bin/lenslet):
+# Or the desktop app and the CLI together:
 curl -fsSL https://github.com/hxddh/lenslet/releases/latest/download/install.sh | sh -s -- --app
 
-# Run your tests immediately — no external emulator required:
+# No emulator running? Lenslet starts moto for each run:
+pip install 'moto[server]'
+
 lenslet pytest          # or: lenslet npm test / lenslet cargo test
-lenslet init            # auto-detects tests, writes lenslet.lock + GitHub Actions workflow
+lenslet init            # detects your tests, writes lenslet.lock + a GitHub Actions workflow
 ```
 
-`lenslet init` auto-detects your test command (`pytest`, `npm`/`pnpm`/`yarn`/`bun`,
-`cargo test`, `go test ./...`, `make test`), uses a running local emulator or
-Lenslet's built-in stateful AWS sandbox (S3, DynamoDB, SQS, SNS, STS, Secrets
-Manager, SSM, KMS, Logs, EventBridge, Kinesis, Lambda, Step Functions), writes
-`lenslet.lock`, and adds `.github/workflows/lenslet.yml`. Review the lock, mark
-fixture-only lines with `# test`, and commit both files.
+Lenslet uses the emulator that is already running: a loopback
+`AWS_ENDPOINT_URL`, AWS Emulator on 9298, LocalStack on 4566 or moto on 5000,
+each recognized by its protocol, not just an open port. When none is running
+and moto is installed, it starts moto on a free port for the run and stops it
+after; when moto is not installed either, it stops with the one-line install
+command. Every report says what answered: `· against moto (started by
+Lenslet)`.
+
+`lenslet init` detects your test command (`pytest`, `npm`/`pnpm`/`yarn`/`bun`,
+`cargo test`, `go test ./...`, `make test`), writes `lenslet.lock` and adds
+`.github/workflows/lenslet.yml` (an existing workflow is kept unless you pass
+`--force`). Review the lock, mark fixture-only lines with `# test`, and commit
+both files.
 
 ## In CI
 
@@ -60,9 +68,10 @@ permissions:
 steps:
   - uses: actions/checkout@v5
   # install your test dependencies
-  - uses: hxddh/lenslet@lenslet-v11.0.0
+  - uses: hxddh/lenslet@lenslet-v12.0.0
     with:
-      command: pytest           # works out of the box with Lenslet's built-in AWS sandbox
+      command: pytest
+      upstream: moto            # the action installs moto; Lenslet starts and stops it
 ```
 
 The action does five things:
@@ -78,8 +87,8 @@ Until a `lenslet.lock` exists, it only reports.
 | input | default | |
 | --- | --- | --- |
 | `command` | — | the test command (bash, in `working-directory`) |
-| `upstream` | `9298` | the emulator: a port (HTTPS on 127.0.0.1) or a URL |
-| `emulator` | | a command that starts the emulator in the background |
+| `upstream` | `auto` | the emulator: `auto` (one already running in the job, else moto if installed), `moto` (installed and managed for you), a port (HTTPS on 127.0.0.1) or a URL |
+| `emulator` | | `moto`, or a command that starts the emulator in the background |
 | `working-directory` | `.` | where to run and find the lock |
 | `lock` | `lenslet.lock` | lock path, relative to `working-directory` |
 | `policy` | | IAM policy JSON path to check/enforce instead of `lenslet.lock` (supports `Allow`, `Deny`, `NotAction`, `NotResource`, and wire-level IAM `Condition` blocks) |
@@ -93,8 +102,7 @@ Outputs: `exit-code`, and `report`, the path to the JSON report.
 
 For AWS Emulator in CI, install it the way its docs describe (on Linux, a
 `.deb` or `.rpm`), then set `emulator: aws-emulator --telemetry off --port 9298`.
-[moto](https://github.com/getmoto/moto) (`pip install 'moto[server]'`) and
-LocalStack also work as upstreams. Lenslet's own CI runs the action this way
+LocalStack works as an upstream too; `upstream: moto` is the shortest path. Lenslet's own CI runs the action this way
 against [examples/python](examples/python).
 
 ## What a run shows
@@ -102,7 +110,7 @@ against [examples/python](examples/python).
 ```console
 $ lenslet run --check -- npm test
 ...your tests...
-lenslet: 24 calls · 2 errors · 4 services (dynamodb, lambda, s3, sqs) · 476 ms
+lenslet: 24 calls · 2 errors · 4 services (dynamodb, lambda, s3, sqs) · 476 ms · against moto
   ✗ DYNAMODB GetItem  400  ResourceNotFoundException  Requested resource not found
       → Region mismatch: `table/orders` was created in `us-west-2` at call #2 (CreateTable), but this `GetItem` targeted `us-east-1`.
   ! DYNAMODB GetItem ×8 in a serial burst
@@ -121,8 +129,11 @@ lenslet: 24 calls · 2 errors · 4 services (dynamodb, lambda, s3, sqs) · 476 m
   (N+1), SDK retries, and resources the run left behind are also listed.
   The same list leads the terminal, the PR comment, the JSON report and the
   window.
-- **What it needs**: each call becomes a verified AWS IAM action on a resource
-  ARN, with account and region as `*`. The mapping covers:
+- **What it needs**: each call becomes an AWS IAM action on a resource ARN,
+  with account and region as `*`. Every mapping is checked against a corpus of
+  300 recorded SDK calls across 19 services whose expected permissions were
+  written by hand from the AWS Service Authorization Reference
+  (`crates/core/tests/corpus`). The mapping covers:
   - batches: one entry per table or SSM parameter;
   - transactions: each item's own action;
   - copies & subresources: source reads, `PostObject` → `s3:PutObject`, and
@@ -136,6 +147,11 @@ lenslet: 24 calls · 2 errors · 4 services (dynamodb, lambda, s3, sqs) · 476 m
     EventBridge (rules and `Targets[].RoleArn`), Scheduler, Pipes, Firehose
     and Glue. The key of an existing encrypted queue, topic or secret is not
     in the request that uses it, so it is not derived.
+  - qualified Lambda functions (`function:fn:prod`), KMS aliases (authorized
+    on the key, so `key/*`), Bedrock inference profiles (the profile and its
+    foundation model), API Gateway management calls (`apigateway:GET` … on
+    `arn:aws:apigateway:*::/restapis/*`) and Secrets Manager
+    `BatchGetSecretValue` (plus `GetSecretValue` on each secret);
   - a request whose body is not readable (binary such as CBOR, or over the
     inspection limit) gets its action on `*`, marked unverified, rather than a
     guessed resource.
@@ -191,38 +207,39 @@ terminal and the PR comment always agree.
 
 One header, two views, one inspector:
 
-- **Workspace Sidebar** (`⌘0`): live local proxy status, detected emulators,
-  1-click **Start / Stop Proxy**, **Copy Env**, **Open Trace File** (`⌘O`), and
-  project-grouped runs with `★` pin protection against retention pruning.
-- **Header**: the run (switch runs with `⌘[` / `⌘]`, or pick one), **Calls |
-  Access**, **Compared with ▾** (`lenslet.lock`, the previous run, or any
-  recorded run, with a one-line summary of what changed), and search.
-- **Calls** (`⌘1`): filter chips (errors, changed vs the baseline, retry
-  grouping, services), the **Findings** of the run at the top (click one to jump
-  to its calls), a brush-selectable timeline of the run, sortable columns, and
-  semantic targets (`table/orders · id="ord-42"`, `s3://bucket/key`, `queue/...`)
-  on every row.
+- **Header**: the run and what answered it (`against moto`; switch runs with
+  `⌘[` / `⌘]`), **▶ your test command** (`⌘R`; `▾` holds the run options:
+  the command, *Block calls outside the lock*, *Accept calls from Docker
+  containers*), **Calls | Access**, **Compared with ▾** (`lenslet.lock`, the
+  previous run, or any recorded run) and search.
+- **Calls** (`⌘1`): the run's **Findings** first (click one to jump to its
+  calls), then filter chips, the run's timeline and the calls. `⌘J` opens the
+  test command's output in a drawer below.
 - **Access** (`⌘2`): every permission the run used, marked not in the lock,
-  unused, implied or `# test`, plus **Check policy…** to simulate any IAM policy
-  JSON interactively and a built-in **IaC Policy Compiler** exporting **IAM
-  JSON**, **Terraform HCL**, **CloudFormation**, **AWS SAM**, and **AWS CDK
-  TypeScript**.
-- **Inspector** (`⌘B`): why a call failed, its SDK retries, structured SigV4
-  scope & query/header tables, and virtualized bodies with character-level
-  selection, collapsible JSON folding, and `⌘G` / `⇧⌘G` match stepping.
-  **Replay** (`⌘⏎`) re-sends the call, while **Edit & Replay** (`⇧⌘⏎`) opens the
-  Request Composer to mutate payloads/headers, auto re-sign `AWS4-HMAC-SHA256`
-  locally, and view a **Unified Diff** against the recorded response.
+  unused, implied or `# test`. New permissions are reviewed here: *Accept into
+  lock* one at a time, or *Accept all…* after a confirmation that lists them.
+  **Check policy…** simulates an IAM policy; the policy for the lock exports
+  as IAM JSON or Terraform.
+- **Inspector** (`⌘B`): why a call failed, its SDK retries, the SigV4 scope,
+  and the bodies. **Replay** (`⌘⏎`) re-sends the call through the live proxy;
+  **Edit & Replay** (`⇧⌘⏎`) changes it first and re-signs it locally.
+- **Sidebar** (`⌘0`, closed by default): the project and its runs.
 
 ![The Access view](docs/access.png)
 
 Right-click a call or a permission for its actions (copy as curl, copy the
 ARN or statement, replay, accept, mark `# test`). `⌘K` opens the command
 palette, where every command is, and `⌘F` or `/` searches calls, headers and
-bodies. `j`/`k` or the arrow keys move, `Enter` goes into the inspector and
-`Esc` backs out. On Linux every `⌘` shortcut is `Ctrl`. `⌘,` opens Settings:
-appearance (System / Light / Dark), accent, density, English or 中文, and
-the space recorded runs take (with a button to clear finished ones).
+bodies. `j`/`k` or the arrow keys move, `Enter` goes into the inspector,
+`Esc` closes any dialog or backs out, and `Tab` moves between a dialog's
+fields. On Linux every `⌘` shortcut is `Ctrl`. `⌘,` opens Settings:
+appearance (System / Light / Dark), accent, density, English or 中文, the
+command-line tool, and the space recorded runs take.
+
+The window starts and stops the proxy and your tests itself. It never leaves
+them running: quitting stops them without blocking, and after a crash the
+next launch cleans up what it had started. The emulator status comes from
+`lenslet doctor --json`, so the window and the CLI never disagree about it.
 
 The window never reads the disk while drawing: runs load, search and decode
 in the background, and a 5,000-call run is on screen in well under 150 ms.
@@ -256,10 +273,10 @@ The format is in [docs/trace.md](docs/trace.md).
 
 ```text
 lenslet COMMAND [ARGS...]                      shorthand: run COMMAND under Lenslet (`lenslet pytest`)
-lenslet init [--sandbox | --upstream URL] [-- COMMAND]
-                                               zero-setup onboarding: lock + CI workflow
+lenslet init [--emulator moto | --upstream URL] [--force] [-- COMMAND]
+                                               onboarding: lock + CI workflow
 lenslet shell [options]                        interactive shell pre-configured with AWS_ENDPOINT_URL
-lenslet doctor [--json]                        check CLI, desktop app, emulators, lock, and CI
+lenslet doctor [--json]                        check CLI, desktop app, emulators (running, and moto), lock, CI
 lenslet run [options] [--] COMMAND             run under Lenslet; report at the end
 lenslet run [options]                          no command: a proxy on 127.0.0.1:9297
 lenslet env [--shell sh|fish|pwsh|dotenv|docker] [--listen PORT]
@@ -270,21 +287,18 @@ lenslet diff [BASE] [TARGET] [--json] [--markdown PATH]
                                                compare two runs (default: previous vs newest)
 lenslet check [--policy PATH | --lock PATH] [--context K=V] [RUN] [--json] [--markdown PATH]
                                                would a recorded run pass under this policy/lock?
-lenslet policy [--lock PATH | --run RUN] [--format iam|terraform|cfn|sam|cdk] [--role ROLE]
-                                               compile least-privilege IaC policy (without `# test`)
+lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE]
+                                               an IAM policy (JSON or Terraform), without `# test` lines
 lenslet ui                                     the window
 
-run: --sandbox  --enforce  --check  --strict  --update  --lock PATH  --policy PATH
+run: --emulator moto  --enforce  --check  --strict  --update  --lock PATH  --policy PATH
      --max-body SIZE  --json PATH  --markdown PATH  --quiet  --ui  --no-env
      --listen PORT  --upstream ADDRESS  --route SERVICE=ADDRESS  --allow-docker
      --emulator-ca PATH  --trace PATH
 ```
 
-`lenslet run` also auto-discovers your local emulator when `--upstream` is
-omitted: if `AWS_ENDPOINT_URL` is already set to a loopback URL in your shell,
-Lenslet transparently interposes itself in front of it; otherwise, if port `9298`
-is not listening, it probes LocalStack (`:4566`) and Moto (`:5000`) automatically.
-For the child process, `lenslet run` sets:
+Without `--upstream` or `--emulator`, `lenslet run` finds the emulator as
+described in [Start](#start). For the child process, `lenslet run` sets:
 
 - `AWS_ENDPOINT_URL`;
 - the emulator's credentials and config, when you have not set your own;
@@ -293,7 +307,9 @@ For the child process, `lenslet run` sets:
 It always removes ambient cloud credentials (`AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`,
 `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*`,
-`AWS_BEARER_TOKEN_BEDROCK`) from the environment it hands over, so real
+`AWS_BEARER_TOKEN_BEDROCK`), and the service-specific `AWS_ENDPOINT_URL_*`
+variables that would send calls around the proxy, from the environment it
+hands over, so real
 credentials never reach the emulator or the unredacted local trace. `--no-env`
 sets only the endpoint. Both `127.0.0.1` and `localhost` work on IPv4 and IPv6
 loopback.
@@ -308,7 +324,10 @@ loopback.
 | CI images, Alpine | `lenslet-cli-X.Y.Z-{x86_64,aarch64}-linux-musl.tar.gz`: static |
 
 Every asset is listed in the release's `SHA256SUMS`, and `install.sh` checks
-the file it downloads against it. To uninstall, delete the binary (or the app)
+the file it downloads against it. With `--app` on macOS it installs
+`Lenslet.app` (an existing one is moved aside, not deleted) and prints the
+command that clears the quarantine flag; it does not clear it for you,
+because the app is not notarized. To uninstall, delete the binary (or the app)
 and `~/.lenslet`. That directory holds raw local traces, including request
 headers.
 
@@ -319,6 +338,7 @@ headers.
 | `lenslet.lock` | the access your project needs; commit it |
 | `.github/workflows/lenslet.yml` | written by `lenslet init` |
 | `~/.lenslet/runs/*.jsonl` | one file per run (header, calls, report); the last 20 finished runs are kept |
+| `~/.lenslet/runs/*.emulator.log` | moto's output, when Lenslet started moto for the run |
 
 Run files are a local development artifact. They hold raw headers and text
 bodies, and are written owner-only (`0600`). Do not commit them.
@@ -348,10 +368,15 @@ examples/      a project the action is tested against
 
 ## Limits
 
-- Strict local-only boundary: the proxy and replay engine accept only loopback
-  (or local Docker container bridge peers when `--allow-docker` is passed) and
-  refuse public internet or real `*.amazonaws.com` upstreams. Both HTTP/1.1 and
-  HTTP/2 (`h2c` and upstream ALPN) are supported.
+- Local only. An upstream (or `--route`) must resolve to loopback or a private
+  container network; AWS domains are refused. The proxy serves loopback only;
+  `--allow-docker` also serves Docker networks (172.16.0.0/12,
+  192.168.65.0/24). `/_lenslet/*` (live events, health, shutdown) is always
+  loopback-only. Both HTTP/1.1 and HTTP/2 (`h2c` and upstream ALPN) are
+  supported.
+- What Lenslet reports about responses is what your emulator answered. moto,
+  LocalStack and AWS Emulator each implement AWS to a different depth; the
+  report names the one that answered.
 - `--enforce` stops a call before it reaches the emulator, except when the
   denied permission only shows in the response (the SSE-KMS key of an S3
   bucket's default encryption): the emulator has then already run the call,
@@ -361,7 +386,7 @@ examples/      a project the action is tested against
   `application/vnd.amazon.eventstream` streams, decompressing `gzip`, `deflate`
   and `zstd`, and decoding Smithy RPCv2 / AWS CBOR payloads into readable JSON
   while forwarding wire bytes untouched and unredacted.
-- Resources are derived across 35+ AWS services including S3, DynamoDB (tables,
+- Resources are derived for S3, DynamoDB (tables,
   indexes, and Streams), SQS, SNS, Lambda, SSM Parameter Store, CloudWatch Logs,
   Kinesis, Bedrock, Secrets Manager, KMS, STS, IAM, EventBridge (including
   per-entry `PutEvents` bus names and Pipes), Step Functions, Cognito IDP, ECR,
@@ -379,7 +404,8 @@ examples/      a project the action is tested against
   and otherwise report `missing_context` / fail closed.
 - No Windows build. The macOS app is not notarized.
 
-Earlier versions: [lenslet-v8.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v8.0.0),
+Earlier versions: [lenslet-v11.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v11.0.0),
+[lenslet-v8.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v8.0.0),
 [lenslet-v7.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v7.0.0),
 [lenslet-v6.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v6.0.0),
 [lenslet-v5.0.0](https://github.com/hxddh/lenslet/tree/lenslet-v5.0.0),
