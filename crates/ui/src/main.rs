@@ -518,9 +518,30 @@ mod tests {
     #[test]
     fn every_command_binding_has_a_ctrl_twin_off_macos() {
         let bindings = key_bindings();
+        // The cap is on Lenslet's own shortcuts; macOS's standard window keys
+        // (Hide, Hide Others, Minimize, Full Screen) are platform conventions.
+        let platform = [
+            "HideApp",
+            "HideOthers",
+            "MinimizeWindow",
+            "ToggleFullScreen",
+        ];
+        for (action, name) in [
+            (gpui::Action::name(&HideApp), "HideApp"),
+            (gpui::Action::name(&HideOthers), "HideOthers"),
+            (gpui::Action::name(&MinimizeWindow), "MinimizeWindow"),
+            (gpui::Action::name(&ToggleFullScreen), "ToggleFullScreen"),
+        ] {
+            assert!(action.ends_with(name), "{action}");
+        }
         let cmd = bindings
             .iter()
             .filter(|b| b.keystrokes()[0].modifiers().platform)
+            .filter(|b| {
+                !platform
+                    .iter()
+                    .any(|name| b.action().name().ends_with(name))
+            })
             .count();
         if !cfg!(target_os = "macos") {
             let ctrl = bindings
