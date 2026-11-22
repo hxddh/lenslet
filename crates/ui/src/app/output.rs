@@ -1,5 +1,5 @@
 //! The Output drawer at the bottom of Calls (⌘J): the run's facts on one line
-//! and its stdout/stderr.
+//! and the test command's combined output (`<run>.log`), tailed.
 //!
 //! The highlighted log is built on the background executor, only while the
 //! drawer is open, and at most once per [`BUILD_EVERY`]; a closed drawer costs
@@ -137,7 +137,7 @@ impl OutputView {
             self.dirty = true;
             return;
         }
-        let log = self.session.read(cx).console_log.clone();
+        let log = self.session.read(cx).log.clone();
         if self
             .built_from
             .as_ref()
@@ -195,26 +195,18 @@ impl Render for OutputView {
             match run.report.as_ref() {
                 Some(rep) => {
                     facts.push(match rep.exit_code {
-                        Some(code) => format!("exit {code}"),
+                        Some(code) => ui.tr(&crate::tr!("exit {code}", "退出码 {code}")).into(),
                         None => ui.t("ended", "已结束").into(),
                     });
                     facts.push(format_latency(rep.duration_ms));
                 }
                 None => facts.push(ui.t("running", "运行中").into()),
             }
-            if let Some(emulator) = h.emulator.as_deref() {
-                facts.push(emulator.to_string());
-            } else if !h.upstream.is_empty() {
-                facts.push(h.upstream.clone());
-            }
-            if h.enforce {
+            if let Some(emulator) = crate::model::emulator_name(h) {
                 facts.push(
-                    ui.t("blocking calls outside the lock", "拦截 lock 之外的调用")
+                    ui.tr(&crate::tr!("against {emulator}", "模拟器：{emulator}"))
                         .into(),
                 );
-            }
-            if h.allow_docker {
-                facts.push(ui.t("Docker allowed", "允许 Docker").into());
             }
             let stats = session.store.stats();
             facts.push(i18n::calls_count(stats.total, ui.lang));
@@ -253,11 +245,8 @@ impl Render for OutputView {
                 .on_click(move |_, _, cx| log_view.update(cx, |b, cx| b.copy(cx))),
         );
 
-        let empty = session.health == Health::Missing || session.console_log.is_empty();
-        let placeholder = ui.t(
-            "No output for this run. Runs started with ▶ show their stdout and stderr here.",
-            "此运行没有输出。通过 ▶ 启动的运行会在这里显示 stdout 与 stderr。",
-        );
+        let empty = session.health == Health::Missing || session.log.is_empty();
+        let placeholder = ui.t("No output recorded for this run.", "此运行没有记录输出。");
         div()
             .id("output-drawer")
             .key_context("Output")

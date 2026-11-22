@@ -1,14 +1,12 @@
 //! The run being shown and everything derived from it.
 //!
 //! `Session` is a model entity: it owns the call store, the run header and
-//! report, the lock, the baseline comparison, findings and the run list. All
-//! IO happens on the background executor; results are applied with
+//! report, the lock, the failure findings, the output log and the run list.
+//! All IO happens on the background executor; results are applied with
 //! `this.update`, guarded by a generation counter so a stale load (the user
-//! already switched runs) is dropped. Views subscribe to [`SessionEvent`]s and
-//! re-render only for what they show.
+//! already switched runs) is dropped. Views subscribe to [`SessionEvent`]s.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -16,26 +14,23 @@ use std::{
 
 use futures::StreamExt;
 use gpui::{Context, EventEmitter, Task};
-use lenslet_core::{
-    findings::Finding,
-    lock::{Decision, Gate, Lock, RequestContext},
-    summary::{Report, RunDiff},
-};
 
 use crate::{
-    demo,
-    feed::{self, FeedMode, FeedMsg, LoadResult, Loaded, RunSummary, Source},
+    feed::{self, FeedMsg, LoadResult, Loaded, RunGroup, RunSummary, Source},
     i18n::Tr,
     lockfile,
-    model::{Access, RunInfo, Trace},
-    store::{AccessBaseline, AccessRow, CallStore, ChangeSet, Delta, access_rows},
+    model::{
+        self, Access, Finding, LockView, RunInfo, Trace, lock_path, project_dir, report_access,
+    },
+    store::{AccessRow, CallStore, access_rows, not_in_lock_count},
     tr,
 };
 
 /// Live findings are recomputed at most this often.
 const FINDINGS_THROTTLE: Duration = Duration::from_millis(1_500);
-/// How often a session that follows the newest run looks for a newer one.
-const NEWEST_RUN_POLL: Duration = Duration::from_secs(2);
+/// How often a session that follows the newest run looks for a newer one,
+/// and a live run's log is re-read.
+const POLL: Duration = Duration::from_millis(1_000);
 /// Live batches are applied at most once per frame.
 const FRAME: Duration = Duration::from_millis(16);
 
@@ -44,182 +39,88 @@ pub enum Health {
     Loading,
     /// No run file yet.
     Missing,
-    Error(String),
+    Error(Tr),
     Ready,
-}
-
-/// What the current run is compared with.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Baseline {
-    Lock,
-    Previous,
-    Run(PathBuf),
 }
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
     /// A different run (or the first one) is shown; everything was replaced.
     RunChanged,
-    /// Rows were added or replaced.
-    Rows(Delta),
-    /// Access rows, changes, diff, lock or findings were recomputed.
+    /// Rows were appended or moved.
+    Rows(crate::store::Delta),
+    /// The lock, access rows or findings were recomputed.
     Derived,
     /// The run list was refreshed.
     Runs,
-    /// The run's stdout/stderr changed.
+    /// The output log changed.
     Log,
-    /// Something to tell the user.
     Toast(Tr),
 }
 
 pub struct Session {
     pub source: Source,
-    pub demo: bool,
     generation: u64,
     pub health: Health,
     pub path: Option<PathBuf>,
     pub run: Option<RunInfo>,
     pub store: CallStore,
-    pub feed_mode: Option<FeedMode>,
     pub skipped: usize,
     pub evicted: usize,
-    pub console_log: Arc<str>,
-    pub workspace_fallback: Option<PathBuf>,
+    /// The folder to use when no run names one (the opened project).
+    pub project: Option<PathBuf>,
     feed_task: Option<Task<()>>,
     log_task: Option<Task<()>>,
     _watch_task: Option<Task<()>>,
 
-    pub lock_path: Option<PathBuf>,
-    pub lock: Option<Lock>,
-    pub baseline: Baseline,
-    /// The finished run the baseline resolves to (not for `Lock`).
-    pub baseline_run: Option<(PathBuf, Report)>,
-    pub diff: Option<RunDiff>,
-    pub changes: ChangeSet,
+    pub lock: LockView,
     pub access_rows: Arc<Vec<AccessRow>>,
-    pub sim_policy: Option<(String, Arc<Gate>)>,
-    pub sim_decisions: Arc<BTreeMap<Access, Decision>>,
-    pub findings: Arc<Vec<Finding>>,
+    pub not_in_lock: usize,
+    /// The run's failure findings (the report's, or computed while live).
+    pub failures: Arc<Vec<Finding>>,
     findings_running: bool,
     findings_dirty: bool,
     findings_at: Option<Instant>,
+
+    pub log: Arc<str>,
+    pub log_path: Option<PathBuf>,
+
     pub runs: Arc<Vec<RunSummary>>,
-    /// `runs` grouped by project, computed with the list (never in render).
-    pub run_groups: Arc<Vec<feed::RunGroup>>,
+    pub run_groups: Arc<Vec<RunGroup>>,
 }
 
 impl EventEmitter<SessionEvent> for Session {}
 
 impl Session {
-    pub fn new(source: Source, demo: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(source: Source, project: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let mut session = Session {
             source,
-            demo,
             generation: 0,
             health: Health::Loading,
             path: None,
             run: None,
             store: CallStore::default(),
-            feed_mode: None,
             skipped: 0,
             evicted: 0,
-            console_log: Arc::from(""),
-            workspace_fallback: None,
+            project,
             feed_task: None,
             log_task: None,
             _watch_task: None,
-            lock_path: None,
-            lock: None,
-            baseline: Baseline::Lock,
-            baseline_run: None,
-            diff: None,
-            changes: ChangeSet::default(),
+            lock: LockView::default(),
             access_rows: Arc::new(Vec::new()),
-            sim_policy: None,
-            sim_decisions: Arc::new(BTreeMap::new()),
-            findings: Arc::new(Vec::new()),
+            not_in_lock: 0,
+            failures: Arc::new(Vec::new()),
             findings_running: false,
             findings_dirty: false,
             findings_at: None,
+            log: Arc::from(""),
+            log_path: None,
             runs: Arc::new(Vec::new()),
             run_groups: Arc::new(Vec::new()),
         };
-        if demo {
-            let run = demo::demo_run();
-            let calls = demo::demo_rows();
-            session.run = Some(run);
-            session.console_log = Arc::from(demo::LOG);
-            session.store.reset(calls);
-            session.health = Health::Ready;
-            session.recompute(cx);
-            session.schedule_findings(cx);
-        } else {
-            session.reload(cx);
-            session._watch_task = Some(session.watch_newest(cx));
-        }
+        session.reload(cx);
+        session._watch_task = Some(session.watch_newest(cx));
         session
-    }
-
-    pub fn set_workspace_fallback(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.workspace_fallback != dir {
-            self.workspace_fallback = dir;
-            self.refresh_lock(cx);
-            cx.notify();
-        }
-    }
-
-    /// Switch into the interactive sample run in one click (no `LENSLET_DEMO=1` needed).
-    pub fn enter_demo(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
-        self.generation += 1;
-        self.demo = true;
-        self.feed_task = None;
-        self.log_task = None;
-        self.feed_mode = None;
-        self.path = None;
-        self.evicted = 0;
-        self.skipped = 0;
-        self.console_log = Arc::from(demo::LOG);
-        let run = demo::demo_run();
-        let calls = demo::demo_rows();
-        self.run = Some(run);
-        self.store.reset(calls);
-        self.health = Health::Ready;
-        self.lock_path = None;
-        self.lock = None;
-        self.baseline_run = None;
-        self.diff = None;
-        cx.emit(SessionEvent::RunChanged);
-        self.recompute(cx);
-        self.schedule_findings(cx);
-        cx.notify();
-    }
-
-    /// Exit interactive demo mode back to the user's real runs directory.
-    pub fn exit_demo(&mut self, cx: &mut Context<Self>) {
-        if !self.demo {
-            return;
-        }
-        self.demo = false;
-        self.store.reset(Vec::new());
-        self.run = None;
-        self.path = None;
-        self.diff = None;
-        self.console_log = Arc::from("");
-        self.findings = Arc::new(Vec::new());
-        self.access_rows = Arc::new(Vec::new());
-        if self._watch_task.is_none() {
-            self._watch_task = Some(self.watch_newest(cx));
-        }
-        cx.emit(SessionEvent::RunChanged);
-        self.reload(cx);
-    }
-
-    pub fn is_live(&self) -> bool {
-        self.run.as_ref().is_some_and(|run| run.report.is_none())
-            && matches!(self.feed_mode, Some(FeedMode::Push | FeedMode::Tail))
     }
 
     pub fn header_endpoint(&self) -> Option<&str> {
@@ -229,41 +130,30 @@ impl Session {
             .filter(|endpoint| !endpoint.is_empty())
     }
 
-    pub fn run_start_ms(&self) -> Option<i64> {
+    /// The project folder: the shown run's, else the opened one.
+    pub fn project_dir(&self) -> Option<PathBuf> {
         self.run
             .as_ref()
-            .and_then(|run| crate::model::parse_rfc3339_ms(&run.header.started))
-            .or_else(|| self.store.rows().first().and_then(|row| row.at_ms()))
+            .and_then(|run| project_dir(&run.header))
+            .or_else(|| self.project.clone())
     }
 
-    pub fn run_span_ms(&self) -> i64 {
-        if let Some(report) = self
-            .run
-            .as_ref()
-            .and_then(|run| run.report.as_ref())
-            .filter(|report| report.duration_ms > 0)
-        {
-            return report.duration_ms as i64;
+    pub fn set_project(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.project != dir {
+            self.project = dir;
+            self.refresh_lock(cx);
+            cx.notify();
         }
-        let Some(start) = self.run_start_ms() else {
-            return 1;
-        };
-        let end = self.store.max_end_ms().unwrap_or(start + 1);
-        (end - start).max(1)
     }
 
     // -- Loading -----------------------------------------------------------
 
     /// Load the source again from scratch (off the main thread).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         self.generation += 1;
         let generation = self.generation;
         self.feed_task = None;
         self.log_task = None;
-        self.feed_mode = None;
         self.health = Health::Loading;
         cx.notify();
         let source = self.source.clone();
@@ -284,33 +174,33 @@ impl Session {
 
     /// Show another source (a picked run, or back to following the newest).
     pub fn switch(&mut self, source: Source, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         self.source = source;
-        self.store.reset(Vec::new());
-        self.run = None;
-        self.path = None;
-        self.diff = None;
-        self.findings = Arc::new(Vec::new());
-        self.access_rows = Arc::new(Vec::new());
+        self.clear();
         cx.emit(SessionEvent::RunChanged);
         self.reload(cx);
+    }
+
+    fn clear(&mut self) {
+        self.store.reset(Vec::new(), 0);
+        self.run = None;
+        self.path = None;
+        self.failures = Arc::new(Vec::new());
+        self.access_rows = Arc::new(Vec::new());
+        self.not_in_lock = 0;
+        self.log = Arc::from("");
+        self.log_path = None;
     }
 
     fn apply_load(&mut self, result: LoadResult, cx: &mut Context<Self>) {
         match result {
             LoadResult::Missing => {
+                self.clear();
                 self.health = Health::Missing;
-                self.path = None;
-                self.run = None;
-                self.evicted = 0;
-                self.console_log = Arc::from("");
-                self.store.reset(Vec::new());
                 self.refresh_lock(cx);
                 cx.emit(SessionEvent::RunChanged);
             }
             LoadResult::Error(error) => {
+                self.clear();
                 self.health = Health::Error(error);
                 cx.emit(SessionEvent::RunChanged);
             }
@@ -328,114 +218,37 @@ impl Session {
 
     fn install_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
         let path_changed = self.path.as_ref() != Some(&loaded.path);
+        let run = RunInfo {
+            header: loaded.header.unwrap_or_default(),
+            report: loaded.report,
+        };
+        self.log_path = Some(model::log_path(&run, &loaded.path));
         self.path = Some(loaded.path);
         self.skipped = loaded.skipped;
         self.evicted = loaded.evicted;
-        self.run = Some(RunInfo {
-            header: loaded.header.unwrap_or_default(),
-            report: loaded.report,
-        });
-        self.store
-            .reset_with_cap(loaded.calls, loaded.unbounded, loaded.evicted);
+        self.run = Some(run);
+        self.store.reset(loaded.calls, loaded.evicted);
         self.health = Health::Ready;
-        self.findings = Arc::new(Vec::new());
+        self.failures = Arc::new(Vec::new());
         self.findings_at = None;
         if path_changed {
-            self.baseline_run = None;
-            self.console_log = Arc::from("");
+            self.log = Arc::from("");
         }
         cx.emit(SessionEvent::RunChanged);
         self.refresh_lock(cx);
-        self.refresh_console_log(cx);
-        self.resolve_baseline(cx);
+        self.refresh_log(None, cx);
         self.recompute(cx);
         self.schedule_findings(cx);
     }
 
-    /// Re-load the current trace file without the 5,000-row rolling window cap.
-    pub fn load_all_calls(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
-        let Some(path) = self.path.clone() else {
-            return;
-        };
-        let generation = self.generation;
-        cx.spawn(async move |this, cx| {
-            let res = cx
-                .background_executor()
-                .spawn(async move { feed::load_unbounded(&path) })
-                .await;
-            this.update(cx, |session, cx| {
-                if session.generation != generation {
-                    return;
-                }
-                if let LoadResult::Loaded(loaded) = res {
-                    let count = loaded.calls.len();
-                    session.install_loaded(*loaded, cx);
-                    let msg = tr!(
-                        "Loaded all {count} calls from the run file",
-                        "已加载全部 {count} 条调用记录"
-                    );
-                    cx.emit(SessionEvent::Toast(msg));
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Read companion stdout/stderr `.log` file for the active run on the background executor.
-    pub fn refresh_console_log(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
-        let log_path = self
-            .run
-            .as_ref()
-            .and_then(|r| r.header.log.as_deref())
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| self.path.as_deref().map(lenslet_core::runs::log_path_for));
-        let Some(log_path) = log_path else {
-            return;
-        };
-        let generation = self.generation;
-        cx.spawn(async move |this, cx| {
-            let text = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::daemon::read_run_log(&log_path, crate::daemon::MAX_LOG_BYTES)
-                })
-                .await;
-            this.update(cx, |session, cx| {
-                if session.generation == generation {
-                    let next = text.unwrap_or_default();
-                    if session.console_log.as_ref() != next {
-                        session.console_log = Arc::from(next);
-                        cx.emit(SessionEvent::Log);
-                    }
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Keep the run current: event stream when live, file tail otherwise, plus
-    /// independent companion `.log` tailing so stdout/stderr updates even when
-    /// no AWS calls are made.
+    /// Keep a live run current with the file tail, and its log with a poll.
     fn start_feed(&mut self, path: PathBuf, tail: feed::TailState, cx: &mut Context<Self>) {
-        let ended = self.run.as_ref().is_none_or(|run| run.report.is_some());
-        if ended {
-            self.feed_mode = Some(FeedMode::Done);
-            self.log_task = None;
+        if self.run.as_ref().is_none_or(|run| run.report.is_some()) {
             return;
         }
-        let endpoint = self.header_endpoint().map(str::to_string);
         let generation = self.generation;
-        self.log_task = Some(Self::spawn_live_log_poller(generation, cx));
-        let mut rx = feed::start(path, endpoint, tail);
+        self.log_task = Some(self.poll_log(generation, cx));
+        let mut rx = feed::start(path, tail);
         self.feed_task = Some(cx.spawn(async move |this, cx| {
             while let Some(first) = rx.next().await {
                 let mut batch = vec![first];
@@ -457,71 +270,7 @@ impl Session {
         }));
     }
 
-    fn spawn_live_log_poller(generation: u64, cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            let mut last_len: Option<u64> = None;
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(250))
-                    .await;
-                let Ok(Some(log_path)) = this.update(cx, |session, _| {
-                    if session.generation != generation
-                        || session.feed_mode == Some(FeedMode::Done)
-                        || session.run.as_ref().is_none_or(|r| r.report.is_some())
-                    {
-                        return None;
-                    }
-                    session
-                        .run
-                        .as_ref()
-                        .and_then(|r| r.header.log.as_deref())
-                        .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                        .or_else(|| {
-                            session
-                                .path
-                                .as_deref()
-                                .map(lenslet_core::runs::log_path_for)
-                        })
-                }) else {
-                    break;
-                };
-                let polled = cx
-                    .background_executor()
-                    .spawn(async move {
-                        crate::fsguard::assert_io_allowed();
-                        let len = std::fs::metadata(&log_path).ok()?.len();
-                        if Some(len) == last_len {
-                            return Some((len, None));
-                        }
-                        let text =
-                            crate::daemon::read_run_log(&log_path, crate::daemon::MAX_LOG_BYTES);
-                        Some((len, text))
-                    })
-                    .await;
-                if let Some((len, maybe_text)) = polled {
-                    last_len = Some(len);
-                    if let Some(next) = maybe_text {
-                        let gone = this
-                            .update(cx, |session, cx| {
-                                if session.generation == generation
-                                    && session.console_log.as_ref() != next
-                                {
-                                    session.console_log = Arc::from(next);
-                                    cx.emit(SessionEvent::Log);
-                                }
-                            })
-                            .is_err();
-                        if gone {
-                            break;
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    /// Apply one frame's worth of feed messages.
+    /// Apply one frame's worth of tail messages.
     fn apply_feed(&mut self, batch: Vec<FeedMsg>, cx: &mut Context<Self>) {
         let mut calls: Vec<Trace> = Vec::new();
         let mut ended = false;
@@ -543,10 +292,6 @@ impl Session {
                     calls.clear();
                     self.install_loaded(*loaded, cx);
                 }
-                FeedMsg::Mode(mode) => {
-                    self.feed_mode = Some(mode);
-                    cx.notify();
-                }
                 FeedMsg::Error(error) => {
                     self.health = Health::Error(error);
                     cx.notify();
@@ -554,9 +299,6 @@ impl Session {
             }
         }
         if !calls.is_empty() {
-            if self.health != Health::Ready {
-                self.health = Health::Ready;
-            }
             let delta = self.store.ingest(calls);
             self.evicted = self.evicted.max(self.store.evicted_total());
             if delta.changed {
@@ -564,35 +306,100 @@ impl Session {
                 self.recompute(cx);
                 self.schedule_findings(cx);
             }
-            self.refresh_console_log(cx);
         }
         if ended {
-            self.feed_mode = Some(FeedMode::Done);
+            self.feed_task = None;
             self.log_task = None;
-            self.refresh_console_log(cx);
+            self.refresh_log(None, cx);
             self.refresh_runs(cx);
-            self.recompute(cx);
+            self.refresh_lock(cx);
             self.findings_at = None;
             self.schedule_findings(cx);
             cx.notify();
         }
     }
 
+    // -- The output log ------------------------------------------------------
+
+    /// Re-read the log (only when its length changed) in the background.
+    fn refresh_log(&mut self, known_len: Option<u64>, cx: &mut Context<Self>) {
+        let Some(path) = self.log_path.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move { feed::read_log(&path, known_len) })
+                .await;
+            this.update(cx, |session, cx| {
+                if session.generation == generation
+                    && let Some((_, Some(text))) = read
+                    && *session.log != *text
+                {
+                    session.log = Arc::from(text);
+                    cx.emit(SessionEvent::Log);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn poll_log(&self, generation: u64, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut known: Option<u64> = None;
+            loop {
+                cx.background_executor().timer(POLL).await;
+                let Ok(Some(path)) = this.update(cx, |session, _| {
+                    (session.generation == generation)
+                        .then(|| session.log_path.clone())
+                        .flatten()
+                }) else {
+                    break;
+                };
+                let read = cx
+                    .background_executor()
+                    .spawn(async move { feed::read_log(&path, known) })
+                    .await;
+                let Some((len, text)) = read else {
+                    continue;
+                };
+                known = Some(len);
+                if let Some(text) = text {
+                    let gone = this
+                        .update(cx, |session, cx| {
+                            if session.generation == generation {
+                                session.log = Arc::from(text);
+                                cx.emit(SessionEvent::Log);
+                            }
+                        })
+                        .is_err();
+                    if gone {
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    // -- Runs ----------------------------------------------------------------
+
     /// While following the newest run, switch when a newer one appears.
     fn watch_newest(&mut self, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(NEWEST_RUN_POLL).await;
-                let Ok(Some(dir)) = this.update(cx, |session, _| {
+                cx.background_executor().timer(POLL).await;
+                let Ok(dir) = this.update(cx, |session, _| {
                     session
                         .source
                         .follows_latest()
                         .then(|| session.source.runs_dir().map(Path::to_path_buf))
                         .flatten()
                 }) else {
-                    if this.upgrade().is_none() {
-                        break;
-                    }
+                    break;
+                };
+                let Some(dir) = dir else {
                     continue;
                 };
                 let newest = cx
@@ -601,11 +408,11 @@ impl Session {
                     .await;
                 let gone = this
                     .update(cx, |session, cx| {
-                        let stale = newest.is_some()
+                        let newer = newest.is_some()
                             && newest != session.path
                             && session.source.follows_latest()
                             && session.health != Health::Loading;
-                        if stale {
+                        if newer {
                             session.reload(cx);
                         }
                     })
@@ -617,14 +424,12 @@ impl Session {
         })
     }
 
-    // -- Runs, lock and baseline -------------------------------------------
-
     pub fn refresh_runs(&mut self, cx: &mut Context<Self>) {
-        let Some(dir) = self.runs_dir() else {
+        let Some(dir) = self.source.runs_dir().map(Path::to_path_buf) else {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let runs = cx
+            let (runs, groups) = cx
                 .background_executor()
                 .spawn(async move {
                     let runs = feed::list_runs(&dir);
@@ -632,14 +437,10 @@ impl Session {
                     (runs, groups)
                 })
                 .await;
-            let (runs, groups) = runs;
             this.update(cx, |session, cx| {
                 session.runs = Arc::new(runs);
                 session.run_groups = Arc::new(groups);
                 cx.emit(SessionEvent::Runs);
-                if session.baseline == Baseline::Previous {
-                    session.resolve_baseline(cx);
-                }
                 cx.notify();
             })
             .ok();
@@ -647,261 +448,66 @@ impl Session {
         .detach();
     }
 
-    pub fn runs_dir(&self) -> Option<PathBuf> {
-        if self.demo {
-            return None;
+    /// Step to an older (`-1`) or newer (`+1`) run in the run list.
+    pub fn step_run(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(dir) = self.source.runs_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        // `runs` is newest first; step through it oldest first.
+        let paths: Vec<PathBuf> = self.runs.iter().rev().map(|r| r.path.clone()).collect();
+        let Some(current) = self
+            .path
+            .as_ref()
+            .and_then(|path| paths.iter().position(|p| p == path))
+        else {
+            return;
+        };
+        let target = (current as isize + delta).clamp(0, paths.len() as isize - 1) as usize;
+        if target == current {
+            return;
         }
-        match &self.source {
-            Source::Runs { dir, .. } => Some(dir.clone()),
-            Source::File(path) => path.parent().map(Path::to_path_buf),
-        }
+        let pinned = (target + 1 < paths.len()).then(|| paths[target].clone());
+        self.switch(Source::Runs { dir, pinned }, cx);
     }
+
+    /// Follow the newest run in the runs directory.
+    pub fn follow_newest(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .source
+            .runs_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| lenslet_core::runs::dir(&super::home()));
+        self.switch(Source::Runs { dir, pinned: None }, cx);
+    }
+
+    // -- The lock and what is derived from it ----------------------------------
 
     /// Re-read the lock file in the background.
     pub fn refresh_lock(&mut self, cx: &mut Context<Self>) {
-        self.lock_path = if self.demo {
-            None
-        } else {
-            self.run
-                .as_ref()
-                .and_then(|run| lockfile::lock_path(&run.header))
-                .or_else(|| {
-                    self.workspace_fallback
-                        .as_ref()
-                        .filter(|d| d.is_dir())
-                        .map(|d| d.join("lenslet.lock"))
-                })
-        };
-        let Some(path) = self.lock_path.clone() else {
-            self.lock = None;
+        let path = self
+            .run
+            .as_ref()
+            .and_then(|run| lock_path(&run.header))
+            .or_else(|| self.project.as_deref().map(lenslet_core::lock::path_in));
+        let Some(path) = path else {
+            self.lock = LockView::default();
             self.recompute(cx);
             return;
         };
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
+            let read_path = path.clone();
             let lock = cx
                 .background_executor()
-                .spawn(async move { lockfile::read(&path).ok().flatten() })
+                .spawn(async move { lockfile::read(&read_path).ok().flatten() })
                 .await;
             this.update(cx, |session, cx| {
                 if session.generation == generation {
-                    session.lock = lock;
-                    session.recompute(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub fn set_baseline(&mut self, baseline: Baseline, cx: &mut Context<Self>) {
-        if self.baseline != baseline {
-            self.baseline = baseline;
-            self.baseline_run = None;
-            self.resolve_baseline(cx);
-            self.recompute(cx);
-        }
-    }
-
-    /// The run the "previous run" baseline means: the newest finished run
-    /// before this one, preferring the same command in the same directory.
-    pub fn previous_run(&self) -> Option<&RunSummary> {
-        let current = self.path.as_deref()?;
-        let header = self.run.as_ref().map(|run| &run.header);
-        let earlier = || {
-            self.runs
-                .iter()
-                .filter(move |run| run.ended() && run.path.as_path() < current)
-        };
-        earlier()
-            .find(|run| {
-                header.is_some_and(|h| {
-                    run.header
-                        .as_ref()
-                        .is_some_and(|rh| rh.command == h.command && rh.cwd == h.cwd)
-                })
-            })
-            .or_else(|| earlier().next())
-    }
-
-    fn resolve_baseline(&mut self, cx: &mut Context<Self>) {
-        let path = match &self.baseline {
-            Baseline::Lock => {
-                self.baseline_run = None;
-                return;
-            }
-            Baseline::Previous => match self.previous_run() {
-                Some(run) => run.path.clone(),
-                None => {
-                    self.baseline_run = None;
-                    return;
-                }
-            },
-            Baseline::Run(path) => path.clone(),
-        };
-        if self
-            .baseline_run
-            .as_ref()
-            .is_some_and(|(loaded, _)| *loaded == path)
-        {
-            return;
-        }
-        // The run list already holds finished runs' reports.
-        if let Some(report) = self
-            .runs
-            .iter()
-            .find(|run| run.path == path)
-            .and_then(|run| run.report.clone())
-        {
-            self.baseline_run = Some((path, report));
-            self.recompute(cx);
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let target = path.clone();
-            let report = cx
-                .background_executor()
-                .spawn(async move { feed::read_report(&target) })
-                .await;
-            this.update(cx, |session, cx| {
-                if let Some(report) = report {
-                    session.baseline_run = Some((path, report));
-                    session.recompute(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Recompute access rows, changes and the diff from what is in memory.
-    /// No IO: runs when inputs change, never in render.
-    pub fn recompute(&mut self, cx: &mut Context<Self>) {
-        let report = self.run.as_ref().and_then(|run| run.report.as_ref());
-        let lock = self.lock.as_ref();
-        let live_lock = lock.map(|l| Arc::new(l.access.clone()));
-        match (&self.baseline, self.baseline_run.as_ref()) {
-            (Baseline::Lock, _) | (_, None) => {
-                self.diff = None;
-                self.changes = ChangeSet {
-                    new_failures: Arc::new(BTreeSet::new()),
-                    new_access: true,
-                    live_lock,
-                };
-                // O(permissions), not O(calls): cumulative_access_entries keeps
-                // early permissions even if >5,000 live calls roll over the window.
-                let live;
-                let used = match report {
-                    Some(report) => &report.access,
-                    None => {
-                        live = if self.store.rows().len() < crate::model::MAX_ROWS {
-                            self.store.access_entries()
-                        } else {
-                            self.store.cumulative_access_entries()
-                        };
-                        &live
-                    }
-                };
-                self.access_rows = Arc::new(access_rows(used, lock, AccessBaseline::Lock(lock)));
-            }
-            (_, Some((_, base))) => {
-                let live;
-                let target: &Report = match report {
-                    Some(report) => report,
-                    None => {
-                        let run_id = self
-                            .run
-                            .as_ref()
-                            .map(|run| run.header.run.clone())
-                            .unwrap_or_default();
-                        live = self.store.live_report(&run_id);
-                        &live
-                    }
-                };
-                let diff = RunDiff::compute(base, target);
-                let base_access = base.access_set();
-                self.changes = ChangeSet {
-                    new_failures: Arc::new(diff.new_failures.iter().cloned().collect()),
-                    new_access: false,
-                    live_lock: None,
-                };
-                self.access_rows = Arc::new(access_rows(
-                    &target.access,
-                    lock,
-                    AccessBaseline::Run(&base_access),
-                ));
-                self.diff = Some(diff);
-            }
-        }
-        if self.sim_policy.is_some() {
-            self.recompute_sim_decisions();
-        }
-        cx.emit(SessionEvent::Derived);
-        cx.notify();
-    }
-
-    fn recompute_sim_decisions(&mut self) {
-        let Some((_, gate)) = self.sim_policy.as_ref() else {
-            self.sim_decisions = Arc::new(BTreeMap::new());
-            return;
-        };
-        let mut map = BTreeMap::new();
-        for row in self.access_rows.iter() {
-            let sample = self
-                .store
-                .rows()
-                .iter()
-                .find(|c| !c.pending && c.uses(&row.access))
-                .map(|c| c.to_core_with_request_body());
-            let decision = match sample {
-                Some(core_trace) => {
-                    let base_ctx = RequestContext::from_trace(&core_trace);
-                    let ctx = if row.implied {
-                        base_ctx.for_implied(
-                            &core_trace.service,
-                            core_trace.region.as_deref(),
-                            &row.access.action,
-                        )
-                    } else {
-                        base_ctx
+                    session.lock = LockView {
+                        path: Some(path),
+                        lock: lock.map(Arc::new),
                     };
-                    gate.decide(&row.access, Some(&ctx))
-                }
-                None => gate.decide(&row.access, None),
-            };
-            map.insert(row.access.clone(), decision);
-        }
-        self.sim_decisions = Arc::new(map);
-    }
-
-    /// Load an external IAM policy JSON file to simulate against this run's permissions.
-    pub fn load_sim_policy(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let label = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("policy.json")
-            .to_string();
-        let gate_label = label.clone();
-        cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::fsguard::assert_io_allowed();
-                    Gate::from_policy_file_simulating(&path, gate_label)
-                })
-                .await;
-            this.update(cx, |session, cx| match loaded {
-                Ok(gate) => {
-                    session.sim_policy = Some((label.clone(), Arc::new(gate)));
-                    session.recompute_sim_decisions();
-                    let msg = tr!("Simulated against {label}", "已加载策略模拟：{label}");
-                    cx.emit(SessionEvent::Toast(msg));
-                    cx.emit(SessionEvent::Derived);
-                    cx.notify();
-                }
-                Err(error) => {
-                    let msg = tr!("Invalid IAM policy: {error}", "无效的 IAM 策略：{error}");
-                    cx.emit(SessionEvent::Toast(msg));
+                    session.recompute(cx);
                 }
             })
             .ok();
@@ -909,23 +515,24 @@ impl Session {
         .detach();
     }
 
-    pub fn clear_sim_policy(&mut self, cx: &mut Context<Self>) {
-        self.sim_policy = None;
-        self.sim_decisions = Arc::new(BTreeMap::new());
+    /// Recompute the access rows from what is in memory. No IO.
+    pub fn recompute(&mut self, cx: &mut Context<Self>) {
+        let used = match self.run.as_ref().and_then(|run| run.report.as_ref()) {
+            Some(report) => report_access(report),
+            None => self.store.access(),
+        };
+        let rows = access_rows(&used, &self.lock);
+        self.not_in_lock = not_in_lock_count(&rows);
+        self.access_rows = Arc::new(rows);
         cx.emit(SessionEvent::Derived);
         cx.notify();
     }
 
-    /// Findings: the report's when the run ended, else computed from the calls
-    /// off the main thread, at most every [`FINDINGS_THROTTLE`] while live.
+    /// Failure findings: the report's when the run ended, else computed from
+    /// the calls off the main thread, at most every [`FINDINGS_THROTTLE`].
     pub fn schedule_findings(&mut self, cx: &mut Context<Self>) {
-        if let Some(report) = self
-            .run
-            .as_ref()
-            .and_then(|run| run.report.as_ref())
-            .filter(|report| !report.findings.is_empty())
-        {
-            self.findings = Arc::new(report.findings.clone());
+        if let Some(run) = self.run.as_ref().filter(|run| run.report.is_some()) {
+            self.failures = Arc::new(run.failures().into_iter().cloned().collect());
             cx.emit(SessionEvent::Derived);
             return;
         }
@@ -945,22 +552,28 @@ impl Session {
             if !wait.is_zero() {
                 cx.background_executor().timer(wait).await;
             }
-            let findings = cx
+            let failures = cx
                 .background_executor()
                 .spawn(async move {
-                    let calls: Vec<lenslet_core::trace::Trace> = rows
-                        .iter()
-                        .filter(|row| !row.pending)
-                        .map(|row| row.to_core())
-                        .collect();
-                    lenslet_core::findings::analyze(calls.iter())
+                    // The CLI's own tally, so live findings match the report.
+                    let mut summary = lenslet_core::summary::Summary::default();
+                    for row in rows.iter() {
+                        summary.observe(&row.core);
+                    }
+                    summary
+                        .findings(lenslet_core::lock::FILE_NAME)
+                        .into_iter()
+                        .filter(|f| matches!(f, Finding::Failure(_)))
+                        .collect::<Vec<_>>()
                 })
                 .await;
             this.update(cx, |session, cx| {
                 session.findings_running = false;
                 session.findings_at = Some(Instant::now());
-                if session.generation == generation {
-                    session.findings = Arc::new(findings);
+                if session.generation == generation
+                    && session.run.as_ref().is_some_and(|r| r.report.is_none())
+                {
+                    session.failures = Arc::new(failures);
                     cx.emit(SessionEvent::Derived);
                     cx.notify();
                 }
@@ -975,172 +588,81 @@ impl Session {
 
     // -- Lock edits ----------------------------------------------------------
 
-    pub fn can_edit_lock(&self) -> bool {
-        self.lock_path.is_some()
+    /// Where lock edits go: the run's lock, else the project's.
+    pub fn lock_target(&self) -> Option<PathBuf> {
+        self.lock.path.clone()
     }
 
-    /// Accept permissions into the lock (background), preserving `# implied` & `# test`.
+    /// Accept permissions into the lock (`(access, test, implied)`; the lock
+    /// itself records only `# test`).
     pub fn accept(&mut self, entries: Vec<(Access, bool, bool)>, cx: &mut Context<Self>) {
-        let Some(path) = self.lock_path.clone() else {
+        let entries: Vec<(Access, bool)> = entries
+            .into_iter()
+            .map(|(access, test, _implied)| (access, test))
+            .collect();
+        let (Some(path), false) = (self.lock_target(), entries.is_empty()) else {
             return;
         };
-        if entries.is_empty() {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { lockfile::accept_with_implied(&path, &entries) })
-                .await;
-            this.update(cx, |session, cx| {
-                let message = match result {
-                    Ok(added) => tr!(
-                        "Added {added} to lenslet.lock",
-                        "已向 lenslet.lock 写入 {added} 项权限"
-                    ),
-                    Err(error) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
-                };
-                cx.emit(SessionEvent::Toast(message));
-                session.refresh_lock(cx);
+        self.edit_lock(cx, move || {
+            lockfile::accept(&path, &entries).map(|added| {
+                tr!(
+                    "Added {added} to lenslet.lock",
+                    "已向 lenslet.lock 写入 {added} 项权限"
+                )
             })
-            .ok();
-        })
-        .detach();
+        });
     }
 
-    /// Remove permissions from `lenslet.lock` (background).
     pub fn remove_from_lock(&mut self, entries: Vec<Access>, cx: &mut Context<Self>) {
-        let Some(path) = self.lock_path.clone() else {
+        let (Some(path), false) = (self.lock_target(), entries.is_empty()) else {
             return;
         };
-        if entries.is_empty() {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { lockfile::remove(&path, &entries) })
-                .await;
-            this.update(cx, |session, cx| {
-                let message = match result {
-                    Ok(removed) => tr!(
-                        "Removed {removed} from lenslet.lock",
-                        "已从 lenslet.lock 移除 {removed} 项权限"
-                    ),
-                    Err(error) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
-                };
-                cx.emit(SessionEvent::Toast(message));
-                session.refresh_lock(cx);
+        self.edit_lock(cx, move || {
+            lockfile::remove(&path, &entries).map(|removed| {
+                tr!(
+                    "Removed {removed} from lenslet.lock",
+                    "已从 lenslet.lock 移除 {removed} 项权限"
+                )
             })
-            .ok();
-        })
-        .detach();
+        });
     }
 
     pub fn set_test_mark(&mut self, access: Access, test: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.lock_path.clone() else {
+        let Some(path) = self.lock_target() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { lockfile::set_test_mark(&path, &access, test) })
-                .await;
-            this.update(cx, |session, cx| {
-                let message = match (result, test) {
-                    (Ok(_), true) => tr!(
+        self.edit_lock(cx, move || {
+            lockfile::set_test_mark(&path, &access, test).map(|_| {
+                if test {
+                    tr!(
                         "Marked `# test` in lenslet.lock",
                         "已在 lenslet.lock 标记 `# test`"
-                    ),
-                    (Ok(_), false) => tr!(
+                    )
+                } else {
+                    tr!(
                         "Removed `# test` in lenslet.lock",
                         "已取消 lenslet.lock 中的 `# test`"
-                    ),
-                    (Err(error), _) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
-                };
+                    )
+                }
+            })
+        });
+    }
+
+    fn edit_lock(
+        &mut self,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce() -> anyhow::Result<Tr> + Send + 'static,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { edit() }).await;
+            this.update(cx, |session, cx| {
+                let message = result
+                    .unwrap_or_else(|error| tr!("lenslet.lock: {error}", "lenslet.lock：{error}"));
                 cx.emit(SessionEvent::Toast(message));
                 session.refresh_lock(cx);
             })
             .ok();
         })
         .detach();
-    }
-
-    /// Pin or unpin a run so retention pruning preserves it.
-    pub fn toggle_pin_run(&mut self, run_id: String, pinned: bool, cx: &mut Context<Self>) {
-        let Some(dir) = self.runs_dir() else {
-            return;
-        };
-        let id_for_io = run_id.clone();
-        cx.spawn(async move |this, cx| {
-            let res = cx
-                .background_executor()
-                .spawn(async move { feed::set_run_pinned(&dir, &id_for_io, pinned) })
-                .await;
-            this.update(cx, |session, cx| {
-                let msg = match (res, pinned) {
-                    (Ok(_), true) => tr!("Pinned run {run_id}", "已置顶保留运行 {run_id}"),
-                    (Ok(_), false) => tr!("Unpinned run {run_id}", "已取消置顶 {run_id}"),
-                    (Err(e), _) => tr!("Cannot pin the run: {e}", "无法置顶运行：{e}"),
-                };
-                cx.emit(SessionEvent::Toast(msg));
-                session.refresh_runs(cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Delete finished runs (background).
-    pub fn clear_finished_runs(&mut self, cx: &mut Context<Self>) {
-        let Some(dir) = self.runs_dir() else {
-            return;
-        };
-        let keep = self.path.clone();
-        cx.spawn(async move |this, cx| {
-            let removed = cx
-                .background_executor()
-                .spawn(async move { feed::clear_finished_runs(&dir, keep.as_deref()) })
-                .await;
-            this.update(cx, |session, cx| {
-                let msg = tr!(
-                    "Cleared {removed} finished runs",
-                    "已清理 {removed} 个已结束运行"
-                );
-                cx.emit(SessionEvent::Toast(msg));
-                session.refresh_runs(cx);
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Step to an older (`-1`) or newer (`+1`) run in the run list.
-    pub fn step_run(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(dir) = self.source.runs_dir().map(Path::to_path_buf) else {
-            return;
-        };
-        // `runs` is newest first.
-        let paths: Vec<PathBuf> = self.runs.iter().rev().map(|r| r.path.clone()).collect();
-        let Some(current) = self
-            .path
-            .as_ref()
-            .and_then(|path| paths.iter().position(|p| p == path))
-        else {
-            return;
-        };
-        let target = (current as isize + delta).clamp(0, paths.len() as isize - 1) as usize;
-        if target == current {
-            return;
-        }
-        let pinned = (target + 1 < paths.len()).then(|| paths[target].clone());
-        self.switch(Source::Runs { dir, pinned }, cx);
-    }
-
-    /// `(position, count)` of the shown run in the run list (1-based, oldest first).
-    pub fn run_position(&self) -> Option<(usize, usize)> {
-        let path = self.path.as_ref()?;
-        let index = self.runs.iter().position(|run| &run.path == path)?;
-        Some((self.runs.len() - index, self.runs.len()))
     }
 }

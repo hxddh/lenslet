@@ -3,13 +3,13 @@
 //!
 //! Each `corpus/*.json` file holds `cases`: the `call` (a run-file `call`
 //! line, volatile fields stripped), the footprint `access` / `implied`
-//! permissions, and optionally the `concrete` ones (what a `--policy` is
-//! evaluated against). A derivation change that alters any of them fails
+//! permissions, and optionally the `concrete` ones (what `lenslet check
+//! --policy` evaluates). A derivation change that alters any of them fails
 //! here, with every difference listed.
 
 use std::{fs, path::Path};
 
-use lenslet_core::{access, trace::Trace, wire};
+use lenslet_core::{access, trace::Trace};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -49,20 +49,6 @@ fn pairs(items: &[access::Access]) -> Vec<(String, String)> {
     )
 }
 
-/// Calls recorded before Lenslet could name their operation are named the
-/// way the proxy names them now, as a fresh recording would be.
-fn resolved(mut call: Trace) -> Trace {
-    if call.operation == call.method {
-        call.operation = wire::fallback_operation(
-            &call.service,
-            &call.method,
-            &call.path,
-            &http::HeaderMap::new(),
-        );
-    }
-    call
-}
-
 #[test]
 fn every_recorded_call_derives_exactly_the_expected_access() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
@@ -83,7 +69,7 @@ fn every_recorded_call_derives_exactly_the_expected_access() {
         for case in fixture.cases {
             cases += 1;
             services.insert(case.call.service.clone());
-            let call = resolved(case.call);
+            let call = case.call;
             let derived = access::derive_call(&call);
             let mut check =
                 |what: &str, want: Vec<(String, String)>, got: Vec<(String, String)>| {

@@ -8,7 +8,7 @@ use crate::{
     body::{self, BodyMode},
     feed::{self, LoadResult},
     model::{CallFilter, StatusFilter, format_latency, format_offset, search_tokens},
-    store::{AccessBaseline, CallStore, ViewQuery, access_rows, filter_rows},
+    store::{CallStore, ViewQuery, access_rows, filter_rows},
     testdata::{call_line, synthetic_run},
     theme,
 };
@@ -47,20 +47,23 @@ fn five_thousand_calls() {
     );
     let (merge, store) = time("store reset (index + aggregates)", 5, || {
         let mut store = CallStore::default();
-        store.reset(loaded.calls.clone());
+        store.reset(loaded.calls.clone(), 0);
         store
     });
     println!(
         "first rows ready after                         {:>9.3} ms",
         (load + merge).as_secs_f64() * 1e3
     );
-    assert_eq!(store.len(), 5_000);
+    assert_eq!(store.rows().len(), 5_000);
 
     let mut live = store.clone();
     let mut next = 5_000;
     time("append 10 live calls (incremental)", 20, || {
         let batch: Vec<_> = (next..next + 10)
-            .map(|i| crate::model::parse_line(&call_line(i, None)).unwrap())
+            .map(|i| match crate::model::parse_record(&call_line(i, None)) {
+                Some(crate::model::Record::Call(call)) => *call,
+                _ => unreachable!(),
+            })
             .collect();
         next += 10;
         live.ingest(batch)
@@ -81,10 +84,9 @@ fn five_thousand_calls() {
     });
     assert!(!hits.is_empty());
 
-    let entries = store.access_entries();
-    time("access table vs lock", 20, || {
-        access_rows(&entries, None, AccessBaseline::Lock(None))
-    });
+    let entries = store.access();
+    let lock = crate::model::LockView::default();
+    time("access table vs lock", 20, || access_rows(&entries, &lock));
 
     // What a frame does with data: format the ~40 visible rows.
     let rows = store.rows().clone();
@@ -108,7 +110,8 @@ fn five_thousand_calls() {
             "Items": (0..4_000).map(|i| serde_json::json!({"id": {"S": format!("order-{i}")}, "n": {"N": i.to_string()}})).collect::<Vec<_>>()
         }))
         .unwrap()),
-        ..Default::default()
+        ..serde_json::from_str(r#"{"bytes":0,"truncated":false,"binary":false,"sha256":""}"#)
+            .unwrap()
     };
     let (_, doc) = time("decode + highlight 300 KB body (background)", 3, || {
         body::build(

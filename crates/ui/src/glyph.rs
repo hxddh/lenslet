@@ -74,72 +74,14 @@ pub fn search_icon(color: Hsla) -> impl IntoElement {
     crate::icons::icon("icons/search.svg", 13.0, color)
 }
 
-/// Left workspace sidebar icon (`⌘0`).
-pub fn left_sidebar_icon(color: Hsla, active: bool) -> impl IntoElement {
-    let c = if active {
-        Hsla { a: 1.0, ..color }
-    } else {
-        color
-    };
-    crate::icons::icon("icons/sidebar-left.svg", 14.0, c)
-}
-
 /// Chevron down (`▾`) rendered via embedded vector SVG.
 pub fn chevron_down(color: Hsla) -> impl IntoElement {
     crate::icons::icon("icons/chevron-down.svg", 11.0, color)
 }
 
-/// Replay refresh glyph (`↻`) rendered via embedded vector SVG.
-pub fn replay_icon(color: Hsla) -> impl IntoElement {
-    crate::icons::icon("icons/refresh.svg", 12.0, color)
-}
-
 /// Hamburger menu icon (`☰`) for cross-platform non-macOS header bar.
 pub fn menu_icon(color: Hsla) -> impl IntoElement {
     crate::icons::icon("icons/menu.svg", 14.0, color)
-}
-
-/// A tiny key silhouettes whether SigV4 authorization was present.
-pub fn auth_mark(t: &theme::Palette, present: bool) -> impl IntoElement {
-    let color = if present {
-        theme::h(t.green, 0.9)
-    } else {
-        theme::h(t.text_faint, 0.65)
-    };
-    div()
-        .relative()
-        .flex_shrink_0()
-        .w(px(12.0))
-        .h(px(8.0))
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.5))
-                .w(px(5.5))
-                .h(px(5.5))
-                .rounded_full()
-                .border_1()
-                .border_color(color),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(5.0))
-                .top(px(2.5))
-                .w(px(6.5))
-                .h(px(1.0))
-                .bg(color),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(8.5))
-                .top(px(2.5))
-                .w(px(1.0))
-                .h(px(3.0))
-                .bg(color),
-        )
 }
 
 pub fn dot(color: impl Into<Hsla>, size: f32) -> impl IntoElement {

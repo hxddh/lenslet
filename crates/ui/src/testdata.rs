@@ -1,9 +1,16 @@
-//! Synthetic run files for tests and the micro benchmark.
+//! Run files for tests and the micro benchmark: a hand-written format-4 run
+//! (`testdata/run-v4.jsonl`, also the screenshot source) and synthetic ones.
 
 use std::fmt::Write as _;
 
+/// A realistic finished run: 15 calls, 2 failures, one permission not in
+/// `testdata/lenslet.lock`, a regression and a `log`.
+pub const RUN_V4: &str = include_str!("testdata/run-v4.jsonl");
+pub const LOG_V4: &str = include_str!("testdata/run-v4.log");
+pub const LOCK_V4: &str = include_str!("testdata/lenslet.lock");
+
 pub fn header_line() -> String {
-    r#"{"type":"run","version":3,"run":"20261115-094842-1","command":["npm","test"],"cwd":"/w","pid":0,"endpoint":"http://127.0.0.1:1","upstream":"http://127.0.0.1:2","started":"2026-11-15T09:00:00.000+00:00"}"#.to_string()
+    r#"{"type":"run","version":4,"run":"20261115-094842-1","command":["npm","test"],"cwd":"/w","pid":0,"endpoint":"http://127.0.0.1:1","upstream":"http://127.0.0.1:2","emulator":"moto","started":"2026-11-15T09:00:00.000+00:00"}"#.to_string()
     + "\n"
 }
 
@@ -28,17 +35,9 @@ pub fn call_line(i: usize, body: Option<&str>) -> String {
     let failing = i % 17 == 3;
     let status = if failing { 400 } else { 200 };
     let mut line = format!(
-        r#"{{"type":"call","id":"call-{i}","at":"{at}","method":"POST","path":"/{service}/item-{i}","host":"127.0.0.1:1","service":"{service}","operation":"{op}","status":{status},"ms":{},"authorization":true,"region":"us-east-1","access":[{{"action":"{service}:{op}","resource":"{resource}"{}}}]"#,
+        r#"{{"type":"call","id":"call-{i}","at":"{at}","method":"POST","path":"/{service}/item-{i}","host":"127.0.0.1:1","service":"{service}","operation":"{op}","status":{status},"ms":{},"authorization":true,"region":"us-east-1","access":[{{"action":"{service}:{op}","resource":"{resource}"}}]"#,
         3 + (i % 11) as u64 * 40,
-        if i.is_multiple_of(23) {
-            r#","new":true"#
-        } else {
-            ""
-        },
     );
-    if i.is_multiple_of(23) {
-        line.push_str(r#","new":true"#);
-    }
     if failing {
         line.push_str(r#","problem":{"code":"ValidationException","message":"One or more parameter values were invalid"}"#);
     }
@@ -67,15 +66,28 @@ pub fn synthetic_run(calls: usize, body: Option<&str>, end: bool) -> String {
         text.push('\n');
     }
     if end {
-        let report = lenslet_core::summary::Report {
-            version: 3,
-            run: "20261115-094842-1".into(),
-            calls,
-            ..Default::default()
-        };
-        let mut value = serde_json::to_value(&report).unwrap();
-        value["type"] = "end".into();
-        text.push_str(&format!("{value}\n"));
+        text.push_str(&end_line(calls));
     }
     text
+}
+
+/// A minimal `end` record for a synthetic run.
+pub fn end_line(calls: usize) -> String {
+    let report = lenslet_core::summary::Report {
+        version: crate::model::RUN_FORMAT,
+        run: "20261115-094842-1".into(),
+        calls,
+        ..Default::default()
+    };
+    let mut value = serde_json::to_value(&report).unwrap();
+    value["type"] = "end".into();
+    format!("{value}\n")
+}
+
+/// A scratch directory under the system temp dir, emptied first.
+pub fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("lenslet-ui-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }

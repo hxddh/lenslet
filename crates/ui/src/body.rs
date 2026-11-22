@@ -7,9 +7,7 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 use gpui::HighlightStyle;
 
 use crate::{
-    model::{
-        Body, decode_aws_semantic, format_bytes, format_hex_bytes, format_hex_dump, pretty_body,
-    },
+    model::{Body, decode_aws_semantic, pretty_body},
     syntax::{SyntaxKind, find_search_matches, highlight_code},
     theme::Palette,
 };
@@ -41,7 +39,6 @@ pub struct BodyDoc {
     pub spans: Vec<Spans>,
     /// The longest line, to size horizontal scrolling.
     pub widest: usize,
-    pub matches: usize,
     /// Display-line indices containing at least one search match, in ascending order.
     pub match_lines: Vec<usize>,
     /// Multi-line JSON block ranges (`open_line -> close_line`) for code folding.
@@ -126,10 +123,7 @@ impl BodyDoc {
     /// Build a document from `text` highlighted as `kind`.
     pub fn from_text(text: String, kind: SyntaxKind, tokens: &[String], p: &Palette) -> BodyDoc {
         let (spans, matches) = highlight_code(&text, kind, tokens, p);
-        let mut doc = BodyDoc {
-            matches,
-            ..BodyDoc::default()
-        };
+        let mut doc = BodyDoc::default();
         // Split into display lines.
         let mut start = 0;
         let bytes = text.as_bytes();
@@ -262,133 +256,10 @@ fn compute_json_folds(text: &str, lines: &[Range<usize>]) -> HashMap<usize, usiz
     folds
 }
 
-/// Produce a clean unified-style diff between a recorded response body and a replay body.
-pub fn diff_text(recorded: &str, replay: &str) -> String {
-    if recorded == replay {
-        return "--- recorded\n+++ replay\n@@ identical @@\n (Payloads are byte-for-byte identical)"
-            .into();
-    }
-    let a: Vec<&str> = recorded.lines().collect();
-    let b: Vec<&str> = replay.lines().collect();
-    let mut out = String::from("--- recorded\n+++ replay\n");
-
-    // Trim shared prefix & suffix first so common headers/footers cost O(N).
-    let mut prefix = 0usize;
-    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
-        prefix += 1;
-    }
-    let mut suffix = 0usize;
-    while suffix < (a.len() - prefix)
-        && suffix < (b.len() - prefix)
-        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let a_mid = &a[prefix..a.len() - suffix];
-    let b_mid = &b[prefix..b.len() - suffix];
-    out.push_str(&format!(
-        "@@ -{},{} +{},{} @@\n",
-        prefix + 1,
-        a_mid.len(),
-        prefix + 1,
-        b_mid.len()
-    ));
-
-    let ctx_before = prefix.saturating_sub(2);
-    for line in &a[ctx_before..prefix] {
-        out.push(' ');
-        out.push_str(line);
-        out.push('\n');
-    }
-
-    // Bounded LCS over the changed middle window (up to 400x400 lines).
-    if a_mid.len() * b_mid.len() <= 160_000 {
-        let n = a_mid.len();
-        let m = b_mid.len();
-        let mut dp = vec![0u16; (n + 1) * (m + 1)];
-        let idx = |i: usize, j: usize| i * (m + 1) + j;
-        for i in (0..n).rev() {
-            for j in (0..m).rev() {
-                dp[idx(i, j)] = if a_mid[i] == b_mid[j] {
-                    dp[idx(i + 1, j + 1)].saturating_add(1)
-                } else {
-                    dp[idx(i + 1, j)].max(dp[idx(i, j + 1)])
-                };
-            }
-        }
-        let (mut i, mut j) = (0usize, 0usize);
-        while i < n && j < m {
-            if a_mid[i] == b_mid[j] {
-                out.push(' ');
-                out.push_str(a_mid[i]);
-                out.push('\n');
-                i += 1;
-                j += 1;
-            } else if dp[idx(i + 1, j)] >= dp[idx(i, j + 1)] {
-                out.push('-');
-                out.push_str(a_mid[i]);
-                out.push('\n');
-                i += 1;
-            } else {
-                out.push('+');
-                out.push_str(b_mid[j]);
-                out.push('\n');
-                j += 1;
-            }
-        }
-        while i < n {
-            out.push('-');
-            out.push_str(a_mid[i]);
-            out.push('\n');
-            i += 1;
-        }
-        while j < m {
-            out.push('+');
-            out.push_str(b_mid[j]);
-            out.push('\n');
-            j += 1;
-        }
-    } else {
-        for line in a_mid {
-            out.push('-');
-            out.push_str(line);
-            out.push('\n');
-        }
-        for line in b_mid {
-            out.push('+');
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-
-    let suffix_start = a.len() - suffix;
-    for line in &a[suffix_start..(suffix_start + 2).min(a.len())] {
-        out.push(' ');
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.trim_end_matches('\n').to_string()
-}
-
-/// Build the document for a message body.
-#[cfg(test)]
+/// Build the document for a message body: decoded (pretty JSON/XML, AWS
+/// semantic decoding) or raw, hex for binary bodies.
 pub fn build(
     body: Option<&Body>,
-    content_type: &str,
-    mode: BodyMode,
-    tokens: &[String],
-    p: &Palette,
-) -> BodyDoc {
-    build_with_wire(body, None, content_type, mode, tokens, p)
-}
-
-/// Build the document for a message body, including optional lossless wire bytes
-/// (from `raw_b64` or sidecar `blob`) so `Raw` mode can show exact `aws-chunked`
-/// frames, compressed wire hex, or complete multi-KB binary dumps.
-pub fn build_with_wire(
-    body: Option<&Body>,
-    raw_wire: Option<&[u8]>,
     content_type: &str,
     mode: BodyMode,
     tokens: &[String],
@@ -397,35 +268,6 @@ pub fn build_with_wire(
     let Some(body) = body else {
         return BodyDoc::default();
     };
-    if mode == BodyMode::Raw
-        && (body.binary || body.encoding.is_some())
-        && let Some(wire) = raw_wire.filter(|w| !w.is_empty())
-    {
-        if let Ok(utf8_wire) = std::str::from_utf8(wire)
-            && !utf8_wire
-                .bytes()
-                .any(|b| matches!(b, 0x00..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F))
-        {
-            let mut doc = BodyDoc::from_text(utf8_wire.to_string(), SyntaxKind::Plain, tokens, p);
-            doc.decodable = body.text.is_some();
-            return doc;
-        }
-        let header = match (body.encoding.as_deref(), body.decoded_bytes) {
-            (Some(enc), Some(dec)) => format!(
-                "# Raw wire frame ({enc}): {} → decoded {}\n",
-                format_bytes(wire.len()),
-                format_bytes(dec)
-            ),
-            (Some(enc), None) => {
-                format!("# Raw wire frame ({enc}): {}\n", format_bytes(wire.len()))
-            }
-            _ => String::new(),
-        };
-        let dump = format!("{header}{}", format_hex_bytes(wire));
-        let mut doc = BodyDoc::from_text(dump, SyntaxKind::Hex, tokens, p);
-        doc.decodable = body.text.is_some();
-        return doc;
-    }
     if let Some(text) = body.text.as_deref().filter(|text| !text.is_empty()) {
         let semantic = decode_aws_semantic(text, content_type, body.encoding.as_deref());
         let pretty = if semantic.is_none() {
@@ -433,8 +275,7 @@ pub fn build_with_wire(
         } else {
             None
         };
-        let has_distinct_wire = body.encoding.is_some() && raw_wire.is_some_and(|w| !w.is_empty());
-        let decodable = semantic.is_some() || pretty.is_some() || has_distinct_wire;
+        let decodable = semantic.is_some() || pretty.is_some();
         let (shown, decoder, is_form) = match (mode, semantic, pretty) {
             (BodyMode::Decoded, Some((label, decoded, is_form)), _) => {
                 (decoded, Some(label), is_form)
@@ -448,12 +289,6 @@ pub fn build_with_wire(
         doc.decodable = decodable;
         return doc;
     }
-    if let Some(wire) = raw_wire.filter(|w| !w.is_empty()) {
-        return BodyDoc::from_text(format_hex_bytes(wire), SyntaxKind::Hex, tokens, p);
-    }
-    if let Some(hex) = body.hex.as_deref().filter(|hex| !hex.is_empty()) {
-        return BodyDoc::from_text(format_hex_dump(hex), SyntaxKind::Hex, tokens, p);
-    }
     BodyDoc::default()
 }
 
@@ -464,7 +299,7 @@ pub struct DocKey {
     pub side: u8,
     pub mode: BodyMode,
     pub query: String,
-    pub look: (bool, u8),
+    pub look: bool,
 }
 
 /// A small most-recently-used cache of built documents.
@@ -510,7 +345,7 @@ mod tests {
         assert_eq!(doc.lines.len(), 2);
         assert_eq!(doc.line_text(0), "{\"a\": \"x\",");
         assert_eq!(doc.line_text(1), "\"b\": 2}");
-        assert_eq!(doc.matches, 1);
+        assert_eq!(doc.match_lines, vec![1]);
         for (line, spans) in doc.spans.iter().enumerate() {
             let len = doc.lines[line].len();
             assert!(spans.iter().all(|(r, _)| r.end <= len && r.start < r.end));
@@ -529,7 +364,8 @@ mod tests {
         let body = Body {
             text: Some(r#"{"Item":{"id":{"S":"a"},"n":{"N":"2"}}}"#.into()),
             bytes: 40,
-            ..Body::default()
+            ..serde_json::from_str(r#"{"bytes":0,"truncated":false,"binary":false,"sha256":""}"#)
+                .unwrap()
         };
         let decoded = build(
             Some(&body),
@@ -556,7 +392,7 @@ mod tests {
             side: 0,
             mode: BodyMode::Raw,
             query: String::new(),
-            look: (true, 0),
+            look: true,
         };
         cache.insert(key.clone(), Arc::new(raw));
         assert!(cache.get(&key).is_some());
@@ -564,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn json_folds_match_lines_char_selection_and_diff_work() {
+    fn json_folds_match_lines_and_char_selection_work() {
         let json = "{\n  \"a\": {\n    \"id\": \"ord-1\"\n  },\n  \"b\": \"ord-2\"\n}";
         let doc = BodyDoc::from_text(
             json.into(),
@@ -576,9 +412,5 @@ mod tests {
         assert_eq!(doc.fold_ranges.get(&0), Some(&5));
         assert_eq!(doc.fold_ranges.get(&1), Some(&3));
         assert_eq!(doc.copy_selection(2, 11, 2, 16), "ord-1");
-
-        let diff = diff_text("{\n  \"ok\": false\n}", "{\n  \"ok\": true\n}");
-        assert!(diff.contains("-  \"ok\": false"));
-        assert!(diff.contains("+  \"ok\": true"));
     }
 }

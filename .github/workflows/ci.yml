@@ -114,10 +114,10 @@ jobs:
           test "$SAME" = 0
           test "$GROWN" = 3
           test "$GROWN_OUTCOME" = failure
-      - name: Fresh emulator state before enforce
+      - name: Fresh emulator state before the policy check
         run: curl -fsS -X POST http://127.0.0.1:9298/moto-api/reset
-      - name: Enforce blocks unlocked boto3 DeleteItem live
-        id: enforced
+      - name: A policy that denies the new access fails with exit 3
+        id: denied
         continue-on-error: true
         uses: ./
         with:
@@ -125,13 +125,15 @@ jobs:
           upstream: http://127.0.0.1:9298
           working-directory: examples/python
           command: SHOP_REFUNDS=1 python test_shop.py
-          enforce: 'true'
+          # No lock: only the policy decides.
+          lock: no-such.lock
+          policy: role.json
           comment: 'false'
-      - name: Check enforced outcome
+      - name: Check the policy outcome
         env:
-          ENFORCED: ${{ steps.enforced.outputs.exit-code }}
-          REPORT: ${{ steps.enforced.outputs.report }}
+          DENIED: ${{ steps.denied.outputs.exit-code }}
+          MARKDOWN: ${{ steps.denied.outputs.markdown }}
         run: |
           set -x
-          test "$ENFORCED" = 1
-          test "$(jq -r '.blocked' "$REPORT")" = 1
+          test "$DENIED" = 3
+          grep -F 'denied by statement `NoRefunds`' "$MARKDOWN"

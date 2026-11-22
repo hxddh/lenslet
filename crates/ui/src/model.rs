@@ -1,166 +1,78 @@
-//! The window's view of a run file: tolerant row parsing, display helpers,
-//! filters, curl export and payload decoding.
+//! The window's view of a run file.
 //!
-//! The run schema itself lives in `lenslet_core::trace`. A view row ([`Trace`])
-//! deserializes exactly that schema but tolerates absent fields, and carries
-//! UI-only state: where its full line lives on disk (large bodies are shed
-//! from memory and hydrated on demand) and a precomputed search haystack.
+//! Every record is parsed with `lenslet_core`'s own types; a call row is the
+//! core [`CoreTrace`] plus a small UI sidecar (where its line lives on disk,
+//! a search haystack, display keys). **All** reads of run-file fields that
+//! may change between CLI versions live in this module, so a schema change
+//! is fixed here and nowhere else.
 
 use std::{
     borrow::Cow,
+    collections::{BTreeSet, HashSet},
     fmt::Write as _,
     fs::File,
-    io::{Read, Seek, SeekFrom},
-    path::PathBuf,
+    io::{BufRead, Read, Seek, SeekFrom},
+    ops::Deref,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 pub use lenslet_core::{
-    access::{Access, CallAccess},
-    problem::Problem,
-    summary::Report,
-    trace::HeaderTrace as Header,
+    access::Access,
+    lock::Lock,
+    summary::{FailureKind, Finding, Regressions, Report},
+    trace::{BodyTrace as Body, HeaderTrace as Header, Message, RunHeader},
 };
-use serde::{Deserialize, Serialize};
 
-use crate::fsguard;
+use crate::{fsguard, i18n::Tr, tr};
 
+pub type CoreTrace = lenslet_core::trace::Trace;
+
+/// The run-file format this window reads. Anything else is refused with
+/// [`version_error`]. (At the 13.0 merge: `lenslet_core::trace::VERSION`.)
+pub const RUN_FORMAT: u32 = 4;
 pub const MAX_ROWS: usize = 5_000;
-/// Bodies larger than this are shed from the in-memory row and hydrated from
+/// Bodies larger than this are shed from the in-memory row and read back from
 /// the run file when the call is inspected.
 pub const INLINE_BODY_LIMIT: usize = 8 * 1024;
 /// Body text contributed to the search index (per request/response).
 const SEARCH_BODY_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct Body {
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub hex: Option<String>,
-    #[serde(default)]
-    pub raw_b64: Option<String>,
-    #[serde(default)]
-    pub blob: Option<String>,
-    #[serde(default)]
-    pub encoding: Option<String>,
-    #[serde(default)]
-    pub bytes: usize,
-    #[serde(default)]
-    pub decoded_bytes: Option<usize>,
-    #[serde(default)]
-    pub truncated: bool,
-    #[serde(default)]
-    pub binary: bool,
-    #[serde(default)]
-    pub sha256: Option<String>,
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+/// One line of a run file.
+#[derive(Debug)]
+pub enum Record {
+    Run(Box<RunHeader>),
+    Call(Box<Trace>),
+    End(Box<Report>),
 }
 
-impl Body {
-    pub fn size(&self) -> usize {
-        if self.bytes > 0 {
-            self.bytes
-        } else {
-            self.text.as_ref().map_or(0, |text| text.len())
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.size() == 0 && self.text.as_deref().unwrap_or("").is_empty()
-    }
-
-    /// Reconstruct exact raw wire bytes when retained inline (`raw_b64`), in a
-    /// sidecar content-addressed `blob`, or as unencoded UTF-8 `text`.
-    pub fn raw_wire_bytes(&self, trace_path: Option<&std::path::Path>) -> Option<Vec<u8>> {
-        if let Some(b64) = self.raw_b64.as_deref()
-            && let Some(bytes) = lenslet_core::trace::b64_decode(b64)
-        {
-            return Some(bytes);
-        }
-        if let Some(blob) = self.blob.as_deref()
-            && let Some(tp) = trace_path
-        {
-            crate::fsguard::assert_io_allowed();
-            if let Some(bytes) = lenslet_core::runs::read_blob(tp, blob) {
-                return Some(bytes);
-            }
-        }
-        if !self.binary && !self.truncated && self.encoding.is_none() {
-            return Some(self.text.as_deref().unwrap_or("").as_bytes().to_vec());
-        }
-        None
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct Exchange {
-    #[serde(default)]
-    pub headers: Vec<Header>,
-    #[serde(default)]
-    pub trailers: Vec<Header>,
-    #[serde(default)]
-    pub content_type: Option<String>,
-    #[serde(default)]
-    pub raw_content_type: Option<String>,
-    #[serde(default)]
-    pub body: Option<Body>,
-}
-
-impl Exchange {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|header| header.name.eq_ignore_ascii_case(name))
-            .map(|header| header.value.as_str())
-    }
-}
-
-/// A run's header line as the window reads it: the core header plus fields
-/// newer CLIs add (absent in older run files, so everything defaults).
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct RunHeader {
-    #[serde(flatten)]
-    pub base: lenslet_core::trace::RunHeader,
-    /// The emulator the run talked to, e.g. `moto (started by lenslet)`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emulator: Option<String>,
-}
-
-impl std::ops::Deref for RunHeader {
-    type Target = lenslet_core::trace::RunHeader;
-    fn deref(&self) -> &Self::Target {
-        &self.base
-    }
-}
-
-impl std::ops::DerefMut for RunHeader {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.base
-    }
-}
-
-impl From<lenslet_core::trace::RunHeader> for RunHeader {
-    fn from(base: lenslet_core::trace::RunHeader) -> Self {
-        RunHeader {
-            base,
-            emulator: None,
+/// Parse one run-file line with the core schema.
+pub fn parse_record(line: &str) -> Option<Record> {
+    match serde_json::from_str::<lenslet_core::trace::Record>(line.trim()).ok()? {
+        lenslet_core::trace::Record::Run(header) => Some(Record::Run(header)),
+        lenslet_core::trace::Record::End(report) => Some(Record::End(report)),
+        lenslet_core::trace::Record::Call(call) => {
+            (!call.id.is_empty()).then(|| Record::Call(Box::new(Trace::new(*call))))
         }
     }
 }
 
-impl RunHeader {
-    /// `against moto` text for the run: the emulator name without the
-    /// `(started by lenslet)` note.
-    pub fn emulator_name(&self) -> Option<&str> {
-        let full = self.emulator.as_deref()?.trim();
-        let name = full.split(" (").next().unwrap_or(full).trim();
-        (!name.is_empty()).then_some(name)
-    }
+/// The error state for a run file this window cannot read.
+pub fn version_error(version: u32) -> Option<Tr> {
+    (version != RUN_FORMAT).then(|| {
+        tr!(
+            "This run was recorded by an older Lenslet (format {version}) — re-run your tests",
+            "此运行由旧版 Lenslet 记录（格式 {version}）— 请重新运行测试"
+        )
+    })
 }
 
 /// The first line of a run file, when it is a header.
-pub fn read_header(path: &std::path::Path) -> Option<RunHeader> {
-    use std::io::BufRead;
+pub fn read_header(path: &Path) -> Option<RunHeader> {
     fsguard::assert_io_allowed();
     let mut line = String::new();
     std::io::BufReader::new(File::open(path).ok()?)
@@ -170,15 +82,6 @@ pub fn read_header(path: &std::path::Path) -> Option<RunHeader> {
         Record::Run(header) => Some(*header),
         _ => None,
     }
-}
-
-/// One line of a run file, as the window reads it.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Record {
-    Run(Box<RunHeader>),
-    Call(Box<Trace>),
-    End(Box<Report>),
 }
 
 /// A run as the window shows it: its header, plus the report once it ended.
@@ -192,7 +95,145 @@ impl RunInfo {
     pub fn command_line(&self) -> String {
         self.header.command.join(" ")
     }
+
+    /// The report's failure findings (the only failure list in format 4).
+    pub fn failures(&self) -> Vec<&Finding> {
+        self.report
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .filter(|f| matches!(f, Finding::Failure(_)))
+            .collect()
+    }
+
+    pub fn regressions(&self) -> Option<&Regressions> {
+        self.report.as_ref()?.regressions.as_ref()
+    }
 }
+
+/// `moto`, from the header's `emulator` (`moto (started by Lenslet)`).
+pub fn emulator_name(header: &RunHeader) -> Option<String> {
+    let full = emulator_full(header)?;
+    let name = full.split(" (").next().unwrap_or(&full).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+fn emulator_full(header: &RunHeader) -> Option<String> {
+    // Format 4 makes `emulator` a plain string; empty means unknown.
+    let full: Option<&str> = Some(header.emulator.as_str());
+    full.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The test command's combined output: the header's (or report's) `log`,
+/// relative paths resolved against the run file's directory, else
+/// `<run>.log` next to the run file.
+pub fn log_path(run: &RunInfo, run_path: &Path) -> PathBuf {
+    let named = run.header.log.as_deref().filter(|s| !s.is_empty());
+    match named {
+        Some(log) if Path::new(log).is_absolute() => PathBuf::from(log),
+        Some(log) => run_path
+            .parent()
+            .map_or_else(|| PathBuf::from(log), |dir| dir.join(log)),
+        None => lenslet_core::runs::log_path_for(run_path),
+    }
+}
+
+/// The run's project directory (its `cwd`).
+pub fn project_dir(header: &RunHeader) -> Option<PathBuf> {
+    (!header.cwd.is_empty()).then(|| PathBuf::from(&header.cwd))
+}
+
+/// The lock a run is compared with: its header's `lock`, else
+/// `cwd/lenslet.lock`.
+pub fn lock_path(header: &RunHeader) -> Option<PathBuf> {
+    if let Some(lock) = header.lock.as_deref().filter(|s| !s.is_empty()) {
+        let path = Path::new(lock);
+        return Some(if path.is_absolute() || header.cwd.is_empty() {
+            path.to_path_buf()
+        } else {
+            Path::new(&header.cwd).join(path)
+        });
+    }
+    project_dir(header).map(|dir| lenslet_core::lock::path_in(&dir))
+}
+
+/// The semantic target of a call (`table/orders · id="1"`). The one place
+/// the window asks the core for it.
+pub fn target_summary(call: &CoreTrace) -> Option<String> {
+    lenslet_core::target::summary(call)
+}
+
+/// One permission a run used, as the Access view lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UsedAccess {
+    pub access: Access,
+    pub calls: usize,
+    pub errors: usize,
+    /// Needed by another call rather than called directly (KMS, PassRole).
+    pub implied: bool,
+    /// The resource is a `*` standing for one a body did not let Lenslet read.
+    pub unverified: bool,
+    /// The calls that needed it, e.g. `DYNAMODB DeleteItem` (first few).
+    pub via: Vec<String>,
+}
+
+/// The report's access table.
+pub fn report_access(report: &Report) -> Vec<UsedAccess> {
+    report
+        .access
+        .iter()
+        .map(|entry| UsedAccess {
+            access: Access::new(entry.action.clone(), entry.resource.clone()),
+            calls: entry.used.calls,
+            errors: entry.used.errors,
+            implied: entry.used.implied,
+            unverified: entry.used.unverified,
+            via: entry.used.via.clone(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The lock: the one source of truth for "in lenslet.lock"
+// ---------------------------------------------------------------------------
+
+/// The lock as the window read it. With no lock file nothing is in it, so
+/// every used permission reads "not in lock" everywhere.
+#[derive(Clone, Debug, Default)]
+pub struct LockView {
+    pub path: Option<PathBuf>,
+    pub lock: Option<Arc<Lock>>,
+}
+
+impl LockView {
+    pub fn exists(&self) -> bool {
+        self.lock.is_some()
+    }
+
+    pub fn contains(&self, access: &Access) -> bool {
+        self.lock
+            .as_ref()
+            .is_some_and(|lock| lock.access.contains(access))
+    }
+
+    pub fn is_test(&self, access: &Access) -> bool {
+        self.lock
+            .as_ref()
+            .is_some_and(|lock| lock.test.contains(access))
+    }
+
+    pub fn locked(&self) -> BTreeSet<Access> {
+        self.lock
+            .as_ref()
+            .map(|lock| lock.access.clone())
+            .unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call rows
+// ---------------------------------------------------------------------------
 
 /// Where a row's complete line lives in its run file.
 #[derive(Clone, Debug)]
@@ -202,109 +243,48 @@ pub struct LineRef {
     pub len: usize,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// A call as the window holds it: the core record plus display keys.
+#[derive(Clone, Debug)]
 pub struct Trace {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub at: String,
-    #[serde(default)]
-    pub method: String,
-    #[serde(default)]
-    pub path: String,
-    #[serde(default)]
-    pub host: String,
-    #[serde(default)]
-    pub service: String,
-    #[serde(default)]
-    pub operation: String,
-    #[serde(default)]
-    pub status: u16,
-    #[serde(default)]
-    pub ms: u64,
-    #[serde(default)]
-    pub authorization: bool,
-    #[serde(default)]
-    pub region: Option<String>,
-    #[serde(default)]
-    pub invocation_id: Option<String>,
-    #[serde(default)]
-    pub attempt: Option<u32>,
-    #[serde(default)]
-    pub max_attempts: Option<u32>,
-    /// Still running when written; a later line with the same id replaces it.
-    #[serde(default)]
-    pub pending: bool,
-    /// Proxy-side failure (the emulator was unreachable, ...).
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub problem: Option<Problem>,
-    /// The IAM permissions this call needs (several for batches,
-    /// transactions and copies).
-    #[serde(default)]
-    pub access: Vec<CallAccess>,
-    /// Permissions the call implies elsewhere (SSE-KMS key, passed role).
-    #[serde(default)]
-    pub implied: Vec<CallAccess>,
-    /// The call used access that is not in the lock file.
-    #[serde(default)]
-    pub new: bool,
-    /// Blocked locally by `--enforce` before reaching the emulator.
-    #[serde(default)]
-    pub blocked: bool,
-    /// When `--enforce` blocked it: before the emulator, or after (response).
-    #[serde(default)]
-    pub blocked_phase: Option<lenslet_core::trace::BlockedPhase>,
-    /// Re-sent from the window: the id of the call this replays.
-    #[serde(default)]
-    pub replay_of: Option<String>,
-    /// Assumed IAM role ARN from an earlier `sts:AssumeRole*` session, if any.
-    #[serde(default)]
-    pub caller_role: Option<String>,
-    /// Concise semantic resource/target summary (e.g. `table/orders · id="1"`).
-    #[serde(default)]
-    pub target: Option<String>,
-    #[serde(default)]
-    pub protocol: Option<String>,
-    #[serde(default)]
-    pub upstream_protocol: Option<String>,
-    #[serde(default)]
-    pub upstream: Option<String>,
-    #[serde(default)]
-    pub client_addr: Option<String>,
-    #[serde(default)]
-    pub ttfb_ms: Option<u64>,
-    #[serde(default)]
-    pub access_key_id: Option<String>,
-    #[serde(default)]
-    pub request: Option<Exchange>,
-    #[serde(default)]
-    pub response: Option<Exchange>,
-    #[serde(skip)]
+    pub core: CoreTrace,
+    target: Option<String>,
     service_key: String,
-    #[serde(skip)]
     service_name: String,
-    #[serde(skip)]
     haystack: String,
-    #[serde(skip)]
     at_ms: Option<i64>,
-    #[serde(skip)]
     pub(crate) line_ref: Option<LineRef>,
-    #[serde(skip)]
     dehydrated: bool,
 }
 
+impl Deref for Trace {
+    type Target = CoreTrace;
+    fn deref(&self) -> &CoreTrace {
+        &self.core
+    }
+}
+
 impl Trace {
+    pub fn new(core: CoreTrace) -> Self {
+        let mut trace = Trace {
+            target: target_summary(&core),
+            service_key: service_id(&core.service),
+            service_name: service_label(&core.service),
+            at_ms: parse_rfc3339_ms(&core.at),
+            core,
+            haystack: String::new(),
+            line_ref: None,
+            dehydrated: false,
+        };
+        trace.haystack = trace.build_haystack();
+        trace
+    }
+
     /// Shed bodies over [`INLINE_BODY_LIMIT`] from memory, remembering where
     /// the full line is.
     pub fn dehydrate(&mut self, lref: LineRef) {
         let mut shed = false;
-        for ex in [self.request.as_mut(), self.response.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(body) = ex.body.as_mut()
+        for message in [&mut self.core.request, &mut self.core.response] {
+            if let Some(body) = message.body.as_mut()
                 && body
                     .text
                     .as_ref()
@@ -318,117 +298,95 @@ impl Trace {
         self.dehydrated = shed;
     }
 
-    /// Whether a body was shed and must be read back from disk to inspect.
     pub fn is_dehydrated(&self) -> bool {
         self.dehydrated
     }
 
     /// The row with its full bodies, read back from the run file. Blocking IO:
-    /// call it on a background thread.
+    /// background only.
     pub fn hydrated(&self) -> Option<Trace> {
         fsguard::assert_io_allowed();
         if !self.dehydrated {
             return Some(self.clone());
         }
         let lref = self.line_ref.as_ref()?;
-        let read_at = |offset: u64, len: usize| -> Option<Trace> {
-            let mut file = File::open(&*lref.path).ok()?;
-            file.seek(SeekFrom::Start(offset)).ok()?;
-            let mut buf = vec![0u8; len];
-            file.read_exact(&mut buf).ok()?;
-            match parse_record(&String::from_utf8_lossy(&buf))? {
-                Record::Call(full) if full.id == self.id => Some(*full),
-                _ => None,
-            }
-        };
-        read_at(lref.offset, lref.len).or_else(|| self.hydrate_by_scan(&lref.path))
-    }
-
-    /// Fallback when the recorded offset is stale: stream line-by-line without
-    /// loading the entire multi-hundred-megabyte run file into memory.
-    fn hydrate_by_scan(&self, path: &std::path::Path) -> Option<Trace> {
-        use std::io::{BufRead, BufReader};
-        let file = File::open(path).ok()?;
-        let mut reader = BufReader::with_capacity(64 * 1024, file);
-        let needle = format!("\"id\":\"{}\"", self.id);
-        let mut line = Vec::with_capacity(8 * 1024);
-        let mut found = None;
-        loop {
-            line.clear();
-            let n = reader.read_until(b'\n', &mut line).ok()?;
-            if n == 0 {
-                break;
-            }
-            let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
-            if trimmed.len() > needle.len()
-                && memfind(trimmed, needle.as_bytes())
-                && let Some(Record::Call(full)) = parse_record(&String::from_utf8_lossy(trimmed))
-                && full.id == self.id
-            {
-                found = Some(*full);
-            }
+        let mut file = File::open(&*lref.path).ok()?;
+        file.seek(SeekFrom::Start(lref.offset)).ok()?;
+        let mut buf = vec![0u8; lref.len];
+        file.read_exact(&mut buf).ok()?;
+        match parse_record(&String::from_utf8_lossy(&buf))? {
+            Record::Call(full) if full.id == self.id => Some(*full),
+            _ => None,
         }
-        found
-    }
-
-    pub(crate) fn finalize(mut self) -> Self {
-        if let Some(request) = self.request.as_ref() {
-            if self.invocation_id.is_none() {
-                self.invocation_id = request
-                    .header("amz-sdk-invocation-id")
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_string);
-            }
-            if self.attempt.is_none()
-                && let Some(raw) = request.header("amz-sdk-request")
-            {
-                let (attempt, max) = lenslet_core::wire::parse_sdk_request(raw);
-                if attempt.is_some_and(|n| n > 1) {
-                    self.attempt = attempt;
-                    self.max_attempts = max;
-                }
-            }
-        }
-        if self.target.is_none() {
-            let core = self.to_core_with_request_body();
-            self.target = Some(lenslet_core::catalog::target_summary(&core));
-        }
-        self.at_ms = parse_rfc3339_ms(&self.at);
-        self.service_key = service_id(&self.service);
-        self.service_name = service_label(&self.service);
-        self.haystack = self.build_haystack();
-        self
     }
 
     pub fn at_ms(&self) -> Option<i64> {
         self.at_ms
     }
 
-    pub fn is_retry(&self) -> bool {
-        self.attempt.is_some_and(|attempt| attempt > 1)
-    }
-
-    pub fn is_slow(&self) -> bool {
-        self.pending || self.ms >= 500
-    }
-
-    pub fn retry_badge(&self) -> Option<String> {
-        let attempt = self.attempt.filter(|n| *n > 1)?;
-        Some(match self.max_attempts {
-            Some(max) => format!("RETRY {attempt}/{max}"),
-            None => format!("RETRY {attempt}"),
-        })
-    }
-
-    /// Normalized service identity (e.g. `dynamodb`), used by dynamic filters.
+    /// Normalized service identity (e.g. `dynamodb`).
     pub fn service_key(&self) -> &str {
         &self.service_key
     }
 
-    /// Display label for the service (e.g. `DYNAMODB`, `KINESIS`).
+    /// Display label for the service (e.g. `DYNAMODB`).
     pub fn service_name(&self) -> &str {
         &self.service_name
+    }
+
+    /// A failed call: an HTTP error, or a problem the proxy recorded.
+    pub fn is_error(&self) -> bool {
+        status_is_error(self.status) || self.problem.is_some() || self.error.is_some()
+    }
+
+    /// Every permission this call accounts for: its own, then implied ones.
+    pub fn access(&self) -> impl Iterator<Item = Access> + '_ {
+        lenslet_core::trace::trace_access(&self.core)
+    }
+
+    /// Each permission with whether it is implied (needed elsewhere).
+    pub fn access_entries(&self) -> impl Iterator<Item = (Access, bool, bool)> + '_ {
+        self.core
+            .access
+            .iter()
+            .map(|a| (a.key(), false, a.unverified))
+            .chain(
+                self.core
+                    .implied
+                    .iter()
+                    .map(|a| (a.key(), true, a.unverified)),
+            )
+    }
+
+    pub fn uses(&self, access: &Access) -> bool {
+        self.access().any(|own| own == *access)
+    }
+
+    /// Needs a permission `lock` does not hold.
+    pub fn not_in_lock(&self, lock: &LockView) -> bool {
+        self.access().any(|access| !lock.contains(&access))
+    }
+
+    /// The failure identity `lenslet` compares across runs.
+    pub fn failure_kind(&self) -> Option<FailureKind> {
+        let problem = self.problem.as_ref()?;
+        Some(FailureKind {
+            service: self.service.clone(),
+            operation: self.operation.clone(),
+            code: problem.code.clone(),
+        })
+    }
+
+    /// Semantic call target, falling back to `METHOD /path`.
+    pub fn semantic_target(&self) -> String {
+        match self.target.as_deref() {
+            Some(target) => target.to_string(),
+            None => format!(
+                "{} {}",
+                self.method.to_ascii_uppercase(),
+                display_path(self)
+            ),
+        }
     }
 
     fn build_haystack(&self) -> String {
@@ -439,6 +397,7 @@ impl Trace {
             &self.method,
             &self.path,
             &self.host,
+            &self.id,
         ] {
             haystack.push_str(part);
             haystack.push('\n');
@@ -454,13 +413,8 @@ impl Trace {
         }
         for extra in [
             self.region.as_deref(),
-            self.invocation_id.as_deref(),
-            self.caller_role.as_deref(),
             self.target.as_deref(),
-            self.upstream.as_deref(),
-            self.client_addr.as_deref(),
-            self.access_key_id.as_deref(),
-            self.protocol.as_deref(),
+            self.error.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -468,34 +422,18 @@ impl Trace {
             haystack.push_str(extra);
             haystack.push('\n');
         }
-        if self.is_retry() {
-            haystack.push_str("retry retried\n");
-        }
-        if self.new {
-            haystack.push_str("new\n");
-        }
-        if self.blocked {
-            haystack.push_str("blocked denied enforce\n");
-        }
-        haystack.push_str(&self.id);
-        haystack.push('\n');
         for access in self.access() {
             let _ = writeln!(haystack, "{} {}", access.action, access.resource);
         }
-        for exchange in [self.request.as_ref(), self.response.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            for hdr in exchange.headers.iter().chain(exchange.trailers.iter()) {
+        for message in [&self.request, &self.response] {
+            for hdr in &message.headers {
                 let _ = writeln!(haystack, "{}: {}", hdr.name, hdr.value);
             }
-            if let Some(content_type) = exchange.content_type.as_deref() {
+            if let Some(content_type) = message.content_type.as_deref() {
                 haystack.push_str(content_type);
                 haystack.push('\n');
             }
-            if let Some(body) = exchange.body.as_ref()
-                && let Some(text) = body.text.as_deref()
-            {
+            if let Some(text) = message.body.as_ref().and_then(|b| b.text.as_deref()) {
                 haystack.push_str(clip_utf8(text, SEARCH_BODY_BYTES));
                 haystack.push('\n');
             }
@@ -510,231 +448,27 @@ impl Trace {
             Cow::Borrowed(&self.haystack)
         }
     }
+}
 
-    /// A failed call: an HTTP error, or a problem the proxy recorded.
-    pub fn is_error(&self) -> bool {
-        status_is_error(self.status) || self.problem.is_some()
-    }
-
-    /// Signed with a presigned URL rather than an Authorization header.
-    pub fn presigned(&self) -> bool {
-        self.path.contains("X-Amz-Signature=")
-            || (self.path.contains("AWSAccessKeyId=") && self.path.contains("Signature="))
-    }
-
-    /// Every permission this call accounts for: its own, then implied ones.
-    pub fn access(&self) -> impl Iterator<Item = Access> + '_ {
-        self.access
-            .iter()
-            .chain(self.implied.iter())
-            .map(CallAccess::key)
-    }
-
-    /// Every permission on this call paired with whether it is implied.
-    pub fn call_access(&self) -> impl Iterator<Item = (&CallAccess, bool)> + '_ {
-        self.access
-            .iter()
-            .map(|entry| (entry, false))
-            .chain(self.implied.iter().map(|entry| (entry, true)))
-    }
-
-    /// Whether a specific permission on this call is marked new (falling back
-    /// to `self.new` for single-permission calls from older trace files).
-    pub fn is_access_new(&self, entry: &CallAccess) -> bool {
-        entry.new || (self.new && self.access.len() + self.implied.len() == 1)
-    }
-
-    pub fn uses(&self, access: &Access) -> bool {
-        self.access
-            .iter()
-            .chain(self.implied.iter())
-            .any(|own| own.action == access.action && own.resource == access.resource)
-    }
-
-    /// The failure identity `lenslet` compares across runs.
-    pub fn failure_kind(&self) -> Option<lenslet_core::summary::FailureKind> {
-        let problem = self.problem.as_ref()?;
-        Some(lenslet_core::summary::FailureKind {
-            service: self.service.clone(),
-            operation: self.operation.clone(),
-            code: problem.code.clone(),
-        })
-    }
-
-    /// The same call as `lenslet_core` sees it, without bodies (for findings).
-    pub fn to_core(&self) -> lenslet_core::trace::Trace {
-        let message = |exchange: Option<&Exchange>| lenslet_core::trace::Message {
-            headers: exchange.map(|e| e.headers.clone()).unwrap_or_default(),
-            trailers: exchange.map(|e| e.trailers.clone()).unwrap_or_default(),
-            content_type: exchange.and_then(|e| e.content_type.clone()),
-            raw_content_type: exchange.and_then(|e| e.raw_content_type.clone()),
-            body: None,
-        };
-        lenslet_core::trace::Trace {
-            id: self.id.clone(),
-            at: self.at.clone(),
-            method: self.method.clone(),
-            path: self.path.clone(),
-            host: self.host.clone(),
-            service: self.service.clone(),
-            operation: self.operation.clone(),
-            status: self.status,
-            ms: self.ms,
-            authorization: self.authorization,
-            region: self.region.clone(),
-            invocation_id: self.invocation_id.clone(),
-            attempt: self.attempt,
-            max_attempts: self.max_attempts,
-            pending: self.pending,
-            error: self.error.clone(),
-            problem: self.problem.clone(),
-            access: self.access.clone(),
-            implied: self.implied.clone(),
-            new: self.new,
-            blocked: self.blocked,
-            blocked_phase: self.blocked_phase,
-            replay_of: self.replay_of.clone(),
-            caller_role: self.caller_role.clone(),
-            target: self.target.clone(),
-            protocol: self.protocol.clone(),
-            upstream_protocol: self.upstream_protocol.clone(),
-            upstream: self.upstream.clone(),
-            client_addr: self.client_addr.clone(),
-            ttfb_ms: self.ttfb_ms,
-            access_key_id: self.access_key_id.clone(),
-            request: message(self.request.as_ref()),
-            response: message(self.response.as_ref()),
-        }
-    }
-
-    /// Full `lenslet_core::trace::Trace` including request body text (used for
-    /// semantic target derivation and live IAM policy simulation).
-    pub fn to_core_with_request_body(&self) -> lenslet_core::trace::Trace {
-        let mut core = self.to_core();
-        if let Some(req) = self.request.as_ref()
-            && let Some(body) = req.body.as_ref()
-        {
-            core.request.body = Some(lenslet_core::trace::BodyTrace {
-                text: body.text.clone(),
-                hex: body.hex.clone(),
-                raw_b64: body.raw_b64.clone(),
-                blob: body.blob.clone(),
-                encoding: body.encoding.clone(),
-                bytes: body.bytes as u64,
-                decoded_bytes: body.decoded_bytes.map(|n| n as u64),
-                truncated: body.truncated,
-                binary: body.binary,
-                sha256: body.sha256.clone().unwrap_or_default(),
-            });
-        }
-        core
-    }
-
-    /// Semantic call target (`table/orders · id="1"`, `s3://...`, `queue/...`),
-    /// falling back to `METHOD /path`.
-    pub fn semantic_target(&self) -> String {
-        if let Some(t) = self.target.as_deref().filter(|s| !s.is_empty()) {
-            return t.to_string();
-        }
-        format!(
-            "{} {}",
-            self.method.to_ascii_uppercase(),
-            display_path(self)
-        )
+/// Wire size of a body (its total bytes, not the captured prefix).
+pub fn body_size(body: &Body) -> usize {
+    if body.bytes > 0 {
+        body.bytes as usize
+    } else {
+        body.text.as_ref().map_or(0, String::len)
     }
 }
 
-/// Decoded components of an `AWS4-HMAC-SHA256` `Authorization` header.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DecodedSigV4 {
-    pub access_key_id: String,
-    pub date: String,
-    pub region: String,
-    pub service: String,
-    pub signed_headers: String,
+/// The exact wire bytes of a body, when the run file holds them (text that
+/// was neither truncated nor re-encoded for display).
+pub fn wire_bytes(body: &Body) -> Option<Vec<u8>> {
+    (!body.binary && !body.truncated && body.encoding.is_none())
+        .then(|| body.text.as_deref().unwrap_or("").as_bytes().to_vec())
 }
 
-/// Decode an `Authorization` header with `lenslet_core::wire` (the same
-/// parser the proxy uses); only the date and `SignedHeaders`, which the wire
-/// summary does not carry, are read here.
-pub fn decode_sigv4_header(auth: &str) -> Option<DecodedSigV4> {
-    if !auth.trim_start().starts_with("AWS4-") {
-        return None;
-    }
-    let mut headers = http::HeaderMap::new();
-    headers.insert(
-        http::header::AUTHORIZATION,
-        http::HeaderValue::from_str(auth).ok()?,
-    );
-    let wire = lenslet_core::wire::wire_info(&headers, "/");
-    let region = wire.region?;
-    let date = auth
-        .split("Credential=")
-        .nth(1)?
-        .split('/')
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-    let signed_headers = auth
-        .split("SignedHeaders=")
-        .nth(1)
-        .and_then(|s| s.split([',', ' ']).next())
-        .unwrap_or("")
-        .to_string();
-    Some(DecodedSigV4 {
-        access_key_id: wire.access_key_id.unwrap_or_default(),
-        date,
-        region,
-        service: wire.service,
-        signed_headers,
-    })
-}
-
-pub fn decoded_query_params(path: &str) -> Vec<(String, String)> {
-    let Some((_, query)) = path.split_once('?') else {
-        return Vec::new();
-    };
-    query
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            (
-                lenslet_core::wire::percent_decode_query(k),
-                lenslet_core::wire::percent_decode_query(v),
-            )
-        })
-        .collect()
-}
-
-fn memfind(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
-/// Parse one run-file line. Calls without an id or time are rejected.
-pub fn parse_record(line: &str) -> Option<Record> {
-    match serde_json::from_str(line.trim()).ok()? {
-        Record::Call(trace) => {
-            let trace = *trace;
-            if trace.id.is_empty() || trace.at.is_empty() {
-                return None;
-            }
-            Some(Record::Call(Box::new(trace.finalize())))
-        }
-        other => Some(other),
-    }
-}
-
-/// Parse one `call` line. Other records and malformed lines are `None`.
-#[cfg(test)]
-pub fn parse_line(line: &str) -> Option<Trace> {
-    match parse_record(line)? {
-        Record::Call(trace) => Some(*trace),
-        _ => None,
-    }
-}
+// ---------------------------------------------------------------------------
+// Parsing chunks of a file
+// ---------------------------------------------------------------------------
 
 /// What a chunk of a run file holds.
 #[derive(Default)]
@@ -760,8 +494,7 @@ pub fn parse_records_at(bytes: &[u8], base_offset: u64, source: Option<&Arc<Path
         if slice.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let line = String::from_utf8_lossy(slice);
-        match parse_record(&line) {
+        match parse_record(&String::from_utf8_lossy(slice)) {
             Some(Record::Call(mut trace)) => {
                 if let Some(path) = source {
                     trace.dehydrate(LineRef {
@@ -780,18 +513,84 @@ pub fn parse_records_at(bytes: &[u8], base_offset: u64, source: Option<&Arc<Path
     parsed
 }
 
-/// Every call in a run file's text.
-pub fn parse_lines(text: &str) -> Vec<Trace> {
-    parse_records_at(text.as_bytes(), 0, None).calls
+/// Every call and the run in a run file's text (tests, fixtures).
+#[cfg(test)]
+pub fn parse_run_text(text: &str) -> (RunInfo, Vec<Trace>) {
+    let parsed = parse_records_at(text.as_bytes(), 0, None);
+    (
+        RunInfo {
+            header: parsed.header.unwrap_or_default(),
+            report: parsed.report,
+        },
+        parsed.calls,
+    )
 }
 
-/// The run (header and report) in a run file's text.
-pub fn parse_run(text: &str) -> RunInfo {
-    let parsed = parse_records_at(text.as_bytes(), 0, None);
-    RunInfo {
-        header: parsed.header.unwrap_or_default(),
-        report: parsed.report,
+// ---------------------------------------------------------------------------
+// Filters and search
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceFacet {
+    pub id: String,
+    pub label: String,
+    pub count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusFilter {
+    #[default]
+    All,
+    Errors,
+    /// Calls that need a permission not in lenslet.lock.
+    NotInLock,
+}
+
+/// Status AND service AND an explicit id set (a finding's calls).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallFilter {
+    pub status: StatusFilter,
+    pub service: Option<String>,
+    /// Restrict to these call ids, with a label for the chip.
+    pub ids: Option<(String, Arc<HashSet<String>>)>,
+}
+
+impl CallFilter {
+    pub fn is_active(&self) -> bool {
+        self.status != StatusFilter::All || self.service.is_some() || self.ids.is_some()
     }
+
+    pub fn matches(&self, trace: &Trace, lock: &LockView) -> bool {
+        let status_ok = match self.status {
+            StatusFilter::All => true,
+            StatusFilter::Errors => trace.is_error(),
+            StatusFilter::NotInLock => trace.not_in_lock(lock),
+        };
+        status_ok
+            && self
+                .service
+                .as_deref()
+                .is_none_or(|svc| trace.service_key() == svc)
+            && self
+                .ids
+                .as_ref()
+                .is_none_or(|(_, ids)| ids.contains(&trace.id))
+    }
+}
+
+pub fn search_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+pub fn matches_search(trace: &Trace, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return true;
+    }
+    let haystack = trace.searchable();
+    tokens.iter().all(|token| haystack.contains(token.as_str()))
 }
 
 pub fn clip_utf8(text: &str, max_bytes: usize) -> &str {
@@ -819,7 +618,7 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Services, filters and search
+// Services
 // ---------------------------------------------------------------------------
 
 /// Normalize raw SigV4 / endpoint service names into stable filter identities.
@@ -875,102 +674,6 @@ pub fn display_path(trace: &Trace) -> &str {
     } else {
         trace.path.as_str()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServiceFacet {
-    pub id: String,
-    pub label: String,
-    pub count: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StatusFilter {
-    #[default]
-    All,
-    Errors,
-    Blocked,
-    Retries,
-    Slow,
-    /// Calls that differ from the baseline (new failures, new access).
-    Changed,
-}
-
-/// Combinable call filter: status facet AND service AND permission AND time
-/// slice AND an explicit id set (a finding's calls).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CallFilter {
-    pub status: StatusFilter,
-    pub service: Option<String>,
-    pub access: Option<Access>,
-    pub time_window: Option<(i64, i64)>,
-    /// Restrict to these call ids, with a label for the chip.
-    pub ids: Option<(String, Arc<std::collections::HashSet<String>>)>,
-}
-
-impl CallFilter {
-    pub fn is_active(&self) -> bool {
-        self.status != StatusFilter::All
-            || self.service.is_some()
-            || self.access.is_some()
-            || self.time_window.is_some()
-            || self.ids.is_some()
-    }
-
-    /// `changed` says whether the call differs from the baseline.
-    pub fn matches(&self, trace: &Trace, run_start_ms: Option<i64>, changed: bool) -> bool {
-        let status_ok = match self.status {
-            StatusFilter::All => true,
-            StatusFilter::Errors => trace.is_error(),
-            StatusFilter::Blocked => trace.blocked,
-            StatusFilter::Retries => trace.is_retry(),
-            StatusFilter::Slow => trace.is_slow(),
-            StatusFilter::Changed => changed,
-        };
-        if !status_ok {
-            return false;
-        }
-        if let Some(svc) = self.service.as_deref()
-            && trace.service_key() != svc
-        {
-            return false;
-        }
-        if let Some(access) = self.access.as_ref()
-            && !trace.uses(access)
-        {
-            return false;
-        }
-        if let Some((_, ids)) = self.ids.as_ref()
-            && !ids.contains(&trace.id)
-        {
-            return false;
-        }
-        if let (Some((win_start, win_end)), Some(run_start), Some(call_at)) =
-            (self.time_window, run_start_ms, trace.at_ms())
-        {
-            let rel_start = (call_at - run_start).max(0);
-            let rel_end = rel_start + trace.ms as i64;
-            if rel_end < win_start || rel_start > win_end {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-pub fn search_tokens(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(|token| token.to_lowercase())
-        .collect()
-}
-
-pub fn matches_search(trace: &Trace, tokens: &[String]) -> bool {
-    if tokens.is_empty() {
-        return true;
-    }
-    let haystack = trace.searchable();
-    tokens.iter().all(|token| haystack.contains(token.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,7 +869,8 @@ fn posix_single_quote(text: &str) -> String {
 /// or `None` when the request carried a binary or truncated body whose complete
 /// payload cannot be reconstructed from the trace.
 pub fn to_curl(trace: &Trace, endpoint: Option<&str>) -> Option<String> {
-    if let Some(body) = trace.request.as_ref().and_then(|req| req.body.as_ref())
+    let req = &trace.request;
+    if let Some(body) = req.body.as_ref()
         && (body.truncated
             || (body.bytes > 0 && body.text.is_none())
             || body
@@ -1199,125 +903,56 @@ pub fn to_curl(trace: &Trace, endpoint: Option<&str>) -> Option<String> {
         method,
         posix_single_quote(&url),
     ];
-    if let Some(req) = trace.request.as_ref() {
-        let decoded_wire = req
-            .body
-            .as_ref()
-            .is_some_and(|body| body.encoding.is_some());
-        let compressed_wire = req
-            .body
-            .as_ref()
-            .and_then(|body| body.encoding.as_deref())
-            .is_some_and(|enc| {
-                let low = enc.to_ascii_lowercase();
-                low.contains("gzip") || low.contains("deflate")
-            });
-        for header in &req.headers {
-            let low = header.name.to_ascii_lowercase();
-            // Skip hop-by-hop framing headers, and when replaying a decoded
-            // (`gzip` / `deflate` / `aws-chunked`) plaintext payload, strip
-            // wire-encoding & trailing-checksum headers that no longer match
-            // the decoded `--data-raw` bytes.
-            if matches!(low.as_str(), "content-length" | "transfer-encoding") {
-                continue;
-            }
-            if decoded_wire
-                && (matches!(
-                    low.as_str(),
-                    "content-encoding"
-                        | "x-amz-decoded-content-length"
-                        | "x-amz-trailer"
-                        | "x-amz-sdk-checksum-algorithm"
-                ) || low.starts_with("x-amz-checksum-")
-                    || (compressed_wire && low == "content-md5"))
-            {
-                continue;
-            }
-            if low == "x-amz-content-sha256"
-                && (decoded_wire
-                    || header
-                        .value
-                        .trim()
-                        .to_ascii_uppercase()
-                        .starts_with("STREAMING-"))
-            {
-                parts.push(format!(
-                    "-H {}",
-                    posix_single_quote(&format!("{}: UNSIGNED-PAYLOAD", header.name))
-                ));
-                continue;
-            }
+    let encoding = req.body.as_ref().and_then(|body| body.encoding.as_deref());
+    let decoded_wire = encoding.is_some();
+    let compressed_wire = encoding.is_some_and(|enc| {
+        let low = enc.to_ascii_lowercase();
+        low.contains("gzip") || low.contains("deflate")
+    });
+    for header in &req.headers {
+        let low = header.name.to_ascii_lowercase();
+        // Hop-by-hop framing, and wire-encoding headers that no longer match
+        // a decoded (`gzip` / `aws-chunked`) `--data-raw` payload.
+        if matches!(low.as_str(), "content-length" | "transfer-encoding") {
+            continue;
+        }
+        if decoded_wire
+            && (matches!(
+                low.as_str(),
+                "content-encoding"
+                    | "x-amz-decoded-content-length"
+                    | "x-amz-trailer"
+                    | "x-amz-sdk-checksum-algorithm"
+            ) || low.starts_with("x-amz-checksum-")
+                || (compressed_wire && low == "content-md5"))
+        {
+            continue;
+        }
+        if low == "x-amz-content-sha256"
+            && (decoded_wire
+                || header
+                    .value
+                    .trim()
+                    .to_ascii_uppercase()
+                    .starts_with("STREAMING-"))
+        {
             parts.push(format!(
                 "-H {}",
-                posix_single_quote(&format!("{}: {}", header.name, header.value))
+                posix_single_quote(&format!("{}: UNSIGNED-PAYLOAD", header.name))
             ));
+            continue;
         }
-        if let Some(body) = req.body.as_ref()
-            && let Some(text) = body.text.as_deref()
-            && !text.is_empty()
-        {
-            parts.push(format!("--data-raw {}", posix_single_quote(text)));
-        }
+        parts.push(format!(
+            "-H {}",
+            posix_single_quote(&format!("{}: {}", header.name, header.value))
+        ));
+    }
+    if let Some(text) = req.body.as_ref().and_then(|b| b.text.as_deref())
+        && !text.is_empty()
+    {
+        parts.push(format!("--data-raw {}", posix_single_quote(text)));
     }
     Some(parts.join(" \\\n  "))
-}
-
-/// Render a lowercase hex string (`89504e47...`) as a classic 16-byte-per-row
-/// Hex + ASCII dump (`0000  89 50 4e 47 ...  |.PNG...|`).
-pub fn format_hex_dump(hex_str: &str) -> String {
-    let clean: Vec<u8> = hex_str.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
-    let mut bytes = Vec::with_capacity(clean.len() / 2);
-    for pair in clean.as_chunks::<2>().0 {
-        if let Ok(s) = std::str::from_utf8(pair)
-            && let Ok(val) = u8::from_str_radix(s, 16)
-        {
-            bytes.push(val);
-        }
-    }
-    format_hex_bytes(&bytes)
-}
-
-/// Render raw bytes as a 16-byte-per-row Hex + ASCII dump (up to 256 KiB inline display).
-pub fn format_hex_bytes(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    const MAX_HEX_DISPLAY: usize = 256 * 1024;
-    let shown = &bytes[..bytes.len().min(MAX_HEX_DISPLAY)];
-    let mut out = String::new();
-    for (row_idx, row) in shown.chunks(16).enumerate() {
-        let _ = write!(out, "{:06x}  ", row_idx * 16);
-        for (i, byte) in row.iter().enumerate() {
-            if i == 8 {
-                out.push(' ');
-            }
-            let _ = write!(out, "{byte:02x} ");
-        }
-        for i in row.len()..16 {
-            if i == 8 {
-                out.push(' ');
-            }
-            out.push_str("   ");
-        }
-        out.push_str(" |");
-        for &byte in row {
-            let ch = if (0x20..=0x7e).contains(&byte) {
-                byte as char
-            } else {
-                '.'
-            };
-            out.push(ch);
-        }
-        out.push_str("|\n");
-    }
-    if bytes.len() > MAX_HEX_DISPLAY {
-        let _ = writeln!(
-            out,
-            "# … {} total wire bytes (use Save Payload… to export complete binary file)",
-            format_bytes(bytes.len())
-        );
-    }
-    out.trim_end().to_string()
 }
 
 /// Parse an RFC3339 timestamp into epoch milliseconds, for relative waterfall
@@ -1659,165 +1294,118 @@ fn unwrap_embedded_json_strings(val: &serde_json::Value, hits: &mut usize) -> se
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lenslet_core::trace::{BodyTrace, HeaderTrace, Message, Tagged};
+    use crate::{
+        store::{LockState, access_rows, not_in_lock_count},
+        testdata::{LOCK_V4, LOG_V4, RUN_V4, scratch},
+    };
 
-    /// The window reads exactly what `lenslet_core` writes.
-    #[test]
-    fn reads_a_line_serialized_from_the_core_schema() {
-        let core = lenslet_core::trace::Trace {
-            id: "18e8-7".into(),
-            at: "2026-11-15T09:48:42.616+00:00".into(),
-            method: "GET".into(),
-            path: "/shop-assets/receipts/1002.json".into(),
-            host: "127.0.0.1:43865".into(),
-            service: "s3".into(),
-            operation: "GetObject".into(),
-            status: 404,
-            ms: 3,
-            authorization: true,
-            region: Some("us-east-1".into()),
-            invocation_id: Some("inv-1".into()),
-            attempt: Some(2),
-            max_attempts: Some(3),
-            problem: Some(Problem {
-                code: "NoSuchKey".into(),
-                message: Some("The specified key does not exist.".into()),
-                hint: None,
-            }),
-            access: vec![CallAccess {
-                action: "s3:GetObject".into(),
-                resource: "arn:aws:s3:::shop-assets/*".into(),
-                new: true,
-                unverified: false,
-            }],
-            implied: vec![CallAccess::from(Access::new("kms:Decrypt", "*"))],
-            new: true,
-            replay_of: Some("18e8-6".into()),
-            request: Message {
-                headers: vec![HeaderTrace {
-                    name: "amz-sdk-request".into(),
-                    value: "attempt=2; max=3".into(),
-                }],
-                content_type: None,
-                body: None,
-                ..Default::default()
-            },
-            response: Message {
-                headers: Vec::new(),
-                content_type: Some("application/xml".into()),
-                body: Some(BodyTrace {
-                    text: Some("<Error><Code>NoSuchKey</Code></Error>".into()),
-                    hex: None,
-                    encoding: None,
-                    bytes: 37,
-                    truncated: false,
-                    binary: false,
-                    sha256: "ab".repeat(32),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let line = serde_json::to_string(&Tagged {
-            kind: "call",
-            value: &core,
-        })
-        .unwrap();
-        let row = parse_line(&line).expect("the ui parses a core call line");
-        assert_eq!(row.id, core.id);
-        assert_eq!(row.status, 404);
-        assert_eq!(row.attempt, Some(2));
-        assert_eq!(row.replay_of.as_deref(), Some("18e8-6"));
-        assert_eq!(row.problem.as_ref().unwrap().code, "NoSuchKey");
-        assert!(row.is_error() && row.is_retry() && row.new);
-        assert!(row.uses(&Access::new("kms:Decrypt", "*")));
-        assert_eq!(row.service_name(), "S3");
-        let body = row.response.as_ref().unwrap().body.as_ref().unwrap();
-        assert_eq!(body.size(), 37);
-        assert_eq!(body.sha256.as_deref(), Some("ab".repeat(32).as_str()));
-
-        // And back: the core sees the same call (without bodies).
-        let back = row.to_core();
-        assert_eq!(back.access, core.access);
-        assert_eq!(back.problem, core.problem);
-        assert!(back.response.body.is_none());
-
-        // Header and report lines parse with the core types.
-        let header = lenslet_core::trace::RunHeader {
-            version: 3,
-            run: "r".into(),
-            ..Default::default()
-        };
-        let line = serde_json::to_string(&Tagged {
-            kind: "run",
-            value: &header,
-        })
-        .unwrap();
-        assert!(matches!(parse_record(&line), Some(Record::Run(h)) if h.run == "r"));
-        let report = Report {
-            calls: 7,
-            ..Default::default()
-        };
-        let line = serde_json::to_string(&Tagged {
-            kind: "end",
-            value: &report,
-        })
-        .unwrap();
-        assert!(matches!(parse_record(&line), Some(Record::End(r)) if r.calls == 7));
+    fn fixture_lock() -> LockView {
+        LockView {
+            path: Some("lenslet.lock".into()),
+            lock: Some(Arc::new(lenslet_core::lock::parse(LOCK_V4))),
+        }
     }
 
     #[test]
-    fn run_header_reads_the_emulator_and_defaults_without_it() {
-        let line = r#"{"type":"run","version":3,"run":"r","cwd":"/p","pid":1,"endpoint":"http://127.0.0.1:1","upstream":"http://127.0.0.1:5000","started":"t","emulator":"moto (started by lenslet)"}"#;
-        let Some(Record::Run(header)) = parse_record(line) else {
-            panic!("header line");
-        };
+    fn reads_a_format_4_run_with_the_core_types() {
+        let (run, calls) = parse_run_text(RUN_V4);
+        assert_eq!(run.header.version, RUN_FORMAT);
+        assert_eq!(version_error(run.header.version), None);
+        assert_eq!(emulator_name(&run.header).as_deref(), Some("moto"));
+        assert_eq!(run.command_line(), "python demo.py");
+        assert_eq!(calls.len(), 15);
+        let report = run.report.as_ref().unwrap();
+        assert_eq!(report.exit_code, Some(1));
+        assert_eq!(run.failures().len(), 2);
+        assert_eq!(run.regressions().unwrap().new_failures.len(), 1);
+        let failed = calls.iter().find(|c| c.status == 404).unwrap();
+        assert!(failed.is_error());
+        assert_eq!(failed.problem.as_ref().unwrap().code, "NoSuchKey");
+        assert_eq!(failed.service_name(), "S3");
+        assert!(failed.semantic_target().contains("shop-assets"));
+        // KMS implied by SSE: own + implied permissions.
+        let put = calls.iter().find(|c| c.operation == "PutObject").unwrap();
+        let needs: Vec<(String, bool)> = put
+            .access_entries()
+            .map(|(a, implied, _)| (a.action, implied))
+            .collect();
         assert_eq!(
-            header.emulator.as_deref(),
-            Some("moto (started by lenslet)")
+            needs,
+            [
+                ("s3:PutObject".to_string(), false),
+                ("kms:GenerateDataKey".to_string(), true)
+            ]
         );
-        assert_eq!(header.emulator_name(), Some("moto"));
-        assert_eq!(header.upstream, "http://127.0.0.1:5000");
-        let old = line.replace(r#","emulator":"moto (started by lenslet)""#, "");
-        let Some(Record::Run(header)) = parse_record(&old) else {
-            panic!("older header line");
-        };
-        assert_eq!(header.emulator, None);
-        assert_eq!(header.emulator_name(), None);
     }
 
     #[test]
-    fn decodes_sigv4_authorization_with_the_core_wire_parser() {
-        let auth = "AWS4-HMAC-SHA256 Credential=AKID/20261115/eu-west-1/sqs/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc";
-        let decoded = decode_sigv4_header(auth).unwrap();
-        assert_eq!(decoded.access_key_id, "AKID");
-        assert_eq!(decoded.date, "20261115");
-        assert_eq!(decoded.region, "eu-west-1");
-        assert_eq!(decoded.service, "sqs");
-        assert_eq!(decoded.signed_headers, "host;x-amz-date");
-        assert_eq!(decode_sigv4_header("AWS AKID:sig"), None);
+    fn an_older_run_file_is_refused_with_a_message() {
+        let error = version_error(3).unwrap();
+        assert!(error.en.contains("re-run your tests"));
+        assert!(error.zh.contains("重新运行"));
+        assert!(version_error(5).is_some());
+    }
+
+    /// One source of truth: with the fixture's lock exactly one permission
+    /// (and one call) is not in it; with no lock file, all of them are.
+    #[test]
+    fn in_lock_state_agrees_for_rows_calls_and_counts() {
+        let (run, calls) = parse_run_text(RUN_V4);
+        let used = report_access(run.report.as_ref().unwrap());
+        assert_eq!(used.len(), 17);
+
+        let lock = fixture_lock();
+        let rows = access_rows(&used, &lock);
+        assert_eq!(not_in_lock_count(&rows), 1);
+        assert_eq!(rows[0].access().action, "dynamodb:DeleteItem");
+        assert_eq!(rows[0].state, LockState::NotInLock);
+        let calls_not_in_lock: Vec<&str> = calls
+            .iter()
+            .filter(|c| c.not_in_lock(&lock))
+            .map(|c| c.operation.as_str())
+            .collect();
+        assert_eq!(calls_not_in_lock, ["DeleteItem"]);
+        assert!(rows.iter().any(|r| r.test), "# test lines are read");
+
+        let none = LockView::default();
+        let rows = access_rows(&used, &none);
+        assert_eq!(not_in_lock_count(&rows), 17);
+        assert!(
+            rows.iter()
+                .all(|r| r.state == LockState::NotInLock && !r.in_lock())
+        );
+        let with_access = calls.iter().filter(|c| c.access().next().is_some()).count();
+        assert_eq!(
+            calls.iter().filter(|c| c.not_in_lock(&none)).count(),
+            with_access
+        );
     }
 
     #[test]
-    fn demo_is_a_real_finished_run() {
-        let run = crate::demo::demo_run();
-        assert_eq!(run.header.command, ["python", "demo.py"]);
-        let report = run.report.expect("demo has its report");
-        assert_eq!(report.calls, crate::demo::demo_rows().len());
+    fn finds_the_run_log_next_to_the_run_file() {
+        let dir = scratch("model-log");
+        let run_path = dir.join("20261115-094842-6721.jsonl");
+        std::fs::write(&run_path, RUN_V4).unwrap();
+        std::fs::write(dir.join("20261115-094842-6721.log"), LOG_V4).unwrap();
+        let (run, _) = parse_run_text(RUN_V4);
+        let log = log_path(&run, &run_path);
+        assert_eq!(log, dir.join("20261115-094842-6721.log"));
+        let (_, text) = crate::feed::read_log(&log, None).unwrap();
+        assert!(text.unwrap().contains("NoSuchKey"));
+        // No `log` in the header: `<run>.log`.
+        let mut bare = run.clone();
+        bare.header.log = None;
+        assert_eq!(log_path(&bare, &run_path), log);
     }
 
     #[test]
-    fn tolerates_missing_fields_and_rejects_calls_without_identity() {
-        assert!(parse_line(r#"{"type":"call","id":"a","at":"2026-11-15T00:00:00Z"}"#).is_some());
-        assert!(parse_line(r#"{"type":"call","at":"2026-11-15T00:00:00Z"}"#).is_none());
-        assert!(parse_line("not json").is_none());
-        let call = parse_line(
-            r#"{"type":"call","id":"a","at":"t","method":"post","path":"/q?x=1","request":{"headers":[{"name":"content-length","value":"2"},{"name":"x-amz-target","value":"T"}],"body":{"text":"{}","bytes":2}}}"#,
-        )
-        .unwrap();
-        let curl = to_curl(&call, Some("http://127.0.0.1:1/")).unwrap();
-        assert!(curl.contains("POST") && curl.contains("'http://127.0.0.1:1/q?x=1'"));
-        assert!(curl.contains("x-amz-target: T") && !curl.contains("content-length"));
+    fn copies_a_call_as_curl() {
+        let (_, calls) = parse_run_text(RUN_V4);
+        let put = calls.iter().find(|c| c.operation == "PutItem").unwrap();
+        let curl = to_curl(put, Some("http://127.0.0.1:1/")).unwrap();
+        assert!(curl.starts_with("curl") && curl.contains("POST"));
+        assert!(curl.contains("'http://127.0.0.1:1/'"));
+        assert!(curl.contains("x-amz-target: DynamoDB_20120810.PutItem"));
+        assert!(!curl.contains("content-length"));
     }
 }

@@ -1,11 +1,9 @@
 //! Getting a run into the window, off the main thread.
 //!
-//! [`load`] reads the newest [`MAX_ROWS`] lines of a run file once (a single
-//! backwards scan that concatenates its blocks at the end, so it is linear in
-//! what it reads). [`start`] then keeps the run current on a background thread:
-//! it subscribes to the proxy's event stream when the run is live and falls
-//! back to an incremental file tail when the stream is not there (older CLI,
-//! crashed run). Parsing happens on that thread; the window only merges.
+//! [`load`] reads the newest [`MAX_ROWS`] lines of a run file once (one
+//! backwards scan). [`start`] then keeps a live run current from a background
+//! thread with an incremental tail of the file: only complete lines are
+//! parsed, there, and the window only merges.
 
 use std::{
     fs::{self, File},
@@ -19,8 +17,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::{
     fsguard,
-    model::{LineRef, MAX_ROWS, Record, Report, RunHeader, Trace, parse_record, parse_records_at},
-    sse,
+    i18n::Tr,
+    model::{MAX_ROWS, Record, Report, RunHeader, Trace, parse_records_at, version_error},
+    tr,
 };
 
 /// A reload reads backwards in blocks of this size until it has enough lines.
@@ -29,8 +28,8 @@ const TAIL_BLOCK_BYTES: u64 = 1 << 20;
 const MAX_TAIL_BYTES: u64 = 256 << 20;
 /// Never let a partially written line grow without bound.
 const MAX_CARRY_BYTES: usize = 16 << 20;
-/// How often the fallback tail checks the file.
-pub const TAIL_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the tail checks the file.
+pub const TAIL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What the window follows: one fixed file, or a run in the runs directory
 /// (the newest, unless the viewer picked one).
@@ -59,7 +58,7 @@ impl Source {
     pub fn runs_dir(&self) -> Option<&Path> {
         match self {
             Source::Runs { dir, .. } => Some(dir),
-            Source::File(_) => None,
+            Source::File(path) => path.parent(),
         }
     }
 
@@ -84,7 +83,6 @@ pub struct Loaded {
     pub calls: Vec<Trace>,
     pub skipped: usize,
     pub evicted: usize,
-    pub unbounded: bool,
     pub tail: TailState,
 }
 
@@ -92,7 +90,7 @@ pub struct Loaded {
 pub enum LoadResult {
     /// No run file (yet).
     Missing,
-    Error(String),
+    Error(Tr),
     Loaded(Box<Loaded>),
 }
 
@@ -105,24 +103,27 @@ pub fn load_source(source: &Source) -> LoadResult {
 }
 
 /// Read the newest [`MAX_ROWS`] calls of a run file, its header and report.
+/// A run file of another format is an error, never half-read.
 pub fn load(path: &Path) -> LoadResult {
     fsguard::assert_io_allowed();
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return LoadResult::Missing,
-        Err(error) => return LoadResult::Error(short_io_error(&error)),
+        Err(error) => return LoadResult::Error(io_error(&error)),
     };
     let metadata = match file.metadata() {
         Ok(metadata) if metadata.is_dir() => {
-            return LoadResult::Error("trace path is a directory".into());
+            return LoadResult::Error(tr!(
+                "That is a folder, not a run file",
+                "这是一个目录，不是运行文件"
+            ));
         }
         Ok(metadata) => metadata,
-        Err(error) => return LoadResult::Error(short_io_error(&error)),
+        Err(error) => return LoadResult::Error(io_error(&error)),
     };
     let len = metadata.len();
 
-    // Read backwards a block at a time, keeping blocks separately and joining
-    // them once: linear in the bytes read.
+    // Read backwards a block at a time, joining the blocks once at the end.
     let mut blocks: Vec<Vec<u8>> = Vec::new();
     let mut start = len;
     let mut newlines = 0usize;
@@ -134,7 +135,7 @@ pub fn load(path: &Path) -> LoadResult {
             .seek(SeekFrom::Start(start))
             .and_then(|_| file.read_exact(&mut chunk))
         {
-            return LoadResult::Error(short_io_error(&error));
+            return LoadResult::Error(io_error(&error));
         }
         newlines += chunk.iter().filter(|byte| **byte == b'\n').count();
         blocks.push(chunk);
@@ -166,6 +167,29 @@ pub fn load(path: &Path) -> LoadResult {
     };
     let source = Arc::new(path.to_path_buf());
     let mut parsed = parse_records_at(complete, body_offset, Some(&source));
+    // A long run's header is far before the tail that was read.
+    let header = parsed
+        .header
+        .take()
+        .or_else(|| crate::model::read_header(path));
+    let version = header
+        .as_ref()
+        .map(|h| h.version)
+        .or_else(|| parsed.report.as_ref().map(|r| r.version));
+    match version {
+        Some(version) => {
+            if let Some(error) = version_error(version) {
+                return LoadResult::Error(error);
+            }
+        }
+        None if len > 0 => {
+            return LoadResult::Error(tr!(
+                "Not a Lenslet run file (or one this version cannot read) — re-run your tests",
+                "不是 Lenslet 运行文件（或此版本无法读取）— 请重新运行测试"
+            ));
+        }
+        None => {}
+    }
     let mut evicted = 0usize;
     if parsed.calls.len() > MAX_ROWS {
         let drop_n = parsed.calls.len() - MAX_ROWS;
@@ -173,11 +197,8 @@ pub fn load(path: &Path) -> LoadResult {
         evicted += drop_n;
     }
     if start > 0 {
-        // Estimate or count lines before `body_offset` so the UI surfaces exact truncation.
         evicted = evicted.max(1);
     }
-    // A long run's header is far before the tail that was read.
-    let header = parsed.header.or_else(|| crate::model::read_header(path));
     LoadResult::Loaded(Box::new(Loaded {
         path: path.to_path_buf(),
         header,
@@ -185,7 +206,6 @@ pub fn load(path: &Path) -> LoadResult {
         calls: parsed.calls,
         skipped: parsed.bad,
         evicted,
-        unbounded: false,
         tail: TailState {
             offset: len,
             file_key: file_key(&metadata),
@@ -194,82 +214,7 @@ pub fn load(path: &Path) -> LoadResult {
     }))
 }
 
-/// Read every single call in `path` from byte 0 without any `MAX_ROWS` window cap.
-pub fn load_unbounded(path: &Path) -> LoadResult {
-    fsguard::assert_io_allowed();
-    use std::io::{BufRead, BufReader};
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return LoadResult::Missing,
-        Err(error) => return LoadResult::Error(short_io_error(&error)),
-    };
-    let metadata = match file.metadata() {
-        Ok(metadata) if metadata.is_dir() => {
-            return LoadResult::Error("trace path is a directory".into());
-        }
-        Ok(metadata) => metadata,
-        Err(error) => return LoadResult::Error(short_io_error(&error)),
-    };
-    let len = metadata.len();
-    let source = Arc::new(path.to_path_buf());
-    let mut reader = BufReader::with_capacity(128 * 1024, file);
-    let mut line = Vec::with_capacity(8 * 1024);
-    let mut offset: u64 = 0;
-    let mut calls = Vec::new();
-    let mut header = None;
-    let mut report = None;
-    let mut skipped = 0usize;
-    let mut carry = Vec::new();
-
-    loop {
-        line.clear();
-        let n = match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(error) => return LoadResult::Error(short_io_error(&error)),
-        };
-        if !line.ends_with(b"\n") {
-            carry = line.clone();
-            break;
-        }
-        let slice = &line[..n - 1];
-        let line_offset = offset;
-        offset += n as u64;
-        if slice.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match parse_record(&String::from_utf8_lossy(slice)) {
-            Some(Record::Call(mut trace)) => {
-                trace.dehydrate(LineRef {
-                    path: source.clone(),
-                    offset: line_offset,
-                    len: slice.len(),
-                });
-                calls.push(*trace);
-            }
-            Some(Record::Run(h)) => header = Some(*h),
-            Some(Record::End(r)) => report = Some(*r),
-            None => skipped += 1,
-        }
-    }
-
-    LoadResult::Loaded(Box::new(Loaded {
-        path: path.to_path_buf(),
-        header,
-        report,
-        calls,
-        skipped,
-        evicted: 0,
-        unbounded: true,
-        tail: TailState {
-            offset: len,
-            file_key: file_key(&metadata),
-            carry,
-        },
-    }))
-}
-
-/// What the feed thread sends the window.
+/// What the tail thread sends the window.
 #[derive(Debug)]
 pub enum FeedMsg {
     Calls(Vec<Trace>),
@@ -277,91 +222,21 @@ pub enum FeedMsg {
     End(Box<Report>),
     /// The file was truncated or replaced: here is all of it again.
     Reset(Box<Loaded>),
-    Mode(FeedMode),
-    Error(String),
+    Error(Tr),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FeedMode {
-    /// Subscribed to the proxy's event stream.
-    Push,
-    /// Polling the file.
-    Tail,
-    /// Nothing more will come (the run ended).
-    Done,
-}
-
-/// Keep `path` current from a background thread. `endpoint` is the run's
-/// proxy when it may be live. Dropping the receiver stops the thread.
-pub fn start(
-    path: PathBuf,
-    endpoint: Option<String>,
-    tail: TailState,
-) -> UnboundedReceiver<FeedMsg> {
+/// Keep `path` current from a background thread until its report arrives.
+/// Dropping the receiver stops the thread.
+pub fn start(path: PathBuf, tail: TailState) -> UnboundedReceiver<FeedMsg> {
     let (tx, rx) = unbounded();
     std::thread::Builder::new()
-        .name("lenslet-feed".into())
-        .spawn(move || run_feed(path, endpoint, tail, tx))
-        .expect("spawn feed thread");
+        .name("lenslet-tail".into())
+        .spawn(move || tail_loop(&path, tail, &tx))
+        .expect("spawn tail thread");
     rx
 }
 
-fn run_feed(
-    path: PathBuf,
-    endpoint: Option<String>,
-    tail: TailState,
-    tx: UnboundedSender<FeedMsg>,
-) {
-    let mut ended = false;
-    if let Some(endpoint) = endpoint {
-        let source = Arc::new(path.clone());
-        let mut offset: u64 = 0;
-        let mut announced = false;
-        let end = sse::subscribe(
-            &endpoint,
-            || tx.is_closed(),
-            |line| {
-                if !announced {
-                    announced = true;
-                    let _ = tx.unbounded_send(FeedMsg::Mode(FeedMode::Push));
-                }
-                let at = offset;
-                offset += line.len() as u64 + 1;
-                match parse_record(line) {
-                    Some(Record::Call(mut trace)) => {
-                        // The stream mirrors the file byte for byte, so the
-                        // running offset is where this line lives on disk;
-                        // hydration verifies the id and rescans if not.
-                        trace.dehydrate(LineRef {
-                            path: source.clone(),
-                            offset: at,
-                            len: line.len(),
-                        });
-                        tx.unbounded_send(FeedMsg::Calls(vec![*trace])).is_ok()
-                    }
-                    Some(Record::Run(header)) => tx.unbounded_send(FeedMsg::Header(header)).is_ok(),
-                    Some(Record::End(report)) => {
-                        ended = true;
-                        let _ = tx.unbounded_send(FeedMsg::End(report));
-                        false
-                    }
-                    None => !tx.is_closed(),
-                }
-            },
-        );
-        if ended || tx.is_closed() {
-            let _ = tx.unbounded_send(FeedMsg::Mode(FeedMode::Done));
-            return;
-        }
-        // No stream (older CLI, finished or crashed run), or it dropped
-        // before the report: the file is the source of truth from here.
-        let _ = end;
-    }
-    tail_loop(&path, tail, &tx);
-}
-
 fn tail_loop(path: &Path, mut state: TailState, tx: &UnboundedSender<FeedMsg>) {
-    let _ = tx.unbounded_send(FeedMsg::Mode(FeedMode::Tail));
     loop {
         match poll_tail(path, &mut state) {
             TailPoll::Idle => {}
@@ -388,7 +263,6 @@ fn tail_loop(path: &Path, mut state: TailState, tx: &UnboundedSender<FeedMsg>) {
                     return;
                 }
                 if ended {
-                    let _ = tx.unbounded_send(FeedMsg::Mode(FeedMode::Done));
                     return;
                 }
             }
@@ -403,6 +277,7 @@ fn tail_loop(path: &Path, mut state: TailState, tx: &UnboundedSender<FeedMsg>) {
                 LoadResult::Missing => {}
                 LoadResult::Error(error) => {
                     let _ = tx.unbounded_send(FeedMsg::Error(error));
+                    return;
                 }
             },
             TailPoll::Error(error) => {
@@ -422,7 +297,7 @@ enum TailPoll {
     Idle,
     Records(Vec<Record>),
     Replaced,
-    Error(String),
+    Error(Tr),
 }
 
 /// Read what was appended since `state`, parsing only complete lines.
@@ -430,7 +305,7 @@ fn poll_tail(path: &Path, state: &mut TailState) -> TailPoll {
     fsguard::assert_io_allowed();
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) => return TailPoll::Error(short_io_error(&error)),
+        Err(error) => return TailPoll::Error(io_error(&error)),
     };
     let len = metadata.len();
     let key = file_key(&metadata);
@@ -442,14 +317,14 @@ fn poll_tail(path: &Path, state: &mut TailState) -> TailPoll {
     }
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) => return TailPoll::Error(short_io_error(&error)),
+        Err(error) => return TailPoll::Error(io_error(&error)),
     };
     let mut bytes = Vec::with_capacity((len - state.offset) as usize);
     if let Err(error) = file
         .seek(SeekFrom::Start(state.offset))
         .and_then(|_| file.take(len - state.offset).read_to_end(&mut bytes))
     {
-        return TailPoll::Error(short_io_error(&error));
+        return TailPoll::Error(io_error(&error));
     }
     let base_offset = state.offset - state.carry.len() as u64;
     state.offset += bytes.len() as u64;
@@ -479,11 +354,17 @@ fn poll_tail(path: &Path, state: &mut TailState) -> TailPoll {
     TailPoll::Records(records)
 }
 
-fn short_io_error(error: &io::Error) -> String {
+fn io_error(error: &io::Error) -> Tr {
     match error.kind() {
-        io::ErrorKind::PermissionDenied => "permission denied".to_string(),
-        io::ErrorKind::NotFound => "trace file not found".to_string(),
-        _ => error.to_string(),
+        io::ErrorKind::PermissionDenied => tr!(
+            "Permission denied reading the run file",
+            "没有权限读取运行文件"
+        ),
+        io::ErrorKind::NotFound => tr!("The run file is gone", "运行文件已不存在"),
+        _ => tr!(
+            "Cannot read the run file: {error}",
+            "无法读取运行文件：{error}"
+        ),
     }
 }
 
@@ -498,15 +379,48 @@ fn file_key(_metadata: &fs::Metadata) -> u64 {
     0
 }
 
-/// A finished-or-not run in the runs directory, for the run switcher & sidebar.
+// ---------------------------------------------------------------------------
+// The output log
+// ---------------------------------------------------------------------------
+
+/// The most of a test command's output the window keeps.
+pub const MAX_LOG_BYTES: usize = 512 * 1024;
+
+/// The last [`MAX_LOG_BYTES`] of a log file, with its length (to skip
+/// re-reading an unchanged file). Background only.
+pub fn read_log(path: &Path, known_len: Option<u64>) -> Option<(u64, Option<String>)> {
+    fsguard::assert_io_allowed();
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if Some(len) == known_len {
+        return Some((len, None));
+    }
+    if len > MAX_LOG_BYTES as u64 {
+        file.seek(SeekFrom::Start(len - MAX_LOG_BYTES as u64))
+            .ok()?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if len > MAX_LOG_BYTES as u64
+        && let Some(ix) = text.find('\n')
+    {
+        text.drain(..=ix);
+    }
+    Some((len, Some(text)))
+}
+
+// ---------------------------------------------------------------------------
+// The run list
+// ---------------------------------------------------------------------------
+
+/// A run in the runs directory, for the run picker.
 #[derive(Clone, Debug)]
 pub struct RunSummary {
     pub path: PathBuf,
     pub id: String,
     pub header: Option<RunHeader>,
     pub report: Option<Report>,
-    pub bytes: u64,
-    pub pinned: bool,
 }
 
 /// Runs of one project, as indices into the run list (newest first).
@@ -533,19 +447,6 @@ pub fn group_runs(runs: &[RunSummary]) -> Vec<RunGroup> {
 }
 
 impl RunSummary {
-    /// `moto`, when the run's header names its emulator.
-    pub fn emulator(&self) -> Option<&str> {
-        self.header.as_ref()?.emulator_name()
-    }
-
-    pub fn label(&self) -> String {
-        match self.header.as_ref() {
-            Some(header) if !header.command.is_empty() => format!("$ {}", header.command.join(" ")),
-            Some(_) => "proxy session".into(),
-            None => self.id.clone(),
-        }
-    }
-
     pub fn project_name(&self) -> String {
         let Some(cwd) = self
             .header
@@ -553,7 +454,7 @@ impl RunSummary {
             .map(|h| h.cwd.as_str())
             .filter(|s| !s.is_empty())
         else {
-            return "workspace".into();
+            return "—".into();
         };
         Path::new(cwd)
             .file_name()
@@ -562,36 +463,27 @@ impl RunSummary {
             .unwrap_or_else(|| cwd.to_string())
     }
 
-    pub fn ended(&self) -> bool {
-        self.report.is_some()
+    /// An older run file the window refuses to read.
+    pub fn outdated(&self) -> bool {
+        self.header
+            .as_ref()
+            .is_some_and(|h| version_error(h.version).is_some())
     }
 }
 
-/// Every run in `dir`, newest first, with its header, report, and pin state. Background only.
+/// Every run in `dir`, newest first, with its header and report. Background only.
 pub fn list_runs(dir: &Path) -> Vec<RunSummary> {
     fsguard::assert_io_allowed();
-    let pinned = lenslet_core::runs::read_pinned(dir);
     lenslet_core::runs::list(dir)
         .into_iter()
         .rev()
-        .map(|path| {
-            let id = lenslet_core::runs::run_id(&path);
-            let is_pinned = pinned.contains(&id);
-            RunSummary {
-                id,
-                header: crate::model::read_header(&path),
-                report: lenslet_core::runs::report(&path),
-                bytes: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-                pinned: is_pinned,
-                path,
-            }
+        .map(|path| RunSummary {
+            id: lenslet_core::runs::run_id(&path),
+            header: crate::model::read_header(&path),
+            report: lenslet_core::runs::report(&path).ok().flatten(),
+            path,
         })
         .collect()
-}
-
-pub fn set_run_pinned(dir: &Path, id: &str, pin: bool) -> anyhow::Result<bool> {
-    fsguard::assert_io_allowed();
-    lenslet_core::runs::set_pinned(dir, id, pin)
 }
 
 /// Just the newest run file's path (cheap: one directory listing).
@@ -600,72 +492,11 @@ pub fn newest_run(dir: &Path) -> Option<PathBuf> {
     lenslet_core::runs::list(dir).pop()
 }
 
-/// `(file_count, total_bytes)` for the runs directory (including `.log` & sidecar `blobs/*.bin`). Background only.
-pub fn storage_stats(dir: &Path) -> (usize, u64) {
-    fsguard::assert_io_allowed();
-    let files = lenslet_core::runs::list(dir);
-    let mut bytes: u64 = files
-        .iter()
-        .filter_map(|path| fs::metadata(path).ok().map(|m| m.len()))
-        .sum();
-    for path in &files {
-        let log = lenslet_core::runs::log_path_for(path);
-        if let Ok(m) = fs::metadata(&log) {
-            bytes += m.len();
-        }
-    }
-    if let Ok(entries) = fs::read_dir(dir.join("blobs")) {
-        for e in entries.flatten() {
-            if let Ok(m) = e.metadata() {
-                bytes += m.len();
-            }
-        }
-    }
-    (files.len(), bytes)
-}
-
-/// Delete finished run files (never `keep`, pinned runs, or a run still going). Background only.
-pub fn clear_finished_runs(dir: &Path, keep: Option<&Path>) -> usize {
-    fsguard::assert_io_allowed();
-    let pinned = lenslet_core::runs::read_pinned(dir);
-    let mut removed = 0;
-    for path in lenslet_core::runs::list(dir) {
-        if keep.is_some_and(|keep| keep == path) {
-            continue;
-        }
-        if pinned.contains(&lenslet_core::runs::run_id(&path)) {
-            continue;
-        }
-        if lenslet_core::runs::report(&path).is_some() && fs::remove_file(&path).is_ok() {
-            let _ = fs::remove_file(lenslet_core::runs::log_path_for(&path));
-            removed += 1;
-        }
-    }
-    if removed > 0 {
-        lenslet_core::runs::prune_orphan_blobs(dir);
-    }
-    removed
-}
-
-/// A run's report, read from its last line. Background only.
-pub fn read_report(path: &Path) -> Option<Report> {
-    fsguard::assert_io_allowed();
-    lenslet_core::runs::report(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testdata::{header_line, synthetic_run};
-    use futures::StreamExt;
+    use crate::testdata::{RUN_V4, header_line, scratch, synthetic_run};
     use std::io::Write;
-
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lenslet-feed-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("run.jsonl")
-    }
 
     fn loaded(path: &Path) -> Box<Loaded> {
         match load(path) {
@@ -676,7 +507,7 @@ mod tests {
 
     #[test]
     fn loads_the_tail_of_a_long_run_with_its_header_and_hydrates_bodies() {
-        let path = temp("long");
+        let path = scratch("feed-long").join("run.jsonl");
         let big = "x".repeat(20_000);
         let text = synthetic_run(MAX_ROWS + 300, Some(&big), true);
         fs::write(&path, &text).unwrap();
@@ -687,16 +518,40 @@ mod tests {
         let last = loaded.calls.last().unwrap();
         assert!(last.is_dehydrated());
         let full = last.hydrated().unwrap();
-        assert_eq!(
-            full.request.unwrap().body.unwrap().text.unwrap().len(),
-            big.len()
-        );
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        let text = full.request.body.as_ref().unwrap().text.as_ref().unwrap();
+        assert_eq!(text.len(), big.len());
+    }
+
+    #[test]
+    fn reads_the_format_4_fixture() {
+        let path = scratch("feed-fixture").join("run.jsonl");
+        fs::write(&path, RUN_V4).unwrap();
+        let loaded = loaded(&path);
+        assert_eq!(loaded.calls.len(), 15);
+        assert_eq!(loaded.skipped, 0);
+        let report = loaded.report.unwrap();
+        assert_eq!(report.findings.len(), 3);
+        assert_eq!(loaded.header.unwrap().version, 4);
+    }
+
+    #[test]
+    fn refuses_a_run_from_an_older_lenslet() {
+        let path = scratch("feed-old").join("run.jsonl");
+        fs::write(&path, RUN_V4.replace("\"version\":4", "\"version\":3")).unwrap();
+        match load(&path) {
+            LoadResult::Error(error) => {
+                assert!(error.en.contains("older Lenslet"), "{error}");
+                assert!(error.zh.contains("旧版"));
+            }
+            other => panic!("expected the version error, got {other:?}"),
+        }
+        fs::write(&path, "{\"type\":\"run\",\"version\":2}\n").unwrap();
+        assert!(matches!(load(&path), LoadResult::Error(_)));
     }
 
     #[test]
     fn tails_appends_holds_partial_lines_and_detects_truncation() {
-        let path = temp("tail");
+        let path = scratch("feed-tail").join("run.jsonl");
         let text = synthetic_run(3, None, false);
         fs::write(&path, &text).unwrap();
         let mut state = loaded(&path).tail;
@@ -728,49 +583,17 @@ mod tests {
         }
         fs::write(&path, header_line()).unwrap();
         assert!(matches!(poll_tail(&path, &mut state), TailPoll::Replaced));
-        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn pushes_live_records_from_the_event_stream_and_falls_back_to_the_tail() {
-        // Live: everything arrives over the stream, ending with the report.
-        let path = temp("push");
-        let text = synthetic_run(4, None, true);
-        fs::write(&path, &text).unwrap();
-        let events: Vec<String> = text.lines().map(str::to_string).collect();
-        let endpoint = crate::sse::tests::fake_sse_server(events, true);
-        let mut rx = start(path.clone(), Some(endpoint), TailState::default());
-        let msgs: Vec<FeedMsg> = futures::executor::block_on(async {
-            let mut out = Vec::new();
-            while let Some(msg) = rx.next().await {
-                out.push(msg);
-            }
-            out
-        });
-        assert!(matches!(msgs[0], FeedMsg::Mode(FeedMode::Push)));
-        let calls: Vec<&Trace> = msgs
-            .iter()
-            .filter_map(|m| match m {
-                FeedMsg::Calls(c) => Some(c),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(calls.len(), 4);
-        assert_eq!(calls[2].hydrated().unwrap().id, calls[2].id);
-        assert!(msgs.iter().any(|m| matches!(m, FeedMsg::End(_))));
-        assert!(matches!(msgs.last(), Some(FeedMsg::Mode(FeedMode::Done))));
-
-        // No stream (older CLI): tail the file until the report shows up.
-        let path = temp("fallback");
+    fn the_tail_thread_follows_a_live_run_until_its_report() {
+        use futures::StreamExt;
+        let path = scratch("feed-live").join("run.jsonl");
         let partial = synthetic_run(2, None, false);
         fs::write(&path, &partial).unwrap();
         let state = loaded(&path).tail;
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", dead.local_addr().unwrap());
-        drop(dead);
-        let mut rx = start(path.clone(), Some(endpoint), state);
-        let full = synthetic_run(2, None, true);
+        let mut rx = start(path.clone(), state);
+        let full = synthetic_run(4, None, true);
         fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -784,8 +607,31 @@ mod tests {
             }
             out
         });
-        assert!(matches!(msgs[0], FeedMsg::Mode(FeedMode::Tail)));
-        assert!(msgs.iter().any(|m| matches!(m, FeedMsg::End(_))));
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        let calls: usize = msgs
+            .iter()
+            .map(|m| match m {
+                FeedMsg::Calls(c) => c.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(calls, 2);
+        assert!(matches!(msgs.last(), Some(FeedMsg::End(_))));
+    }
+
+    #[test]
+    fn reads_the_end_of_a_long_log() {
+        let path = scratch("feed-log").join("run.log");
+        let line = "0123456789".repeat(10);
+        let text: String = (0..10_000).map(|i| format!("{i} {line}\n")).collect();
+        fs::write(&path, &text).unwrap();
+        let (len, tail) = read_log(&path, None).unwrap();
+        let tail = tail.unwrap();
+        assert!(tail.len() <= MAX_LOG_BYTES);
+        assert!(tail.ends_with(&format!("9999 {line}\n")));
+        assert!(
+            tail.chars().next().unwrap().is_ascii_digit(),
+            "starts on a line"
+        );
+        assert_eq!(read_log(&path, Some(len)).unwrap().1, None, "unchanged");
     }
 }

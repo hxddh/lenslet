@@ -1,18 +1,17 @@
-//! The call inspector: what the call was, why it failed, and its payloads.
-//! Three tabs — Exchange (diagnosis, replay, retries, body & unified diff view
-//! with Decoded/Raw toggle + search match stepper), Headers (structured SigV4 &
-//! query/header table or raw wire text), and Access.
+//! The call inspector, one column read top to bottom: what the call was,
+//! **why it failed**, the permissions it **needs** (and whether lenslet.lock
+//! has them), its bodies (Decoded / Raw, Copy, Save…), then its headers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Render, Stateful, Task, Window, div, prelude::*, px, rgb,
+    AnyElement, App, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Render, Stateful, Task, Window, div, prelude::*, px, rgb,
 };
 
 use super::{
     bodyview::{BodyView, BodyViewEvent},
-    session::Session,
+    session::{Session, SessionEvent},
     widgets,
 };
 use crate::{
@@ -20,40 +19,25 @@ use crate::{
     fonts, glyph,
     i18n::{self, Tr},
     model::{
-        Access, Body, Exchange, Header, Trace, decode_aws_semantic, decode_sigv4_header,
-        decoded_query_params, display_path, format_bytes, format_latency, full_time,
-        operation_label, pretty_body, short_clock, status_label, status_text, to_curl,
+        Access, Body, Header, Message, Trace, body_size, format_bytes, format_latency, full_time,
+        operation_label, status_label, status_text, wire_bytes,
     },
-    replay::{self, ReplayOutcome, ReplayState, ReplayTarget},
-    syntax::SyntaxKind,
     theme::{self, Ui, text},
+    tr,
 };
 
 /// Bodies up to this size are built synchronously (no loading flash).
 const SYNC_BUILD_BYTES: usize = 48 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tab {
-    Exchange,
-    Headers,
-    Access,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Request,
     Response,
-    Replay,
-    Diff,
 }
 
 pub enum InspectorEvent {
     /// Show this permission in the Access view.
     OpenAccess(Access),
-    /// Select another call (a retry attempt).
-    Select(String),
-    /// Open the interactive Request Composer for this call & target.
-    OpenComposer(Arc<Trace>, ReplayTarget),
     Toast(Tr),
 }
 
@@ -63,19 +47,15 @@ pub struct Inspector {
     full: Option<Arc<Trace>>,
     hydrating: bool,
     generation: u64,
-    pub tab: Tab,
     side: Side,
     mode: BodyMode,
-    headers_raw: bool,
+    headers_open: bool,
     tokens: Vec<String>,
     body: Entity<BodyView>,
     docs: DocCache,
-    replays: HashMap<String, ReplayState>,
-    peers: Vec<Arc<Trace>>,
     focus: FocusHandle,
-    home: std::path::PathBuf,
     _build: Option<Task<()>>,
-    _subscription: gpui::Subscription,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl EventEmitter<InspectorEvent> for Inspector {}
@@ -87,32 +67,36 @@ impl Focusable for Inspector {
 }
 
 impl Inspector {
-    pub fn new(session: Entity<Session>, home: std::path::PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let body = cx.new(|cx| BodyView::new("body", cx));
-        let subscription = cx.subscribe(&body, |_, _, event, cx| match event {
-            BodyViewEvent::Copied(bytes) => {
-                cx.emit(InspectorEvent::Toast(i18n::copied(&format_bytes(*bytes))));
-            }
-        });
+        let subscriptions = vec![
+            cx.subscribe(&body, |_, _, event, cx| match event {
+                BodyViewEvent::Copied(bytes) => {
+                    cx.emit(InspectorEvent::Toast(i18n::copied(&format_bytes(*bytes))));
+                }
+            }),
+            // In-lock badges follow lock edits.
+            cx.subscribe(&session, |_, _, event, cx| {
+                if matches!(event, SessionEvent::Derived) {
+                    cx.notify();
+                }
+            }),
+        ];
         Inspector {
             session,
             call: None,
             full: None,
             hydrating: false,
             generation: 0,
-            tab: Tab::Exchange,
             side: Side::Response,
             mode: BodyMode::Decoded,
-            headers_raw: false,
+            headers_open: false,
             tokens: Vec::new(),
             body,
             docs: DocCache::default(),
-            replays: HashMap::new(),
-            peers: Vec::new(),
             focus: cx.focus_handle(),
-            home,
             _build: None,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -124,29 +108,14 @@ impl Inspector {
         self.full.as_ref().or(self.call.as_ref())
     }
 
-    /// Show `call`. Hydrates offloaded bodies in the background.
+    /// Show `call`. Reads shed bodies back from the run file in the background.
     pub fn set_call(&mut self, call: Option<Arc<Trace>>, cx: &mut Context<Self>) {
-        let same = match (&self.call, &call) {
-            (Some(a), Some(b)) => a.id == b.id && a.pending == b.pending && a.status == b.status,
-            (None, None) => true,
-            _ => false,
-        };
-        if same {
+        if self.call.as_ref().map(|c| &c.id) == call.as_ref().map(|c| &c.id) {
             return;
         }
-        let new_call = self.call.as_ref().map(|c| &c.id) != call.as_ref().map(|c| &c.id);
         self.call = call.clone();
         self.generation += 1;
-        if new_call {
-            self.side = default_side(call.as_deref());
-            if matches!(self.side, Side::Replay | Side::Diff) {
-                self.side = Side::Response;
-            }
-        }
-        self.peers = match call.as_deref() {
-            Some(call) => self.session.read(cx).store.invocation_peers(call),
-            None => Vec::new(),
-        };
+        self.side = default_side(call.as_deref());
         match call {
             Some(call) if call.is_dehydrated() => {
                 self.full = None;
@@ -168,14 +137,9 @@ impl Inspector {
                     .ok();
                 }));
             }
-            Some(call) => {
+            other => {
                 self.hydrating = false;
-                self.full = Some(call);
-                self.rebuild(cx);
-            }
-            None => {
-                self.hydrating = false;
-                self.full = None;
+                self.full = other;
                 self.rebuild(cx);
             }
         }
@@ -189,21 +153,10 @@ impl Inspector {
         }
     }
 
-    pub fn step_match(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.body.update(cx, |body, cx| body.step_match(delta, cx));
-    }
-
     /// The look changed: cached highlights are stale.
     pub fn restyle(&mut self, cx: &mut Context<Self>) {
+        self.docs.clear();
         self.rebuild(cx);
-    }
-
-    pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.tab = tab;
-            self.rebuild(cx);
-            cx.notify();
-        }
     }
 
     fn set_side(&mut self, side: Side, cx: &mut Context<Self>) {
@@ -223,6 +176,13 @@ impl Inspector {
         cx.notify();
     }
 
+    fn message<'a>(&self, call: &'a Trace) -> &'a Message {
+        match self.side {
+            Side::Request => &call.request,
+            Side::Response => &call.response,
+        }
+    }
+
     /// Build (or fetch from cache) the document the body view shows.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let ui = Ui::of(cx);
@@ -235,25 +195,16 @@ impl Inspector {
             }
             return;
         };
-        let (side_code, placeholder) = match (self.tab, self.side) {
-            (Tab::Headers, _) => (9u8, ui.t("No headers", "没有 Headers")),
-            (_, Side::Request) => (0, ui.t("No request body", "没有请求体")),
-            (_, Side::Response) if call.pending => {
-                (1, ui.t("Waiting for the response…", "等待响应…"))
-            }
-            (_, Side::Response) => (1, ui.t("No response body", "没有响应体")),
-            (_, Side::Replay) => (2, ui.t("Replay has no body", "重放没有响应体")),
-            (_, Side::Diff) => (3, ui.t("No diff available", "暂无差异")),
+        let placeholder = match self.side {
+            Side::Request => ui.t("No request body", "没有请求体"),
+            Side::Response => ui.t("No response body", "没有响应体"),
         };
-        if self.tab == Tab::Access || (self.tab == Tab::Headers && !self.headers_raw) {
-            return;
-        }
         let key = DocKey {
             call: call.id.clone(),
-            side: side_code,
+            side: self.side as u8,
             mode: self.mode,
             query: self.tokens.join(" "),
-            look: (ui.dark(), ui.accent as u8),
+            look: ui.dark(),
         };
         self.body
             .update(cx, |body, cx| body.set_placeholder(placeholder, cx));
@@ -261,19 +212,23 @@ impl Inspector {
             self.body.update(cx, |body, cx| body.set_doc(doc, cx));
             return;
         }
-        let trace_path = self.session.read(cx).path.clone();
-        let source = DocSource::of(
-            &call,
-            self.tab,
-            self.side,
-            self.replays.get(&call.id),
-            trace_path,
-        );
+        let message = self.message(&call);
+        let source: Option<Body> = message.body.clone();
+        let content_type = message.content_type.clone().unwrap_or_default();
         let tokens = self.tokens.clone();
         let mode = self.mode;
         let palette = ui.p;
-        if !source.needs_async_io() && source.len() <= SYNC_BUILD_BYTES {
-            let doc = Arc::new(source.build(mode, &tokens, &palette));
+        let size = source
+            .as_ref()
+            .map_or(0, |b| b.text.as_ref().map_or(0, String::len));
+        if size <= SYNC_BUILD_BYTES {
+            let doc = Arc::new(body::build(
+                source.as_ref(),
+                &content_type,
+                mode,
+                &tokens,
+                &palette,
+            ));
             self.docs.insert(key, doc.clone());
             self.body.update(cx, |body, cx| body.set_doc(doc, cx));
             return;
@@ -283,7 +238,15 @@ impl Inspector {
         self._build = Some(cx.spawn(async move |this, cx| {
             let doc = cx
                 .background_executor()
-                .spawn(async move { Arc::new(source.build(mode, &tokens, &palette)) })
+                .spawn(async move {
+                    Arc::new(body::build(
+                        source.as_ref(),
+                        &content_type,
+                        mode,
+                        &tokens,
+                        &palette,
+                    ))
+                })
                 .await;
             this.update(cx, |inspector, cx| {
                 inspector.docs.insert(key.clone(), doc.clone());
@@ -295,187 +258,74 @@ impl Inspector {
         }));
     }
 
-    // -- Replay & Composer -----------------------------------------------------
-
-    /// Through the live proxy when the run is live, else straight to the emulator.
-    pub fn replay_target(&self, cx: &App) -> Option<ReplayTarget> {
-        let session = self.session.read(cx);
-        if session.demo {
-            return None;
-        }
-        let header = &session.run.as_ref()?.header;
-        if session.is_live() && !header.endpoint.is_empty() {
-            return Some(ReplayTarget {
-                url: header.endpoint.clone(),
-                via_proxy: true,
-            });
-        }
-        (!header.upstream.is_empty()).then(|| ReplayTarget {
-            url: header.upstream.clone(),
-            via_proxy: false,
-        })
-    }
-
-    pub fn can_replay(&self, cx: &App) -> bool {
-        match (self.full.as_ref(), self.replay_target(cx)) {
-            (Some(call), Some(target)) => replay::can_replay(call, Some(&target.url)),
-            _ => false,
-        }
-    }
-
-    pub fn open_composer(&mut self, cx: &mut Context<Self>) {
-        if let (Some(call), Some(target)) = (self.full.clone(), self.replay_target(cx))
-            && replay::can_replay(&call, Some(&target.url))
-        {
-            cx.emit(InspectorEvent::OpenComposer(call, target));
-        }
-    }
-
-    pub fn apply_composed_replay(
-        &mut self,
-        call_id: String,
-        state: ReplayState,
-        cx: &mut Context<Self>,
-    ) {
-        let done = matches!(state, ReplayState::Done(_));
-        self.replays.insert(call_id.clone(), state);
-        self.tab = Tab::Exchange;
-        if done && self.call.as_ref().is_some_and(|c| c.id == call_id) {
-            self.side = Side::Replay;
-        }
-        self.docs.clear();
-        self.rebuild(cx);
-        cx.notify();
-    }
-
-    pub fn replay(&mut self, cx: &mut Context<Self>) {
-        let (Some(call), Some(target)) = (self.full.clone(), self.replay_target(cx)) else {
+    /// Save the shown body: the exact bytes when the run file has them,
+    /// else the text on screen.
+    pub fn save_body(&mut self, cx: &mut Context<Self>) {
+        let Some(call) = self.full.clone() else {
             return;
         };
-        if !replay::can_replay(&call, Some(&target.url)) {
-            return;
-        }
-        let id = call.id.clone();
-        let trace_path = self.session.read(cx).path.clone();
-        self.replays.insert(id.clone(), ReplayState::Running);
-        self.tab = Tab::Exchange;
-        cx.notify();
-        let home = self.home.clone();
+        let dir = self
+            .session
+            .read(cx)
+            .project_dir()
+            .unwrap_or_else(super::home);
+        let side = self.side;
+        let mode = self.mode;
+        let shown = self.body.read(cx).doc().text.to_string();
+        let suggested = match side {
+            Side::Request => format!("{}-request.txt", call.id),
+            Side::Response => format!("{}-response.txt", call.id),
+        };
+        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn(async move |this, cx| {
-            let outcome = cx
+            let Ok(Ok(Some(dest))) = rx.await else {
+                return;
+            };
+            let target = dest.clone();
+            let written = cx
                 .background_executor()
                 .spawn(async move {
-                    replay::replay_call_with_trace_path(
-                        &call,
-                        &target,
-                        &home,
-                        trace_path.as_deref(),
-                    )
+                    crate::fsguard::assert_io_allowed();
+                    let message = match side {
+                        Side::Request => &call.request,
+                        Side::Response => &call.response,
+                    };
+                    let bytes = message
+                        .body
+                        .as_ref()
+                        .filter(|_| mode == BodyMode::Raw)
+                        .and_then(wire_bytes)
+                        .unwrap_or_else(|| shown.into_bytes());
+                    let len = bytes.len();
+                    std::fs::write(&target, bytes).map(|()| len)
                 })
                 .await;
-            this.update(cx, |inspector, cx| {
-                let state = match outcome {
-                    Ok(done) => ReplayState::Done(done),
-                    Err(error) => ReplayState::Failed(error),
+            this.update(cx, |_, cx| {
+                let path = dest.display();
+                let message = match written {
+                    Ok(n) => {
+                        let size = format_bytes(n);
+                        tr!("Saved {path} ({size})", "已保存 {path}（{size}）")
+                    }
+                    Err(e) => tr!("Could not save: {e}", "保存失败：{e}"),
                 };
-                inspector.apply_composed_replay(id, state, cx);
+                cx.emit(InspectorEvent::Toast(message));
             })
             .ok();
         })
         .detach();
     }
 
-    pub fn save_payload(&mut self, cx: &mut Context<Self>) {
-        let Some(call) = self.full.clone() else {
-            return;
-        };
-        let session = self.session.read(cx);
-        let trace_path = session.path.clone();
-        let dir = session
-            .run
-            .as_ref()
-            .filter(|r| !r.header.cwd.is_empty())
-            .map(|r| std::path::PathBuf::from(&r.header.cwd))
-            .unwrap_or_else(|| self.home.clone());
-        let side = self.side;
-        let mode = self.mode;
-        let doc_text = self.body.read(cx).doc().text.to_string();
-        let replay_raw = self.replays.get(&call.id).and_then(|st| match st {
-            ReplayState::Done(out) => Some(out.raw_bytes.clone()),
-            _ => None,
-        });
-        let suggested = match side {
-            Side::Request => format!("{}-request.bin", call.id),
-            Side::Response => format!("{}-response.bin", call.id),
-            Side::Replay => format!("{}-replay.bin", call.id),
-            Side::Diff => format!("{}-diff.patch", call.id),
-        };
-        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(dest))) = rx.await {
-                let target = dest.clone();
-                let res = cx
-                    .background_executor()
-                    .spawn(async move {
-                        crate::fsguard::assert_io_allowed();
-                        let bytes: Vec<u8> = match side {
-                            Side::Replay if mode == BodyMode::Raw => {
-                                replay_raw.unwrap_or_else(|| doc_text.into_bytes())
-                            }
-                            Side::Request | Side::Response => {
-                                let ex = if side == Side::Request {
-                                    call.request.as_ref()
-                                } else {
-                                    call.response.as_ref()
-                                };
-                                let body_opt = ex.and_then(|e| e.body.as_ref());
-                                if let Some(b) = body_opt
-                                    && (mode == BodyMode::Raw || b.binary)
-                                    && let Some(wire) = b.raw_wire_bytes(trace_path.as_deref())
-                                {
-                                    wire
-                                } else {
-                                    doc_text.into_bytes()
-                                }
-                            }
-                            _ => doc_text.into_bytes(),
-                        };
-                        let len = bytes.len();
-                        std::fs::write(&target, bytes).map(|()| len)
-                    })
-                    .await;
-                this.update(cx, |_, cx| {
-                    let path = dest.display();
-                    let msg = match res {
-                        Ok(n) => {
-                            let size = format_bytes(n);
-                            crate::tr!("Saved {path} ({size})", "已保存 {path}（{size}）")
-                        }
-                        Err(e) => crate::tr!("Could not save: {e}", "保存失败：{e}"),
-                    };
-                    cx.emit(InspectorEvent::Toast(msg));
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
-    pub fn curl(&self, cx: &App) -> Option<String> {
-        let call = self.full.as_ref()?;
-        let session = self.session.read(cx);
-        to_curl(call, session.header_endpoint())
-    }
-
     // -- Render ------------------------------------------------------------------
 
-    fn render_header(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, ui: &Ui, call: &Trace) -> Div {
         let t = ui.p;
         let color = ui.service_color(call.service_name());
-        let mut top = div()
+        let status = ui.status_color(call.status);
+        let top = div()
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .child(
                 div()
                     .flex()
@@ -508,81 +358,10 @@ impl Inspector {
                     .text_ellipsis()
                     .child(operation_label(call).to_string()),
             );
-        if self.can_replay(cx) {
-            let running = matches!(self.replays.get(&call.id), Some(ReplayState::Running));
-            let live = self
-                .replay_target(cx)
-                .is_some_and(|target| target.via_proxy);
-            top = top
-                .child(
-                    widgets::primary_button(
-                        ui,
-                        "replay",
-                        if running {
-                            ui.t("Replaying…", "重放中…")
-                        } else {
-                            ui.t("Replay", "重放")
-                        },
-                    )
-                    .tooltip(widgets::tip(
-                        if live {
-                            ui.t(
-                                "Send again through the live proxy (recorded in this run)",
-                                "通过运行中的代理重新发送（会记录到本次运行）",
-                            )
-                        } else {
-                            ui.t(
-                                "Send again to the emulator (shown here, not recorded)",
-                                "直接重新发送到模拟器（仅在此显示，不记录）",
-                            )
-                        },
-                        Some(i18n::shortcut("⏎")),
-                    ))
-                    .on_click(cx.listener(|inspector, _, _, cx| inspector.replay(cx))),
-                )
-                .child(
-                    widgets::button(ui, "edit-replay", ui.t("Edit", "编辑"))
-                        .tooltip(widgets::tip(
-                            ui.t(
-                                "Edit payload/headers & auto re-sign SigV4",
-                                "编辑请求参数与报文并自动重签 SigV4",
-                            ),
-                            Some(i18n::shortcut("⇧⏎")),
-                        ))
-                        .on_click(cx.listener(|inspector, _, _, cx| inspector.open_composer(cx))),
-                );
-        }
-        if let Some(curl) = self.curl(cx) {
-            top = top.child(
-                widgets::button(ui, "copy-curl", "curl")
-                    .tooltip(widgets::tip(
-                        ui.t("Copy as curl", "复制为 curl"),
-                        Some(i18n::shortcut("⇧C")),
-                    ))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(curl.clone()));
-                        cx.emit(InspectorEvent::Toast(i18n::copied("curl")));
-                    })),
-            );
-        }
-
-        let path = call.path.clone();
-        let semantic = call.semantic_target();
-        let path_row = div()
-            .id("inspector-path")
+        let target = div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .mt(px(6.0))
-            .cursor_pointer()
-            .tooltip(widgets::tip(
-                format!("{} {}", call.method.to_ascii_uppercase(), call.path),
-                Some(ui.t("click to copy", "点击复制").into()),
-            ))
-            .on_click(cx.listener(move |_, _, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                cx.emit(InspectorEvent::Toast(i18n::copied("path")));
-            }))
             .child(
                 div()
                     .flex_shrink_0()
@@ -592,33 +371,11 @@ impl Inspector {
                     .text_color(rgb(t.accent))
                     .child(call.method.to_ascii_uppercase()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .font(fonts::mono_font())
-                    .text_size(px(text::SM))
-                    .text_color(rgb(t.text_dim))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(if !semantic.is_empty() {
-                        semantic
-                    } else {
-                        display_path(call).to_string()
-                    }),
-            );
-
-        let status_tint = if call.pending {
-            rgb(t.amber)
-        } else {
-            ui.status_color(call.status)
-        };
-        let mut meta = div()
+            .child(widgets::mono(ui, call.semantic_target()));
+        let meta = div()
             .flex()
             .items_center()
             .gap(px(12.0))
-            .mt(px(6.0))
             .font(fonts::mono_font())
             .text_size(px(text::SM))
             .child(
@@ -626,131 +383,42 @@ impl Inspector {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(glyph::dot(status_tint, 6.0))
-                    .child(div().text_color(status_tint).child(if call.pending {
-                        "…".to_string()
-                    } else {
-                        format!("{} {}", status_label(call.status), status_text(call.status))
-                    })),
+                    .child(glyph::dot(status, 6.0))
+                    .child(div().text_color(status).child(format!(
+                        "{} {}",
+                        status_label(call.status),
+                        status_text(call.status)
+                    ))),
             )
             .child(
                 div()
-                    .text_color(if call.pending {
-                        rgb(t.amber)
-                    } else {
-                        ui.latency_color(call.ms)
-                    })
-                    .child(if call.pending {
-                        ui.t("running", "进行中").to_string()
-                    } else {
-                        format_latency(call.ms)
-                    }),
+                    .text_color(ui.latency_color(call.ms))
+                    .child(format_latency(call.ms)),
             )
             .child(
                 div()
                     .text_color(rgb(t.text_faint))
-                    .child(short_clock(&call.at)),
+                    .child(full_time(&call.at)),
             );
-        if call.blocked {
-            meta = meta.child(widgets::badge(ui, "BLOCKED", t.purple));
-        }
-        if let Some(retry) = call.retry_badge() {
-            meta = meta.child(widgets::badge(ui, retry, t.accent));
-        }
-        meta = meta.child(div().flex_1()).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(glyph::auth_mark(&t, call.authorization || call.presigned()))
-                .child(
-                    div()
-                        .font_family(fonts::sans())
-                        .text_color(rgb(t.text_muted))
-                        .child(if call.authorization {
-                            "SigV4"
-                        } else if call.presigned() {
-                            "Presigned"
-                        } else {
-                            "Unsigned"
-                        }),
-                ),
-        );
-
         div()
             .flex()
             .flex_col()
+            .gap(px(6.0))
             .px(px(16.0))
             .pt(px(12.0))
-            .child(top)
-            .child(path_row)
-            .child(meta)
-            .child(self.render_tabs(ui, call, cx))
-    }
-
-    fn render_tabs(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
-        let t = ui.p;
-        let headers = call
-            .request
-            .as_ref()
-            .map_or(0, |r| r.headers.len() + r.trailers.len())
-            + call
-                .response
-                .as_ref()
-                .map_or(0, |r| r.headers.len() + r.trailers.len());
-        let permissions = call.access.len() + call.implied.len();
-        let tabs = [
-            (Tab::Exchange, ui.t("Exchange", "报文"), None),
-            (Tab::Headers, "Headers", Some(headers)),
-            (Tab::Access, ui.t("Access", "权限"), Some(permissions)),
-        ];
-        let mut row = div()
-            .flex()
-            .items_end()
-            .gap(px(16.0))
-            .h(px(36.0))
-            .mt(px(4.0))
+            .pb(px(10.0))
             .border_b_1()
-            .border_color(rgb(t.border_subtle));
-        for (index, (tab, label, count)) in tabs.into_iter().enumerate() {
-            let active = self.tab == tab;
-            row = row.child(
-                div()
-                    .id(ElementId::named_usize("tab", index))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(32.0))
-                    .border_b_2()
-                    .border_color(if active {
-                        theme::h(t.accent, 1.0)
-                    } else {
-                        theme::h(t.accent, 0.0)
-                    })
-                    .text_size(px(text::MD))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if active { rgb(t.text) } else { rgb(t.text_dim) })
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(rgb(t.text)))
-                    .on_click(cx.listener(move |inspector, _, _, cx| inspector.set_tab(tab, cx)))
-                    .child(label)
-                    .when_some(count.filter(|n| *n > 0), |el, count| {
-                        el.child(
-                            div()
-                                .font(fonts::mono_font())
-                                .text_size(px(text::XS))
-                                .text_color(rgb(t.text_muted))
-                                .child(count.to_string()),
-                        )
-                    }),
-            );
-        }
-        row
+            .border_color(rgb(t.border_subtle))
+            .child(top)
+            .child(target)
+            .child(meta)
     }
 
-    fn render_problem(&self, ui: &Ui, call: &Trace) -> Option<Div> {
+    fn render_why(&self, ui: &Ui, call: &Trace) -> Option<Div> {
         let t = ui.p;
-        let problem = call.problem.as_ref()?;
+        if call.problem.is_none() && call.error.is_none() {
+            return None;
+        }
         let mut panel = div()
             .flex()
             .flex_col()
@@ -760,15 +428,9 @@ impl Inspector {
             .border_1()
             .border_color(theme::h(t.red, 0.35))
             .bg(theme::h(t.red, 0.06))
-            .child(widgets::label(
-                ui,
-                if call.blocked {
-                    ui.t("BLOCKED BY LENSLET", "已被 LENSLET 拦截")
-                } else {
-                    ui.t("WHY IT FAILED", "失败原因")
-                },
-            ))
-            .child(
+            .child(widgets::label(ui, ui.t("WHY IT FAILED", "失败原因")));
+        if let Some(problem) = call.problem.as_ref() {
+            panel = panel.child(
                 div()
                     .font(fonts::mono_font())
                     .text_size(px(text::LG))
@@ -776,31 +438,32 @@ impl Inspector {
                     .text_color(rgb(t.red))
                     .child(problem.code.clone()),
             );
-        if let Some(message) = problem.message.as_deref().filter(|m| !m.is_empty()) {
-            panel = panel.child(
-                div()
-                    .text_size(px(text::MD))
-                    .line_height(px(17.0))
-                    .text_color(rgb(t.text_soft))
-                    .child(message.to_string()),
-            );
-        }
-        if let Some(hint) = problem.hint.as_deref() {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
-                    .text_size(px(text::MD))
-                    .line_height(px(17.0))
-                    .child(div().text_color(rgb(t.accent)).child("→"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_color(rgb(t.text_body))
-                            .child(hint.to_string()),
-                    ),
-            );
+            if let Some(message) = problem.message.as_deref().filter(|m| !m.is_empty()) {
+                panel = panel.child(
+                    div()
+                        .text_size(px(text::MD))
+                        .line_height(px(17.0))
+                        .text_color(rgb(t.text_soft))
+                        .child(message.to_string()),
+                );
+            }
+            if let Some(hint) = problem.hint.as_deref() {
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .text_size(px(text::MD))
+                        .line_height(px(17.0))
+                        .child(div().text_color(rgb(t.accent)).child("→"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_color(rgb(t.text_body))
+                                .child(i18n::hint(hint, ui.lang).to_string()),
+                        ),
+                );
+            }
         }
         if let Some(error) = call.error.as_deref() {
             panel = panel.child(widgets::mono(ui, error.to_string()));
@@ -808,208 +471,98 @@ impl Inspector {
         Some(panel)
     }
 
-    fn render_replay(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_needs(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let state = self.replays.get(&call.id)?;
-        let id = call.id.clone();
-        let dismiss = widgets::button(ui, "dismiss-replay", ui.t("Dismiss", "关闭")).on_click(
-            cx.listener(move |inspector, _, _, cx| {
-                inspector.replays.remove(&id);
-                if matches!(inspector.side, Side::Replay | Side::Diff) {
-                    inspector.side = Side::Response;
-                    inspector.rebuild(cx);
-                }
-                cx.notify();
-            }),
-        );
-        let card = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .p(px(12.0))
-            .rounded(px(8.0))
-            .border_1();
-        Some(match state {
-            ReplayState::Running => card
-                .border_color(theme::h(t.accent, 0.4))
-                .bg(theme::h(t.accent, 0.06))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(text::MD))
-                        .text_color(rgb(t.accent))
-                        .child(glyph::replay_icon(theme::h(t.accent, 1.0)))
-                        .child(ui.t("Replaying…", "重放中…")),
-                ),
-            ReplayState::Failed(error) => card
-                .border_color(theme::h(t.red, 0.4))
-                .bg(theme::h(t.red, 0.06))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(widgets::label(ui, ui.t("REPLAY FAILED", "重放失败")))
-                        .child(div().flex_1())
-                        .child(dismiss),
-                )
-                .child(widgets::mono(ui, ui.tr(error).to_string())),
-            ReplayState::Done(out) => {
-                let ok = out.status < 400;
-                let color = if ok { t.green } else { t.red };
-                let diff_btn = widgets::button(ui, "show-replay-diff", ui.t("Diff", "对比差异"))
-                    .on_click(cx.listener(|inspector, _, _, cx| {
-                        inspector.set_side(Side::Diff, cx);
-                    }));
-                card.border_color(theme::h(color, 0.4))
-                    .bg(theme::h(color, 0.05))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(widgets::label(ui, ui.t("REPLAY", "重放结果")))
-                            .child(div().flex_1())
-                            .child(diff_btn)
-                            .child(dismiss),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .child(compare_column(
-                                ui,
-                                ui.t("Recorded", "原始"),
-                                call.status,
-                                call.ms,
-                                call.response
-                                    .as_ref()
-                                    .and_then(|r| r.body.as_ref())
-                                    .map_or(0, Body::size),
-                            ))
-                            .child(compare_column(
-                                ui,
-                                ui.t("Replay", "重放"),
-                                out.status,
-                                out.ms,
-                                out.body_bytes,
-                            )),
-                    )
-            }
-        })
-    }
-
-    fn render_retries(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Option<Div> {
-        if self.peers.len() < 2 {
-            return None;
-        }
-        let t = ui.p;
-        let mut chain = div().flex().flex_wrap().items_center().gap(px(6.0));
-        for (index, peer) in self.peers.iter().enumerate() {
-            if index > 0 {
-                chain = chain.child(
-                    div()
-                        .text_size(px(text::XS))
-                        .text_color(rgb(t.text_faint))
-                        .child("→"),
-                );
-            }
-            let current = peer.id == call.id;
-            let color = if peer.blocked {
-                t.purple
-            } else if peer.is_error() {
-                t.red
-            } else {
-                t.green
-            };
-            let id = peer.id.clone();
-            chain = chain.child(
+        let lock = self.session.read(cx).lock.clone();
+        let mut list = div().flex().flex_col();
+        let entries: Vec<(Access, bool, bool)> = call.access_entries().collect();
+        if entries.is_empty() {
+            list = list.child(
                 div()
-                    .id(ElementId::named_usize("retry", index))
-                    .flex()
-                    .items_center()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .rounded(px(5.0))
-                    .border_1()
-                    .border_color(if current {
-                        theme::h(t.accent, 1.0)
-                    } else {
-                        theme::h(color, 0.4)
-                    })
-                    .bg(theme::h(color, 0.08))
-                    .font(fonts::mono_font())
-                    .text_size(px(text::SM))
-                    .text_color(rgb(color))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(theme::h(color, 0.16)))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(InspectorEvent::Select(id.clone()));
-                    }))
-                    .child(format!(
-                        "#{} {} · {}",
-                        peer.attempt.unwrap_or(index as u32 + 1),
-                        if peer.pending {
-                            "…".to_string()
-                        } else {
-                            status_label(peer.status)
-                        },
-                        format_latency(peer.ms)
+                    .text_size(px(text::MD))
+                    .text_color(rgb(t.text_muted))
+                    .child(ui.t(
+                        "No IAM permission Lenslet knows of.",
+                        "Lenslet 未识别到此调用需要的 IAM 权限。",
                     )),
             );
         }
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(widgets::label(ui, ui.t("SDK RETRIES", "SDK 重试")))
-                .child(chain),
-        )
+        for (index, (access, implied, unverified)) in entries.into_iter().enumerate() {
+            let mut name = div().flex().items_center().gap(px(6.0)).child(
+                div()
+                    .font(fonts::mono_font())
+                    .text_size(px(text::MD))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(t.text))
+                    .child(access.action.clone()),
+            );
+            if lock.contains(&access) {
+                name = name.child(widgets::badge(ui, ui.t("IN LOCK", "已入锁"), t.green));
+            } else {
+                name = name.child(widgets::badge(ui, ui.t("NOT IN LOCK", "未入锁"), t.amber));
+            }
+            if implied {
+                name = name.child(widgets::badge(ui, ui.t("IMPLIED", "隐含"), t.text_muted));
+            }
+            if unverified {
+                name = name.child(widgets::badge(ui, ui.t("UNVERIFIED", "未核实"), t.amber));
+            }
+            let resource = access.resource.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::named_usize("call-access", index))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .py(px(5.0))
+                    .px(px(8.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(t.row_hover)))
+                    .tooltip(widgets::tip(
+                        ui.t("Show in Access", "在权限视图中查看"),
+                        Some(i18n::shortcut("2")),
+                    ))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(InspectorEvent::OpenAccess(access.clone()));
+                    }))
+                    .child(name)
+                    .child(widgets::mono(ui, resource)),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(widgets::label(ui, ui.t("NEEDS", "所需权限")))
+            .child(list)
     }
 
-    fn render_exchange(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
+    fn render_bodies(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let replay_done = matches!(self.replays.get(&call.id), Some(ReplayState::Done(_)));
-        let mut segments = vec![
-            widgets::Segment {
-                id: "side-req",
-                label: ui.t("Request", "请求").into(),
-                active: self.side == Side::Request,
-                tooltip: None,
-            },
-            widgets::Segment {
-                id: "side-res",
-                label: ui.t("Response", "响应").into(),
-                active: self.side == Side::Response,
-                tooltip: None,
-            },
-        ];
-        if replay_done {
-            segments.push(widgets::Segment {
-                id: "side-replay",
-                label: ui.t("Replay", "重放").into(),
-                active: self.side == Side::Replay,
-                tooltip: None,
-            });
-            segments.push(widgets::Segment {
-                id: "side-diff",
-                label: ui.t("Diff", "差异").into(),
-                active: self.side == Side::Diff,
-                tooltip: None,
-            });
-        }
         let entity = cx.entity();
-        let sides = widgets::segmented(ui, segments, move |index, _, cx| {
-            let side = [Side::Request, Side::Response, Side::Replay, Side::Diff][index];
-            entity.update(cx, |inspector, cx| inspector.set_side(side, cx));
-        });
-
-        let body_ref = self.body.read(cx);
-        let doc = body_ref.doc().clone();
-        let match_pos = body_ref.match_status();
-        let meta = self.body_meta(call, ui);
+        let sides = widgets::segmented(
+            ui,
+            vec![
+                widgets::Segment {
+                    id: "side-req",
+                    label: ui.t("Request", "请求").into(),
+                    active: self.side == Side::Request,
+                    tooltip: None,
+                },
+                widgets::Segment {
+                    id: "side-res",
+                    label: ui.t("Response", "响应").into(),
+                    active: self.side == Side::Response,
+                    tooltip: None,
+                },
+            ],
+            move |index, _, cx| {
+                let side = [Side::Request, Side::Response][index];
+                entity.update(cx, |inspector, cx| inspector.set_side(side, cx));
+            },
+        );
+        let doc = self.body.read(cx).doc().clone();
         let mut toolbar = div().flex().items_center().gap(px(6.0)).child(sides).child(
             div()
                 .flex_1()
@@ -1020,42 +573,9 @@ impl Inspector {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(meta),
+                .child(body_meta(self.message(call), ui)),
         );
-        if let Some((cur_m, total_m)) = match_pos {
-            let body_prev = self.body.clone();
-            let body_next = self.body.clone();
-            toolbar = toolbar.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(widgets::badge(ui, format!("{cur_m}/{total_m}"), t.accent))
-                    .child(
-                        widgets::button(ui, "match-prev", "▲")
-                            .px(px(5.0))
-                            .tooltip(widgets::tip(
-                                i18n::hits_count(doc.matches, ui.lang),
-                                Some(i18n::shortcut("⇧G")),
-                            ))
-                            .on_click(move |_, _, cx| {
-                                body_prev.update(cx, |b, cx| b.step_match(-1, cx))
-                            }),
-                    )
-                    .child(
-                        widgets::button(ui, "match-next", "▼")
-                            .px(px(5.0))
-                            .tooltip(widgets::tip(
-                                i18n::hits_count(doc.matches, ui.lang),
-                                Some(i18n::shortcut("G")),
-                            ))
-                            .on_click(move |_, _, cx| {
-                                body_next.update(cx, |b, cx| b.step_match(1, cx))
-                            }),
-                    ),
-            );
-        }
-        if doc.decodable && self.side != Side::Diff {
+        if doc.decodable {
             let decoded = self.mode == BodyMode::Decoded;
             let label = match (decoded, doc.decoder) {
                 (true, Some(decoder)) => format!("{} · {decoder}", ui.t("Decoded", "已解码")),
@@ -1066,7 +586,7 @@ impl Inspector {
                 widgets::button(ui, "mode", label)
                     .tooltip(widgets::tip(
                         if decoded {
-                            ui.t("Show the exact wire text", "显示原始报文")
+                            ui.t("Show the text as recorded", "显示记录的原始文本")
                         } else {
                             ui.t(
                                 "Pretty-print and decode AWS encodings",
@@ -1082,408 +602,106 @@ impl Inspector {
             let body = self.body.clone();
             toolbar = toolbar
                 .child(
-                    widgets::button(ui, "save-body", ui.t("Save…", "保存…"))
-                        .tooltip(widgets::tip(
-                            ui.t(
-                                "Save exact payload bytes to a file",
-                                "将完整原始/解码报文保存到文件",
-                            ),
-                            Some(i18n::shortcut("⌥S")),
-                        ))
-                        .on_click(cx.listener(|insp, _, _, cx| insp.save_payload(cx))),
-                )
-                .child(
                     widgets::button(ui, "copy-body", ui.t("Copy", "复制"))
                         .tooltip(widgets::tip(
                             ui.t(
                                 "Copy the selection, or the whole body",
-                                "复制选中字符或整个报文",
+                                "复制选中内容或整个报文",
                             ),
                             Some(i18n::shortcut("C")),
                         ))
                         .on_click(move |_, _, cx| body.update(cx, |body, cx| body.copy(cx))),
+                )
+                .child(
+                    widgets::button(ui, "save-body", ui.t("Save…", "保存…"))
+                        .tooltip(widgets::tip(
+                            ui.t("Save the body to a file", "将报文保存到文件"),
+                            None,
+                        ))
+                        .on_click(cx.listener(|inspector, _, _, cx| inspector.save_body(cx))),
                 );
         }
-
         div()
             .flex()
             .flex_col()
             .flex_1()
-            .min_h(px(0.0))
-            .gap(px(12.0))
-            .p(px(16.0))
-            .children(self.render_problem(ui, call))
-            .children(self.render_replay(ui, call, cx))
-            .children(self.render_retries(ui, call, cx))
+            .min_h(px(160.0))
+            .gap(px(8.0))
             .child(toolbar)
             .child(super::cached(&self.body))
     }
 
-    fn body_meta(&self, call: &Trace, ui: &Ui) -> String {
-        if self.side == Side::Diff {
-            return ui
-                .t(
-                    "Unified diff (Recorded → Replay)",
-                    "统一差异对比（原始 → 重放）",
-                )
-                .into();
-        }
-        let exchange: Option<&Exchange> = match self.side {
-            Side::Request => call.request.as_ref(),
-            Side::Response => call.response.as_ref(),
-            Side::Replay | Side::Diff => None,
-        };
-        if self.side == Side::Replay {
-            if let Some(ReplayState::Done(out)) = self.replays.get(&call.id) {
-                return format!(
-                    "{} · {} headers · {}",
-                    format_bytes(out.body_bytes),
-                    out.headers.len(),
-                    out.content_type.clone().unwrap_or_default()
-                );
-            }
-            return String::new();
-        }
-        let Some(exchange) = exchange else {
-            return String::new();
-        };
-        let mut parts = Vec::new();
-        if let Some(body) = exchange.body.as_ref() {
-            match body.decoded_bytes {
-                Some(dec) if dec != body.size() => {
-                    parts.push(format!(
-                        "{} wire → {} decoded",
-                        format_bytes(body.size()),
-                        format_bytes(dec)
-                    ));
-                }
-                _ => parts.push(format_bytes(body.size())),
-            }
-            if let Some(encoding) = body.encoding.as_deref() {
-                parts.push(encoding.to_string());
-            }
-            if body.blob.is_some() {
-                parts.push(ui.t("lossless blob", "无损旁路存储").into());
-            } else if body.raw_b64.is_some() && (body.binary || body.encoding.is_some()) {
-                parts.push(ui.t("lossless wire", "无损原始帧").into());
-            }
-            if body.truncated {
-                parts.push(ui.t("truncated", "已截断").into());
-            }
-            if body.binary {
-                parts.push(ui.t("binary", "二进制").into());
-            }
-        }
-        if let Some(ct) = exchange
-            .raw_content_type
-            .as_deref()
-            .or(exchange.content_type.as_deref())
-        {
-            parts.push(ct.to_string());
-        }
-        parts.join(" · ")
-    }
-
-    fn render_headers(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
+    fn render_headers(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = ui.p;
-        let entity = cx.entity();
-        let mode_seg = widgets::segmented(
-            ui,
-            vec![
-                widgets::Segment {
-                    id: "hdr-table",
-                    label: ui.t("Structured", "结构化").into(),
-                    active: !self.headers_raw,
-                    tooltip: None,
-                },
-                widgets::Segment {
-                    id: "hdr-raw",
-                    label: ui.t("Raw", "原始文本").into(),
-                    active: self.headers_raw,
-                    tooltip: None,
-                },
-            ],
-            move |ix, _, cx| {
-                entity.update(cx, |insp, cx| {
-                    insp.headers_raw = ix == 1;
-                    insp.rebuild(cx);
-                    cx.notify();
-                });
-            },
-        );
-
-        let body = self.body.clone();
-        let top_bar = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(mode_seg)
-            .child(div().flex_1())
-            .when(self.headers_raw, |bar| {
-                bar.child(
-                    widgets::button(ui, "copy-headers", ui.t("Copy", "复制"))
-                        .on_click(move |_, _, cx| body.update(cx, |body, cx| body.copy(cx))),
-                )
-            });
-
-        if self.headers_raw {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .gap(px(12.0))
-                .p(px(16.0))
-                .child(top_bar)
-                .child(super::cached(&self.body));
-        }
-
-        let mut scroll = div()
-            .id("headers-structured-scroll")
+        let count = call.request.headers.len() + call.response.headers.len();
+        let open = self.headers_open;
+        let mut section = div()
+            .id("headers")
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .gap(px(14.0));
-
-        // 1. Transport, Routing & Latency Breakdown
-        {
-            let mut conn_box = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .p(px(10.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(t.border_subtle))
-                .bg(theme::h(t.text, 0.03))
-                .child(widgets::label(
-                    ui,
-                    ui.t(
-                        "CONNECTION, ROUTING & TIMING",
-                        "连接协议、上游路由与耗时拆解",
-                    ),
-                ));
-            let proto = match (call.protocol.as_deref(), call.upstream_protocol.as_deref()) {
-                (Some(c), Some(u)) if c != u => format!("{c} → {u}"),
-                (Some(c), _) => c.to_string(),
-                (None, Some(u)) => u.to_string(),
-                (None, None) => "HTTP/1.1".to_string(),
-            };
-            conn_box = conn_box.child(widgets::meta_row(ui, "Protocol", widgets::mono(ui, proto)));
-            if let Some(peer) = call.client_addr.as_deref() {
-                conn_box = conn_box.child(widgets::meta_row(
-                    ui,
-                    ui.t("Client Peer", "客户端地址"),
-                    widgets::mono(ui, peer.to_string()),
-                ));
-            }
-            conn_box = conn_box.child(widgets::meta_row(
-                ui,
-                "Host",
-                widgets::mono(ui, call.host.clone()),
-            ));
-            if let Some(up) = call.upstream.as_deref() {
-                conn_box = conn_box.child(widgets::meta_row(
-                    ui,
-                    ui.t("Upstream", "实际转发上游"),
-                    widgets::mono(ui, up.to_string()),
-                ));
-            }
-            let timing = match call.ttfb_ms {
-                Some(ttfb) if !call.pending => {
-                    let transfer = call.ms.saturating_sub(ttfb);
-                    format!(
-                        "{} total (TTFB {} + body {})",
-                        format_latency(call.ms),
-                        format_latency(ttfb),
-                        format_latency(transfer)
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(t.border_subtle))
+            .child(
+                div()
+                    .id("headers-toggle")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .h(px(30.0))
+                    .px(px(16.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(t.row_hover)))
+                    .on_click(cx.listener(|inspector, _, _, cx| {
+                        inspector.headers_open = !inspector.headers_open;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(text::XS))
+                            .text_color(rgb(t.text_muted))
+                            .child(if open { "▾" } else { "▸" }),
                     )
-                }
-                _ if call.pending => ui.t("in flight…", "请求进行中…").to_string(),
-                _ => format_latency(call.ms),
-            };
-            conn_box = conn_box.child(widgets::meta_row(
-                ui,
-                ui.t("Timing", "耗时拆解"),
-                widgets::mono(ui, timing),
-            ));
-            scroll = scroll.child(conn_box);
-        }
-
-        // 2. SigV4 Authorization Scope breakdown (complete, zero redaction)
-        if let Some(auth_val) = call
-            .request
-            .as_ref()
-            .and_then(|r| r.header("authorization"))
-            .and_then(decode_sigv4_header)
-        {
-            let mut sig_box = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .p(px(10.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme::h(t.accent, 0.30))
-                .bg(theme::h(t.accent, 0.05))
-                .child(widgets::label(
-                    ui,
-                    ui.t("SIGV4 CREDENTIAL & SIGNATURE", "SIGV4 凭证域与签名详情"),
-                ));
-            let sig_hex = call
-                .request
-                .as_ref()
-                .and_then(|r| r.header("authorization"))
-                .and_then(|raw| {
-                    raw.split([',', ' '])
-                        .find_map(|p| p.trim().strip_prefix("Signature="))
-                })
-                .unwrap_or_default()
-                .to_string();
-            for (k, v) in [
-                ("Algorithm", "AWS4-HMAC-SHA256".to_string()),
-                ("AccessKeyId", auth_val.access_key_id),
-                (
-                    "Scope",
-                    format!("{}/{}/{}", auth_val.date, auth_val.region, auth_val.service),
-                ),
-                ("SignedHeaders", auth_val.signed_headers),
-                ("Signature", sig_hex),
-            ] {
-                if !v.is_empty() {
-                    sig_box = sig_box.child(widgets::meta_row(ui, k, widgets::mono(ui, v)));
-                }
-            }
-            if let Some(req) = call.request.as_ref() {
-                for hdr_key in [
-                    "x-amz-date",
-                    "x-amz-content-sha256",
-                    "x-amz-decoded-content-length",
-                    "x-amz-security-token",
-                ] {
-                    if let Some(val) = req.header(hdr_key) {
-                        sig_box = sig_box.child(widgets::meta_row(
-                            ui,
-                            hdr_key,
-                            widgets::mono(ui, val.to_string()),
-                        ));
-                    }
-                }
-            }
-            scroll = scroll.child(sig_box);
-        } else if let Some(akid) = call.access_key_id.as_deref() {
-            let sig_box = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .p(px(10.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme::h(t.accent, 0.30))
-                .bg(theme::h(t.accent, 0.05))
-                .child(widgets::label(
-                    ui,
-                    ui.t("PRESIGNED / QUERY CREDENTIAL", "预签名 URL 凭证"),
-                ))
-                .child(widgets::meta_row(
-                    ui,
-                    "AccessKeyId",
-                    widgets::mono(ui, akid.to_string()),
-                ));
-            scroll = scroll.child(sig_box);
-        }
-
-        // 3. Decoded Query Parameters
-        let query_params = decoded_query_params(&call.path);
-        if !query_params.is_empty() {
-            scroll = scroll.child(
-                self.render_kv_section(
-                    ui,
-                    ui.t("QUERY PARAMETERS", "URL 查询参数"),
-                    "qp",
-                    &query_params
-                        .into_iter()
-                        .map(|(name, value)| Header { name, value })
-                        .collect::<Vec<_>>(),
-                    cx,
-                ),
+                    .child(widgets::label(ui, ui.t("HEADERS", "请求头与响应头")))
+                    .child(
+                        div()
+                            .font(fonts::mono_font())
+                            .text_size(px(text::XS))
+                            .text_color(rgb(t.text_muted))
+                            .child(count.to_string()),
+                    ),
+            );
+        if open {
+            section = section.child(
+                div()
+                    .id("headers-list")
+                    .max_h(px(280.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .px(px(16.0))
+                    .pb(px(12.0))
+                    .child(self.header_table(
+                        ui,
+                        ui.t("Request", "请求"),
+                        "req",
+                        &call.request.headers,
+                        cx,
+                    ))
+                    .child(self.header_table(
+                        ui,
+                        ui.t("Response", "响应"),
+                        "res",
+                        &call.response.headers,
+                        cx,
+                    )),
             );
         }
-
-        // 4. Request Headers & Trailers
-        if let Some(req) = call.request.as_ref() {
-            if !req.headers.is_empty() {
-                scroll = scroll.child(self.render_kv_section(
-                    ui,
-                    ui.t("REQUEST HEADERS", "请求 Headers"),
-                    "req-h",
-                    &req.headers,
-                    cx,
-                ));
-            }
-            if !req.trailers.is_empty() {
-                scroll = scroll.child(self.render_kv_section(
-                    ui,
-                    ui.t(
-                        "REQUEST TRAILERS (CHUNKED / H2)",
-                        "请求尾部字段 (Trailers / 校验和)",
-                    ),
-                    "req-t",
-                    &req.trailers,
-                    cx,
-                ));
-            }
-        }
-
-        // 5. Response Headers & Trailers
-        if let Some(res) = call.response.as_ref() {
-            if !res.headers.is_empty() {
-                scroll = scroll.child(self.render_kv_section(
-                    ui,
-                    ui.t("RESPONSE HEADERS", "响应 Headers"),
-                    "res-h",
-                    &res.headers,
-                    cx,
-                ));
-            }
-            if !res.trailers.is_empty() {
-                scroll = scroll.child(self.render_kv_section(
-                    ui,
-                    ui.t("RESPONSE TRAILERS (H2 / STREAM)", "响应尾部字段 (Trailers)"),
-                    "res-t",
-                    &res.trailers,
-                    cx,
-                ));
-            }
-        }
-
-        // 6. Replay Response Headers (if replayed)
-        if let Some(ReplayState::Done(out)) = self.replays.get(&call.id)
-            && !out.headers.is_empty()
-        {
-            scroll = scroll.child(self.render_kv_section(
-                ui,
-                ui.t("REPLAY RESPONSE HEADERS", "重放响应 Headers"),
-                "rep-h",
-                &out.headers,
-                cx,
-            ));
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .gap(px(12.0))
-            .p(px(16.0))
-            .child(top_bar)
-            .child(scroll)
+        section
     }
 
-    fn render_kv_section(
+    fn header_table(
         &self,
         ui: &Ui,
         title: &str,
@@ -1498,32 +716,26 @@ impl Inspector {
             .rounded(px(6.0))
             .border_1()
             .border_color(rgb(t.border_subtle))
-            .bg(rgb(t.code))
-            .overflow_hidden();
+            .bg(rgb(t.code));
         for (ix, h) in items.iter().enumerate() {
             let line = format!("{}: {}", h.name, h.value);
-            let name_label = h.name.clone();
+            let name = h.name.clone();
             table = table.child(
                 div()
                     .id(ElementId::Name(format!("{prefix}-{ix}").into()))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .min_h(px(26.0))
+                    .min_h(px(24.0))
                     .px(px(10.0))
-                    .py(px(3.0))
                     .when(ix > 0, |el| {
                         el.border_t_1().border_color(rgb(t.border_subtle))
                     })
                     .cursor_pointer()
                     .hover(move |s| s.bg(rgb(t.row_hover)))
-                    .tooltip(widgets::tip(
-                        line.clone(),
-                        Some(ui.t("click to copy", "点击复制").into()),
-                    ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(line.clone()));
-                        cx.emit(InspectorEvent::Toast(i18n::copied(&name_label)));
+                        cx.emit(InspectorEvent::Toast(i18n::copied(&name)));
                     }))
                     .child(
                         div()
@@ -1531,7 +743,6 @@ impl Inspector {
                             .flex_shrink_0()
                             .font(fonts::mono_font())
                             .text_size(px(text::XS))
-                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.accent))
                             .whitespace_nowrap()
                             .overflow_hidden()
@@ -1555,300 +766,26 @@ impl Inspector {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .child(widgets::label(ui, title.to_string()))
             .child(table)
     }
 
-    fn render_access(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = ui.p;
-        let live_lock = self.session.read(cx).changes.live_lock.clone();
-        let mut list = div().flex().flex_col();
-        let entries: Vec<_> = call.call_access().collect();
-        if entries.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(text::MD))
-                    .text_color(rgb(t.text_muted))
-                    .child(ui.t(
-                        "This call needs no IAM permission Lenslet knows of.",
-                        "Lenslet 未识别到此调用需要的 IAM 权限。",
-                    )),
-            );
-        }
-        for (index, (access, implied)) in entries.into_iter().enumerate() {
-            let key = access.key();
-            let is_new = match live_lock.as_ref() {
-                Some(locked) => !locked.contains(&key),
-                None => call.is_access_new(access),
-            };
-            let mut name = div().flex().items_center().gap(px(6.0)).child(
-                div()
-                    .font(fonts::mono_font())
-                    .text_size(px(text::MD))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text))
-                    .child(access.action.clone()),
-            );
-            if implied {
-                name = name.child(widgets::badge(ui, "IMPLIED", t.text_muted));
-            }
-            if access.unverified {
-                name = name.child(widgets::badge(ui, "UNVERIFIED", t.amber));
-            }
-            if is_new {
-                name = name.child(if call.blocked {
-                    widgets::badge(ui, "DENIED", t.purple)
-                } else {
-                    widgets::badge(ui, "NOT IN LOCK", t.amber)
-                });
-            }
-            list = list.child(
-                div()
-                    .id(ElementId::named_usize("call-access", index))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .py(px(6.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgb(t.row_hover)))
-                    .tooltip(widgets::tip(
-                        ui.t("Show in Access", "在权限视图中查看"),
-                        None,
-                    ))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(InspectorEvent::OpenAccess(key.clone()));
-                    }))
-                    .child(name)
-                    .child(widgets::mono(ui, access.resource.clone())),
-            );
-        }
-        let request_id = call
-            .response
-            .as_ref()
-            .and_then(|r| {
-                r.header("x-amz-request-id")
-                    .or_else(|| r.header("x-amzn-requestid"))
-            })
-            .unwrap_or("—")
-            .to_string();
-        let extended_id = call
-            .response
-            .as_ref()
-            .and_then(|r| r.header("x-amz-id-2"))
-            .map(str::to_string);
-        let trace_id = call
-            .response
-            .as_ref()
-            .and_then(|r| {
-                r.header("x-amzn-trace-id")
-                    .or_else(|| r.header("x-amz-cf-id"))
-            })
-            .or_else(|| {
-                call.request
-                    .as_ref()
-                    .and_then(|r| r.header("x-amzn-trace-id"))
-            })
-            .map(str::to_string);
-        let user_agent = call
-            .request
-            .as_ref()
-            .and_then(|r| r.header("user-agent"))
-            .map(str::to_string);
-
-        let mut meta = div().flex().flex_col();
-        let semantic = call.semantic_target();
-        if !semantic.is_empty() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                ui.t("Target", "目标资源"),
-                widgets::mono(ui, semantic),
-            ));
-        }
-        if let Some(role) = call.caller_role.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                ui.t("Assumed Role", "调用角色"),
-                widgets::mono(ui, role.to_string()),
-            ));
-        }
-        if let Some(akid) = call.access_key_id.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                "AccessKeyId",
-                widgets::mono(ui, akid.to_string()),
-            ));
-        }
-        meta = meta
-            .child(widgets::meta_row(
-                ui,
-                "Started",
-                widgets::mono(ui, full_time(&call.at)),
-            ))
-            .child(widgets::meta_row(
-                ui,
-                ui.t("Timing", "耗时拆解"),
-                widgets::mono(
-                    ui,
-                    match call.ttfb_ms {
-                        Some(ttfb) if !call.pending => format!(
-                            "{} (TTFB {} + transfer {})",
-                            format_latency(call.ms),
-                            format_latency(ttfb),
-                            format_latency(call.ms.saturating_sub(ttfb))
-                        ),
-                        _ => format_latency(call.ms),
-                    },
-                ),
-            ))
-            .child(widgets::meta_row(
-                ui,
-                "Protocol",
-                widgets::mono(
-                    ui,
-                    match (call.protocol.as_deref(), call.upstream_protocol.as_deref()) {
-                        (Some(c), Some(u)) if c != u => format!("{c} → {u}"),
-                        (Some(c), _) => c.to_string(),
-                        (None, Some(u)) => u.to_string(),
-                        (None, None) => "HTTP/1.1".to_string(),
-                    },
-                ),
-            ))
-            .child(widgets::meta_row(
-                ui,
-                "Host",
-                widgets::mono(ui, call.host.clone()),
-            ));
-        if let Some(up) = call.upstream.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                ui.t("Upstream", "实际转发上游"),
-                widgets::mono(ui, up.to_string()),
-            ));
-        }
-        if let Some(peer) = call.client_addr.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                ui.t("Client Peer", "客户端地址"),
-                widgets::mono(ui, peer.to_string()),
-            ));
-        }
-        meta = meta
-            .child(widgets::meta_row(
-                ui,
-                "Region",
-                widgets::mono(ui, call.region.clone().unwrap_or_else(|| "—".into())),
-            ))
-            .child(widgets::meta_row(
-                ui,
-                "Request ID",
-                widgets::mono(ui, request_id),
-            ));
-        if let Some(ext) = extended_id {
-            meta = meta.child(widgets::meta_row(ui, "Extended ID", widgets::mono(ui, ext)));
-        }
-        if let Some(tid) = trace_id {
-            meta = meta.child(widgets::meta_row(ui, "Trace ID", widgets::mono(ui, tid)));
-        }
-        if let Some(ua) = user_agent {
-            meta = meta.child(widgets::meta_row(ui, "SDK / Agent", widgets::mono(ui, ua)));
-        }
-        meta = meta.child(widgets::meta_row(
-            ui,
-            "Call ID",
-            widgets::mono(ui, call.id.clone()),
-        ));
-        if let Some(invocation) = call.invocation_id.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                "Invocation",
-                widgets::mono(ui, invocation.to_string()),
-            ));
-        }
-        for (side, exchange) in [
-            ("Request", call.request.as_ref()),
-            ("Response", call.response.as_ref()),
-        ] {
-            if let Some(ex) = exchange
-                && let Some(b) = ex.body.as_ref()
-            {
-                let mut size_desc = format_bytes(b.size());
-                if let Some(dec) = b.decoded_bytes
-                    && dec != b.size()
-                {
-                    size_desc = format!("{} wire → {} decoded", size_desc, format_bytes(dec));
-                }
-                if let Some(enc) = b.encoding.as_deref() {
-                    size_desc.push_str(&format!(" · {enc}"));
-                }
-                if let Some(blob) = b.blob.as_deref() {
-                    size_desc.push_str(&format!(" · blob:{}", &blob[..blob.len().min(12)]));
-                }
-                meta = meta.child(widgets::meta_row(
-                    ui,
-                    format!("{side} Body"),
-                    widgets::mono(ui, size_desc),
-                ));
-                if let Some(sha) = b.sha256.as_deref().filter(|sha| sha.len() > 8) {
-                    meta = meta.child(widgets::meta_row(
-                        ui,
-                        format!("{side} SHA-256"),
-                        widgets::mono(ui, sha.to_string()),
-                    ));
-                }
-            }
-        }
-        if let Some(of) = call.replay_of.as_deref() {
-            meta = meta.child(widgets::meta_row(
-                ui,
-                "Replay of",
-                widgets::mono(ui, of.to_string()),
-            ));
-        }
-        div()
-            .id("inspector-access")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll()
-            .gap(px(16.0))
-            .p(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(widgets::label(ui, ui.t("IAM PERMISSIONS", "IAM 权限")))
-                    .child(list),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(widgets::label(ui, ui.t("CALL", "调用")))
-                    .child(meta),
-            )
-    }
-
     fn render_empty(&self, ui: &Ui) -> AnyElement {
         let t = ui.p;
-        let key = |k: &str, label: &str| {
+        let key = |k: String, label: &str| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.0))
                 .child(
                     div()
-                        .min_w(px(56.0))
+                        .min_w(px(64.0))
                         .text_right()
                         .font(fonts::mono_font())
                         .text_size(px(text::SM))
                         .text_color(rgb(t.text_dim))
-                        .child(k.to_string()),
+                        .child(k),
                 )
                 .child(
                     div()
@@ -1868,288 +805,50 @@ impl Inspector {
                 div()
                     .text_size(px(text::LG))
                     .text_color(rgb(t.text_dim))
-                    .child(ui.t("Select a call", "选择一个请求")),
+                    .child(ui.t("Select a call", "选择一个调用")),
             )
-            .child(key("j / k", ui.t("next / previous", "下一个 / 上一个")))
-            .child(key("/", ui.t("search", "搜索")))
-            .child(key(&i18n::shortcut("K"), ui.t("commands", "命令面板")))
+            .child(key(
+                "j / k".into(),
+                ui.t("next / previous", "下一个 / 上一个"),
+            ))
+            .child(key("/".into(), ui.t("search", "搜索")))
+            .child(key(i18n::shortcut("R"), ui.t("run the tests", "运行测试")))
             .into_any_element()
     }
 }
 
-fn compare_column(ui: &Ui, title: &str, status: u16, ms: u64, bytes: usize) -> Div {
-    let t = ui.p;
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .p(px(8.0))
-        .rounded(px(6.0))
-        .bg(theme::h(t.text, 0.03))
-        .child(widgets::label(ui, title.to_string()))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .font(fonts::mono_font())
-                .text_size(px(text::MD))
-                .child(
-                    div()
-                        .text_color(ui.status_color(status))
-                        .child(status_label(status)),
-                )
-                .child(div().text_color(rgb(t.text_dim)).child(format_latency(ms)))
-                .child(
-                    div()
-                        .text_color(rgb(t.text_muted))
-                        .child(format_bytes(bytes)),
-                ),
-        )
+fn body_meta(message: &Message, ui: &Ui) -> String {
+    let mut parts = Vec::new();
+    if let Some(body) = message.body.as_ref() {
+        parts.push(format_bytes(body_size(body)));
+        if let Some(encoding) = body.encoding.as_deref() {
+            parts.push(encoding.to_string());
+        }
+        if body.truncated {
+            parts.push(ui.t("truncated", "已截断").into());
+        }
+        if body.binary {
+            parts.push(ui.t("binary", "二进制").into());
+        }
+    }
+    if let Some(ct) = message.content_type.as_deref() {
+        parts.push(ct.to_string());
+    }
+    parts.join(" · ")
 }
 
 fn default_side(call: Option<&Trace>) -> Side {
-    let Some(call) = call else {
-        return Side::Response;
+    let has = |message: &Message| {
+        message
+            .body
+            .as_ref()
+            .is_some_and(|body| body_size(body) > 0)
     };
-    let has = |exchange: Option<&Exchange>| {
-        exchange
-            .and_then(|e| e.body.as_ref())
-            .is_some_and(|body| !body.is_empty())
-    };
-    if call.is_error() || has(call.response.as_ref()) || !has(call.request.as_ref()) {
-        Side::Response
-    } else {
-        Side::Request
-    }
-}
-
-fn format_for_diff(body: Option<&Body>, content_type: &str, mode: BodyMode) -> String {
-    let Some(body) = body else {
-        return String::new();
-    };
-    let Some(text) = body.text.as_deref() else {
-        return String::new();
-    };
-    if mode == BodyMode::Decoded {
-        if let Some((_, decoded, _)) =
-            decode_aws_semantic(text, content_type, body.encoding.as_deref())
-        {
-            return decoded;
+    match call {
+        Some(call) if !call.is_error() && !has(&call.response) && has(&call.request) => {
+            Side::Request
         }
-        if let Some(pretty) = pretty_body(text, content_type) {
-            return pretty;
-        }
-    }
-    text.to_string()
-}
-
-/// What a document is built from (owned, so it can move to a background task).
-enum DocSource {
-    Body {
-        body: Option<Body>,
-        content_type: String,
-        trace_path: Option<std::path::PathBuf>,
-    },
-    Diff {
-        rec_body: Option<Body>,
-        rec_ct: String,
-        rep_body: Option<Body>,
-        rep_ct: String,
-    },
-    Text(String),
-}
-
-impl DocSource {
-    fn of(
-        call: &Trace,
-        tab: Tab,
-        side: Side,
-        replay: Option<&ReplayState>,
-        trace_path: Option<std::path::PathBuf>,
-    ) -> DocSource {
-        let message =
-            |exchange: Option<&Exchange>, trace_path: Option<std::path::PathBuf>| DocSource::Body {
-                body: exchange.and_then(|e| e.body.clone()),
-                content_type: exchange
-                    .and_then(|e| {
-                        e.raw_content_type
-                            .clone()
-                            .or_else(|| e.content_type.clone())
-                    })
-                    .unwrap_or_default(),
-                trace_path,
-            };
-        if tab == Tab::Headers {
-            let mut text = String::new();
-            let req_proto = call.protocol.as_deref().unwrap_or("HTTP/1.1");
-            text.push_str(&format!(
-                "# Request ({} {} {})\n",
-                call.method.to_ascii_uppercase(),
-                call.path,
-                req_proto
-            ));
-            if let Some(req) = call.request.as_ref() {
-                for header in &req.headers {
-                    text.push_str(&format!("{}: {}\n", header.name, header.value));
-                }
-                if !req.trailers.is_empty() {
-                    text.push_str("\n# Request Trailers\n");
-                    for tr in &req.trailers {
-                        text.push_str(&format!("{}: {}\n", tr.name, tr.value));
-                    }
-                }
-            }
-            text.push_str(&format!(
-                "\n# Response ({} {})\n",
-                call.upstream_protocol
-                    .as_deref()
-                    .or(call.protocol.as_deref())
-                    .unwrap_or("HTTP/1.1"),
-                if call.pending {
-                    "pending".to_string()
-                } else {
-                    format!("{} {}", status_label(call.status), status_text(call.status))
-                }
-            ));
-            if let Some(res) = call.response.as_ref() {
-                for header in &res.headers {
-                    text.push_str(&format!("{}: {}\n", header.name, header.value));
-                }
-                if !res.trailers.is_empty() {
-                    text.push_str("\n# Response Trailers\n");
-                    for tr in &res.trailers {
-                        text.push_str(&format!("{}: {}\n", tr.name, tr.value));
-                    }
-                }
-            }
-            if let Some(ReplayState::Done(out)) = replay
-                && !out.headers.is_empty()
-            {
-                text.push_str(&format!("\n# Replay Response ({})\n", out.status));
-                for header in &out.headers {
-                    text.push_str(&format!("{}: {}\n", header.name, header.value));
-                }
-            }
-            return DocSource::Text(text.trim_end().to_string());
-        }
-        match side {
-            Side::Request => message(call.request.as_ref(), trace_path),
-            Side::Response => message(call.response.as_ref(), trace_path),
-            Side::Replay => match replay {
-                Some(ReplayState::Done(ReplayOutcome {
-                    body_text,
-                    content_type,
-                    body_bytes,
-                    raw_bytes,
-                    ..
-                })) => DocSource::Body {
-                    body: Some(Body {
-                        text: body_text.clone(),
-                        bytes: *body_bytes,
-                        binary: body_text.is_none() && !raw_bytes.is_empty(),
-                        raw_b64: (!raw_bytes.is_empty())
-                            .then(|| lenslet_core::trace::b64_encode(raw_bytes)),
-                        ..Body::default()
-                    }),
-                    content_type: content_type.clone().unwrap_or_default(),
-                    trace_path: None,
-                },
-                _ => DocSource::Text(String::new()),
-            },
-            Side::Diff => match replay {
-                Some(ReplayState::Done(ReplayOutcome {
-                    body_text,
-                    content_type,
-                    body_bytes,
-                    ..
-                })) => DocSource::Diff {
-                    rec_body: call.response.as_ref().and_then(|e| e.body.clone()),
-                    rec_ct: call
-                        .response
-                        .as_ref()
-                        .and_then(|e| e.content_type.clone())
-                        .unwrap_or_default(),
-                    rep_body: body_text.clone().map(|text| Body {
-                        text: Some(text),
-                        bytes: *body_bytes,
-                        ..Body::default()
-                    }),
-                    rep_ct: content_type.clone().unwrap_or_default(),
-                },
-                _ => DocSource::Text(String::new()),
-            },
-        }
-    }
-
-    fn needs_async_io(&self) -> bool {
-        matches!(
-            self,
-            DocSource::Body {
-                body: Some(Body { blob: Some(_), .. }),
-                ..
-            }
-        )
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            DocSource::Body { body, .. } => body.as_ref().map_or(0, |body| {
-                body.text.as_ref().map_or(0, String::len)
-                    + body.hex.as_ref().map_or(0, String::len)
-                    + body.raw_b64.as_ref().map_or(0, String::len)
-            }),
-            DocSource::Diff {
-                rec_body, rep_body, ..
-            } => {
-                rec_body
-                    .as_ref()
-                    .and_then(|b| b.text.as_ref())
-                    .map_or(0, String::len)
-                    + rep_body
-                        .as_ref()
-                        .and_then(|b| b.text.as_ref())
-                        .map_or(0, String::len)
-            }
-            DocSource::Text(text) => text.len(),
-        }
-    }
-
-    fn build(&self, mode: BodyMode, tokens: &[String], palette: &theme::Palette) -> BodyDoc {
-        match self {
-            DocSource::Body {
-                body,
-                content_type,
-                trace_path,
-            } => {
-                let raw_wire = body
-                    .as_ref()
-                    .and_then(|b| b.raw_wire_bytes(trace_path.as_deref()));
-                body::build_with_wire(
-                    body.as_ref(),
-                    raw_wire.as_deref(),
-                    content_type,
-                    mode,
-                    tokens,
-                    palette,
-                )
-            }
-            DocSource::Diff {
-                rec_body,
-                rec_ct,
-                rep_body,
-                rep_ct,
-            } => {
-                let a = format_for_diff(rec_body.as_ref(), rec_ct, mode);
-                let b = format_for_diff(rep_body.as_ref(), rep_ct, mode);
-                let unified = body::diff_text(&a, &b);
-                BodyDoc::from_text(unified, SyntaxKind::Diff, tokens, palette)
-            }
-            DocSource::Text(text) => {
-                BodyDoc::from_text(text.clone(), SyntaxKind::Plain, tokens, palette)
-            }
-        }
+        _ => Side::Response,
     }
 }
 
@@ -2170,13 +869,19 @@ impl Render for Inspector {
         let Some(call) = self.call().cloned() else {
             return container.child(self.render_empty(&ui));
         };
-        let content: AnyElement = match self.tab {
-            Tab::Exchange => self.render_exchange(&ui, &call, cx).into_any_element(),
-            Tab::Headers => self.render_headers(&ui, &call, cx).into_any_element(),
-            Tab::Access => self.render_access(&ui, &call, cx).into_any_element(),
-        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .gap(px(14.0))
+            .p(px(16.0))
+            .children(self.render_why(&ui, &call))
+            .child(self.render_needs(&ui, &call, cx))
+            .child(self.render_bodies(&ui, &call, cx));
         container
-            .child(self.render_header(&ui, &call, cx))
-            .child(content)
+            .child(self.render_header(&ui, &call))
+            .child(body)
+            .child(self.render_headers(&ui, &call, cx))
     }
 }

@@ -3,8 +3,8 @@
 //! Modern AWS SDKs (`boto3`, `aws-sdk-go-v2`, `aws-sdk-js-v3`, `aws-sdk-rust`)
 //! transmit CloudWatch, SQS, SSM, DynamoDB and custom Smithy services using
 //! `Content-Type: application/cbor` (`smithy-protocol: rpc-v2-cbor`). Decoding
-//! CBOR into [`serde_json::Value`] lets both IAM resource derivation and the
-//! desktop Inspector read every field identically to JSON protocols.
+//! CBOR into [`serde_json::Value`] lets IAM resource derivation read every
+//! field the way it reads JSON protocols.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
@@ -29,89 +29,10 @@ pub fn decode_cbor(input: &[u8]) -> Option<Value> {
     (reader.pos == input.len()).then_some(val)
 }
 
-/// Decode a CBOR payload into pretty-printed JSON text.
-pub fn decode_cbor_pretty(input: &[u8]) -> Option<String> {
-    let val = decode_cbor(input)?;
-    serde_json::to_string_pretty(&val).ok()
-}
-
-/// Decode a CBOR payload into compact JSON text (used for bounded trace storage).
-pub fn decode_cbor_compact(input: &[u8]) -> Option<String> {
-    let val = decode_cbor(input)?;
-    serde_json::to_string(&val).ok()
-}
-
-/// Encode a [`serde_json::Value`] into definite-length RFC 8949 CBOR bytes.
-pub fn encode_cbor(value: &Value) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_value(value, &mut out);
-    out
-}
-
-fn encode_value(value: &Value, out: &mut Vec<u8>) {
-    match value {
-        Value::Null => out.push(0xf6),
-        Value::Bool(false) => out.push(0xf4),
-        Value::Bool(true) => out.push(0xf5),
-        Value::Number(num) => {
-            if let Some(u) = num.as_u64() {
-                write_type_arg(out, 0, u);
-            } else if let Some(i) = num.as_i64() {
-                if i >= 0 {
-                    write_type_arg(out, 0, i as u64);
-                } else {
-                    let arg = (-1i128 - (i as i128)) as u64;
-                    write_type_arg(out, 1, arg);
-                }
-            } else if let Some(f) = num.as_f64() {
-                out.push(0xfb);
-                out.extend_from_slice(&f.to_be_bytes());
-            } else {
-                out.push(0xf6);
-            }
-        }
-        Value::String(s) => {
-            write_type_arg(out, 3, s.len() as u64);
-            out.extend_from_slice(s.as_bytes());
-        }
-        Value::Array(items) => {
-            write_type_arg(out, 4, items.len() as u64);
-            for item in items {
-                encode_value(item, out);
-            }
-        }
-        Value::Object(map) => {
-            write_type_arg(out, 5, map.len() as u64);
-            for (k, v) in map {
-                write_type_arg(out, 3, k.len() as u64);
-                out.extend_from_slice(k.as_bytes());
-                encode_value(v, out);
-            }
-        }
-    }
-}
-
-fn write_type_arg(out: &mut Vec<u8>, major: u8, arg: u64) {
-    let hi = major << 5;
-    match arg {
-        0..=23 => out.push(hi | (arg as u8)),
-        24..=0xff => {
-            out.push(hi | 24);
-            out.push(arg as u8);
-        }
-        0x100..=0xffff => {
-            out.push(hi | 25);
-            out.extend_from_slice(&(arg as u16).to_be_bytes());
-        }
-        0x1_0000..=0xffff_ffff => {
-            out.push(hi | 26);
-            out.extend_from_slice(&(arg as u32).to_be_bytes());
-        }
-        _ => {
-            out.push(hi | 27);
-            out.extend_from_slice(&arg.to_be_bytes());
-        }
-    }
+/// Decode a CBOR payload into compact JSON text: what the run file stores
+/// and access derivation reads.
+pub fn decode_cbor_json(input: &[u8]) -> Option<String> {
+    serde_json::to_string(&decode_cbor(input)?).ok()
 }
 
 struct CborReader<'a> {
@@ -412,18 +333,6 @@ mod tests {
         assert_eq!(json["DelaySeconds"], 5);
         assert_eq!(json["Tags"]["env"], "dev");
         assert!(json["At"].as_str().unwrap().starts_with("2023-11-14T"));
-
-        let roundtrip_src = serde_json::json!({
-            "QueueName": "orders",
-            "DelaySeconds": 5,
-            "Negative": -42,
-            "Ratio": 1.5,
-            "Active": true,
-            "Empty": null,
-            "Items": ["a", "b"],
-        });
-        let encoded = encode_cbor(&roundtrip_src);
-        assert_eq!(decode_cbor(&encoded).as_ref(), Some(&roundtrip_src));
     }
 
     fn tagged_epoch(secs: f64) -> Value {
