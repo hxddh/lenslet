@@ -44,7 +44,6 @@ pub struct SearchInput {
     last_scroll_x: Pixels,
     is_selecting: bool,
     access_mode: bool,
-    palette_mode: bool,
     field_mode: bool,
     mono_mode: bool,
     custom_placeholder: Option<SharedString>,
@@ -65,7 +64,6 @@ impl SearchInput {
             last_scroll_x: px(0.0),
             is_selecting: false,
             access_mode: false,
-            palette_mode: false,
             field_mode: false,
             mono_mode: false,
             custom_placeholder: None,
@@ -74,13 +72,7 @@ impl SearchInput {
         }
     }
 
-    pub fn new_palette(cx: &mut Context<Self>) -> Self {
-        let mut s = Self::new(cx);
-        s.palette_mode = true;
-        s
-    }
-
-    /// Reusable single-line editable field (e.g. for Request Composer).
+    /// A single-line editable field for a dialog (the test command).
     pub fn new_field(
         initial: impl Into<SharedString>,
         placeholder: impl Into<SharedString>,
@@ -422,7 +414,7 @@ impl SearchInput {
         let word_jump =
             keystroke.modifiers.alt || (!cfg!(target_os = "macos") && keystroke.modifiers.control);
         match key {
-            "escape" if !self.palette_mode && !self.field_mode => {
+            "escape" if !self.field_mode => {
                 if self.content.is_empty() {
                     cx.emit(SearchEvent::Exit);
                 } else {
@@ -435,7 +427,7 @@ impl SearchInput {
                 }
                 cx.stop_propagation();
             }
-            "enter" if !self.palette_mode && !self.field_mode => {
+            "enter" if !self.field_mode => {
                 cx.emit(SearchEvent::Exit);
                 cx.stop_propagation();
             }
@@ -977,28 +969,22 @@ impl Render for SearchInput {
         let has_query = !self.content.is_empty();
         let placeholder: SharedString = if let Some(custom) = self.custom_placeholder.as_ref() {
             custom.clone()
-        } else if self.palette_mode {
-            ui.t(
-                "Type a command, AWS service, run, or preference…",
-                "输入命令、AWS 服务、历史运行或偏好设置…",
-            )
-            .into()
         } else if self.access_mode {
             if compact {
-                ui.t("Filter Action, ARN…", "筛选 Action、ARN…").into()
+                ui.t("Filter Action, ARN…", "筛选权限、ARN…").into()
             } else {
                 ui.t(
                     "Filter IAM Action, Resource ARN, caller…",
-                    "筛选 IAM Action、Resource ARN 或调用方…",
+                    "筛选 IAM 权限、资源 ARN 或调用方…",
                 )
                 .into()
             }
         } else if compact {
-            ui.t("Search calls, paths…", "搜索请求、Path…").into()
+            ui.t("Search calls, paths…", "搜索调用、路径…").into()
         } else {
             ui.t(
                 "Search calls, Operation, Path, Body…",
-                "搜索请求、Operation、Path、Body…",
+                "搜索调用、操作、路径、报文…",
             )
             .into()
         };
@@ -1052,7 +1038,7 @@ impl Render for SearchInput {
                     })
                     .text_color(rgb(t.text))
                     .track_focus(&self.focus)
-                    .key_context("ComposerField")
+                    .key_context("Field")
                     .cursor_text()
                     .on_key_down(cx.listener(Self::on_key_down))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1070,20 +1056,7 @@ impl Render for SearchInput {
             );
         }
 
-        let trailing: gpui::AnyElement = if self.palette_mode {
-            div()
-                .flex_shrink_0()
-                .font_family(fonts::mono())
-                .text_size(px(10.0))
-                .px(px(5.0))
-                .py(px(1.5))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(rgb(t.border))
-                .text_color(rgb(t.text_muted))
-                .child("ESC")
-                .into_any_element()
-        } else if has_query {
+        let trailing: gpui::AnyElement = if has_query {
             clear.into_any_element()
         } else {
             div()
@@ -1092,49 +1065,9 @@ impl Render for SearchInput {
                 .text_size(px(10.5))
                 .line_height(px(14.0))
                 .text_color(rgb(t.text_faint))
-                .child(if cfg!(target_os = "macos") {
-                    "⌘F"
-                } else {
-                    "Ctrl F"
-                })
+                .child(crate::i18n::shortcut("F"))
                 .into_any_element()
         };
-
-        if self.palette_mode {
-            return self.attach_edit_actions(
-                div()
-                    .w_full()
-                    .h(px(40.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .px(px(14.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border_subtle))
-                    .bg(rgb(t.panel))
-                    .text_size(px(13.0))
-                    .line_height(px(18.0))
-                    .font_family(fonts::sans())
-                    .text_color(rgb(t.text))
-                    .track_focus(&self.focus)
-                    .key_context("Palette")
-                    .cursor_text()
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .child(glyph::search_icon(theme::h(t.accent, 0.9)))
-                    .child(div().flex_1().min_w(px(0.0)).overflow_hidden().child(
-                        SearchTextElement {
-                            input: cx.entity(),
-                            placeholder: placeholder.clone(),
-                        },
-                    ))
-                    .child(trailing),
-                cx,
-            );
-        }
 
         self.attach_edit_actions(
             div()

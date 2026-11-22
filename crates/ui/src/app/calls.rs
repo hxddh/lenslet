@@ -1,21 +1,16 @@
-//! The Calls list: the run's findings first, filter chips, the run mini-map and a virtualized
-//! table. Its view (filtered row indices) is recomputed when inputs change —
-//! incrementally for appends, on the background executor for large searches —
-//! never in render.
+//! The Calls view: the run's findings first (failures, regressions, what is
+//! not in lenslet.lock), filter chips, and a virtualized table. Its view
+//! (filtered row indices) is recomputed when inputs change — incrementally
+//! for appends, on the background executor for large searches — never in
+//! render. A run opens on its first failure.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Stateful, Task, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
-    uniform_list,
+    FontWeight, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy, Stateful, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
 };
-use lenslet_core::findings::{Finding, Severity};
 
 use super::{
     session::{Health, Session, SessionEvent},
@@ -26,33 +21,26 @@ use crate::{
     fonts, glyph,
     i18n::{self, Tr},
     model::{
-        CallFilter, ServiceFacet, StatusFilter, Trace, display_path, ellipsize, format_latency,
-        format_offset, operation_label, search_tokens, short_clock, status_label,
+        CallFilter, FailureKind, Finding, LockView, Regressions, ServiceFacet, StatusFilter, Trace,
+        ellipsize, format_latency, format_offset, operation_label, parse_rfc3339_ms, search_tokens,
+        short_clock, status_label,
     },
     store::{BACKGROUND_SEARCH_ROWS, Stats, ViewQuery, filter_rows},
     theme::{self, Ui, text},
     tr,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SortCol {
-    #[default]
-    Time,
-    Service,
-    Operation,
-    Status,
-    Duration,
-}
-
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(60);
 const PAGE_ROWS: isize = 20;
+/// Findings shown before "+N more".
+const FINDINGS_SHOWN: usize = 5;
 
 pub enum CallsEvent {
-    /// The selected call changed (or was replaced by its finished line).
+    /// The selected call changed.
     Selected(Option<Arc<Trace>>),
     /// Right-click on a row.
     ContextMenu(Point<Pixels>, Arc<Trace>),
-    /// "Review N permissions →": open Access filtered to Not in lock.
+    /// "Review": open Access filtered to Not in lock.
     ReviewNotInLock,
     Toast(Tr),
 }
@@ -66,20 +54,15 @@ pub struct CallsList {
     tokens: Vec<String>,
     rows: Arc<Vec<Arc<Trace>>>,
     view: Arc<Vec<u32>>,
-    changed: usize,
     stats: Stats,
+    not_in_lock_calls: usize,
     facets: Vec<ServiceFacet>,
+    lock: LockView,
     selected: Option<String>,
-    /// The user picked a row; stop following the newest call.
+    /// The user (or a failure) picked a row; stop following the newest call.
     pinned: bool,
-    findings_open: bool,
-    /// What ▶ will talk to (from `lenslet doctor`), for the welcome screen.
+    /// What ▶ will talk to (from `lenslet doctor`), for the empty state.
     emulator: EmulatorStatus,
-    sort_col: SortCol,
-    sort_asc: bool,
-    group_retries: bool,
-    attempt_counts: Arc<HashMap<String, usize>>,
-    timeline_drag_anchor: Option<usize>,
     view_generation: u64,
     _search_task: Option<Task<()>>,
     _subscription: gpui::Subscription,
@@ -97,14 +80,8 @@ impl CallsList {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.subscribe(&session, |this, _, event, cx| match event {
             SessionEvent::RunChanged => this.on_run_changed(cx),
-            SessionEvent::Rows(delta) => this.on_rows(delta.clone(), cx),
-            SessionEvent::Derived => {
-                let changes_matter = this.filter.status == StatusFilter::Changed;
-                this.recompute(cx);
-                if !changes_matter {
-                    cx.notify();
-                }
-            }
+            SessionEvent::Rows(delta) => this.on_rows(delta.appended_from, cx),
+            SessionEvent::Derived => this.recompute(cx),
             SessionEvent::Runs | SessionEvent::Log | SessionEvent::Toast(_) => {}
         });
         let mut list = CallsList {
@@ -116,18 +93,13 @@ impl CallsList {
             tokens: Vec::new(),
             rows: Arc::new(Vec::new()),
             view: Arc::new(Vec::new()),
-            changed: 0,
             stats: Stats::default(),
+            not_in_lock_calls: 0,
             facets: Vec::new(),
+            lock: LockView::default(),
             selected: None,
             pinned: false,
-            findings_open: true,
             emulator: EmulatorStatus::Checking,
-            sort_col: SortCol::Time,
-            sort_asc: true,
-            group_retries: false,
-            attempt_counts: Arc::new(HashMap::new()),
-            timeline_drag_anchor: None,
             view_generation: 0,
             _search_task: None,
             _subscription: subscription,
@@ -145,27 +117,25 @@ impl CallsList {
 
     pub fn selected(&self) -> Option<Arc<Trace>> {
         let id = self.selected.as_deref()?;
-        self.rows.iter().rev().find(|row| row.id == id).cloned()
+        self.rows.iter().find(|row| row.id == id).cloned()
     }
 
     fn on_run_changed(&mut self, cx: &mut Context<Self>) {
         self.filter = CallFilter::default();
+        self.pinned = false;
         if self.selected.take().is_some() {
             cx.emit(CallsEvent::Selected(None));
         }
-        self.pinned = self.session.read(cx).demo;
         self.recompute(cx);
-        if self.pinned {
-            // Demo: open on the first failure, which tells the story.
-            let first_error = self
-                .view
-                .iter()
-                .map(|&ix| &self.rows[ix as usize])
-                .find(|row| row.is_error())
-                .map(|row| row.id.clone());
-            if let Some(id) = first_error {
-                self.select_id(Some(id), true, cx);
-            }
+        self.select_first_failure(cx);
+    }
+
+    /// Open on the first failure: it is what the run is about.
+    fn select_first_failure(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = first_failure(&self.rows, &self.view) {
+            self.select_id(Some(id), false, cx);
+            self.pinned = true;
+            self.reveal(ScrollStrategy::Center);
         }
     }
 
@@ -174,6 +144,7 @@ impl CallsList {
         self.rows = session.store.rows().clone();
         self.stats = session.store.stats();
         self.facets = session.store.facets();
+        self.lock = session.lock.clone();
         if let Some(service) = self.filter.service.as_deref()
             && !self.facets.iter().any(|facet| facet.id == service)
         {
@@ -181,57 +152,31 @@ impl CallsList {
         }
     }
 
-    fn query(&self, cx: &App) -> ViewQuery {
-        let session = self.session.read(cx);
+    fn query(&self) -> ViewQuery {
         ViewQuery {
             filter: self.filter.clone(),
             tokens: self.tokens.clone(),
-            run_start_ms: session.run_start_ms(),
-            changes: session.changes.clone(),
+            lock: self.lock.clone(),
         }
     }
 
-    fn on_rows(&mut self, delta: crate::store::Delta, cx: &mut Context<Self>) {
+    fn on_rows(&mut self, appended_from: Option<usize>, cx: &mut Context<Self>) {
+        let Some(from) = appended_from else {
+            self.recompute(cx);
+            return;
+        };
         let follow = !self.pinned && self.near_bottom();
-        let custom_view = self.group_retries || self.sort_col != SortCol::Time || !self.sort_asc;
-        match delta.appended_from {
-            Some(from) if !delta.reindexed && !custom_view => {
-                self.snapshot(cx);
-                let query = self.query(cx);
-                let mut view = (*self.view).clone();
-                let mut changed = self.changed;
-                for (index, row) in self.rows.iter().enumerate().skip(from) {
-                    if query.changes.is_changed(row) {
-                        changed += 1;
-                    }
-                    if query.matches(row) {
-                        view.push(index as u32);
-                    }
-                }
-                // A replaced row (pending → finished) may now match differently.
-                let replaced_mismatch = delta.replaced.iter().any(|&ix| {
-                    query.matches(&self.rows[ix]) != view.binary_search(&(ix as u32)).is_ok()
-                });
-                if replaced_mismatch || !delta.replaced.is_empty() && self.filter.is_active() {
-                    self.recompute(cx);
-                } else {
-                    self.changed = changed;
-                    self.view = Arc::new(view);
-                    self.after_view_change(follow, cx);
-                }
-            }
-            _ => {
-                self.recompute(cx);
+        self.snapshot(cx);
+        let query = self.query();
+        let mut view = (*self.view).clone();
+        for (index, row) in self.rows.iter().enumerate().skip(from) {
+            self.not_in_lock_calls += usize::from(row.not_in_lock(&self.lock));
+            if query.matches(row) {
+                view.push(index as u32);
             }
         }
-        // The selected call finished: show its final line even if `reindexed` shifted indices.
-        if let Some(id) = self.selected.clone()
-            && let Some(position) = self.rows.iter().position(|row| row.id == id)
-            && (delta.replaced.contains(&position)
-                || delta.replaced_ids.iter().any(|rid| rid == &id))
-        {
-            cx.emit(CallsEvent::Selected(Some(self.rows[position].clone())));
-        }
+        self.view = Arc::new(view);
+        self.after_view_change(follow, cx);
     }
 
     /// Recompute the view from scratch: synchronously when cheap, on the
@@ -240,42 +185,25 @@ impl CallsList {
         self.snapshot(cx);
         self.view_generation += 1;
         let generation = self.view_generation;
-        let query = self.query(cx);
+        let query = self.query();
         let rows = self.rows.clone();
-        let sort_col = self.sort_col;
-        let sort_asc = self.sort_asc;
-        let group_retries = self.group_retries;
         let follow = !self.pinned && self.near_bottom();
-        if query.tokens.is_empty() && rows.len() <= BACKGROUND_SEARCH_ROWS {
-            let (view, changed, counts) =
-                compute_view(&rows, &query, sort_col, sort_asc, group_retries);
+        if query.tokens.is_empty() || rows.len() <= BACKGROUND_SEARCH_ROWS {
+            let (view, not_in_lock) = compute_view(&rows, &query);
             self.view = Arc::new(view);
-            self.changed = changed;
-            self.attempt_counts = Arc::new(counts);
-            self.after_view_change(follow, cx);
-            return;
-        }
-        if rows.len() <= BACKGROUND_SEARCH_ROWS {
-            let (view, changed, counts) =
-                compute_view(&rows, &query, sort_col, sort_asc, group_retries);
-            self.view = Arc::new(view);
-            self.changed = changed;
-            self.attempt_counts = Arc::new(counts);
+            self.not_in_lock_calls = not_in_lock;
             self.after_view_change(follow, cx);
             return;
         }
         self._search_task = Some(cx.spawn(async move |this, cx| {
-            let (view, changed, counts) = cx
+            let (view, not_in_lock) = cx
                 .background_executor()
-                .spawn(
-                    async move { compute_view(&rows, &query, sort_col, sort_asc, group_retries) },
-                )
+                .spawn(async move { compute_view(&rows, &query) })
                 .await;
             this.update(cx, |list, cx| {
                 if list.view_generation == generation {
                     list.view = Arc::new(view);
-                    list.changed = changed;
-                    list.attempt_counts = Arc::new(counts);
+                    list.not_in_lock_calls = not_in_lock;
                     list.after_view_change(follow, cx);
                 }
             })
@@ -289,14 +217,22 @@ impl CallsList {
                 cx.emit(CallsEvent::Selected(None));
             }
         } else if !self.pinned {
-            let newest = self
-                .view
-                .last()
-                .map(|&ix| self.rows[ix as usize].id.clone());
-            self.select_id(newest, false, cx);
-            if follow && !self.view.is_empty() {
-                self.scroll
-                    .scroll_to_item(self.view.len() - 1, ScrollStrategy::Bottom);
+            // While live and nothing is picked: the first failure wins,
+            // otherwise follow the newest call.
+            if let Some(id) = first_failure(&self.rows, &self.view) {
+                self.select_id(Some(id), false, cx);
+                self.pinned = true;
+                self.reveal(ScrollStrategy::Center);
+            } else {
+                let newest = self
+                    .view
+                    .last()
+                    .map(|&ix| self.rows[ix as usize].id.clone());
+                self.select_id(newest, false, cx);
+                if follow && !self.view.is_empty() {
+                    self.scroll
+                        .scroll_to_item(self.view.len() - 1, ScrollStrategy::Bottom);
+                }
             }
         } else if self
             .selected
@@ -352,7 +288,7 @@ impl CallsList {
         if self.filter != filter {
             self.filter = filter;
             self.recompute(cx);
-            self.reveal();
+            self.reveal(ScrollStrategy::Center);
         }
     }
 
@@ -364,21 +300,6 @@ impl CallsList {
             status
         };
         self.set_filter(filter, cx);
-    }
-
-    pub fn toggle_sort(&mut self, col: SortCol, cx: &mut Context<Self>) {
-        if self.sort_col == col {
-            self.sort_asc = !self.sort_asc;
-        } else {
-            self.sort_col = col;
-            self.sort_asc = !matches!(col, SortCol::Duration | SortCol::Status);
-        }
-        self.recompute(cx);
-    }
-
-    pub fn toggle_group_retries(&mut self, cx: &mut Context<Self>) {
-        self.group_retries = !self.group_retries;
-        self.recompute(cx);
     }
 
     pub fn set_service(&mut self, service: Option<String>, cx: &mut Context<Self>) {
@@ -395,8 +316,6 @@ impl CallsList {
     pub fn clear_one_filter(&mut self, cx: &mut Context<Self>) -> bool {
         let mut filter = self.filter.clone();
         let cleared = filter.ids.take().is_some()
-            || filter.time_window.take().is_some()
-            || filter.access.take().is_some()
             || filter.service.take().is_some()
             || std::mem::take(&mut filter.status) != StatusFilter::All;
         if cleared {
@@ -405,16 +324,16 @@ impl CallsList {
         cleared
     }
 
+    /// A finding was clicked: select its first call.
     pub fn show_finding(&mut self, finding: &Finding, cx: &mut Context<Self>) {
-        let ids: HashSet<String> = finding.calls.iter().cloned().collect();
-        let mut filter = self.filter.clone();
-        filter.ids = Some((finding.title.clone(), Arc::new(ids)));
-        filter.status = StatusFilter::All;
-        self.set_filter(filter, cx);
-        if let Some(first) = finding.calls.first() {
-            self.select_id(Some(first.clone()), true, cx);
-            self.reveal();
+        let Some(first) = finding.calls.first().cloned() else {
+            return;
+        };
+        if !self.view_contains(&first) {
+            self.set_filter(CallFilter::default(), cx);
         }
+        self.select_id(Some(first), true, cx);
+        self.reveal(ScrollStrategy::Center);
     }
 
     // -- Selection -----------------------------------------------------------
@@ -450,7 +369,6 @@ impl CallsList {
         } as usize;
         let id = self.rows[self.view[next] as usize].id.clone();
         self.select_id(Some(id), true, cx);
-        // Non-strict: scrolls only when the row is out of view.
         self.scroll.scroll_to_item(next, ScrollStrategy::Top);
     }
 
@@ -464,36 +382,38 @@ impl CallsList {
         }
         let index = if last { self.view.len() - 1 } else { 0 };
         let id = self.rows[self.view[index] as usize].id.clone();
+        self.select_id(Some(id), true, cx);
         // Jumping to the end resumes following new calls.
-        self.select_id(Some(id), !last, cx);
         if last {
             self.pinned = false;
         }
         self.scroll.scroll_to_item(index, ScrollStrategy::Bottom);
     }
 
-    fn reveal(&self) {
+    fn reveal(&self, strategy: ScrollStrategy) {
         if let Some(position) = self.position() {
-            self.scroll.scroll_to_item(position, ScrollStrategy::Center);
+            self.scroll.scroll_to_item(position, strategy);
         }
     }
 
     // -- Render --------------------------------------------------------------
 
-    fn render_subbar(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
+    fn render_chips(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let stats = self.stats;
         let status = self.filter.status;
         let entity = cx.entity();
-        let status_chip =
-            |id: &'static str, label: String, count: usize, value: StatusFilter, color: u32| {
-                let entity = entity.clone();
-                widgets::chip(ui, id, label, Some(count), status == value, color).on_click(
-                    move |_, _, cx| {
-                        entity.update(cx, |list, cx| list.set_status(value, cx));
-                    },
-                )
-            };
+        let status_chip = |id: &'static str, label: &str, count: usize, value, color| {
+            let entity = entity.clone();
+            widgets::chip(
+                ui,
+                id,
+                label.to_string(),
+                Some(count),
+                status == value,
+                color,
+            )
+            .on_click(move |_, _, cx| entity.update(cx, |list, cx| list.set_status(value, cx)))
+        };
         let mut bar = div()
             .flex()
             .items_center()
@@ -506,91 +426,43 @@ impl CallsList {
             .overflow_hidden()
             .child(status_chip(
                 "f-all",
-                ui.t("All", "全部").into(),
-                stats.total,
+                ui.t("All", "全部"),
+                self.stats.total,
                 StatusFilter::All,
                 t.accent,
             ));
-        if stats.errors > 0 {
+        if self.stats.errors > 0 || status == StatusFilter::Errors {
             bar = bar.child(status_chip(
                 "f-errors",
-                ui.t("Errors", "错误").into(),
-                stats.errors,
+                ui.t("Errors", "错误"),
+                self.stats.errors,
                 StatusFilter::Errors,
                 t.red,
             ));
         }
-        if self.changed > 0 || status == StatusFilter::Changed {
+        if self.not_in_lock_calls > 0 || status == StatusFilter::NotInLock {
             bar = bar.child(
                 status_chip(
-                    "f-changed",
-                    ui.t("Changed", "有变化").into(),
-                    self.changed,
-                    StatusFilter::Changed,
+                    "f-not-in-lock",
+                    ui.t("Not in lock", "未入锁"),
+                    self.not_in_lock_calls,
+                    StatusFilter::NotInLock,
                     t.amber,
                 )
                 .tooltip(widgets::tip(
                     ui.t(
-                        "Calls that differ from the baseline: new failures or new access",
-                        "与对比基线不同的请求：新失败或新增权限",
+                        "Calls that need a permission lenslet.lock does not have",
+                        "需要 lenslet.lock 中没有的权限的调用",
                     ),
                     None,
                 )),
             );
         }
-        if stats.retries > 0 {
-            bar = bar.child(status_chip(
-                "f-retries",
-                ui.t("Retries", "重试").into(),
-                stats.retries,
-                StatusFilter::Retries,
-                t.accent,
-            ));
-            let entity = entity.clone();
-            bar = bar.child(
-                widgets::chip(
-                    ui,
-                    "f-group-retries",
-                    ui.t("Group retries", "合并重试"),
-                    None,
-                    self.group_retries,
-                    t.accent,
-                )
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "Collapse multi-attempt SDK invocations into their final attempt",
-                        "将同一次 SDK 调用的多次重试折叠为最终尝试",
-                    ),
-                    None,
-                ))
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |list, cx| list.toggle_group_retries(cx));
-                }),
-            );
-        }
-        if stats.slow > 0 {
-            bar = bar.child(status_chip(
-                "f-slow",
-                ui.t("Slow", "慢").into(),
-                stats.slow,
-                StatusFilter::Slow,
-                t.amber,
-            ));
-        }
-        if stats.blocked > 0 {
-            bar = bar.child(status_chip(
-                "f-blocked",
-                ui.t("Blocked", "已拦截").into(),
-                stats.blocked,
-                StatusFilter::Blocked,
-                t.purple,
-            ));
-        }
         if self.facets.len() > 1 {
             bar = bar.child(div().w(px(1.0)).h(px(16.0)).bg(rgb(t.border)).mx(px(2.0)));
             for (index, facet) in self.facets.iter().enumerate() {
                 let active = self.filter.service.as_deref() == Some(facet.id.as_str());
-                let color = ui.service_color(&facet.label);
+                let color = color_hex(ui.service_color(&facet.label));
                 let id = facet.id.clone();
                 let entity = entity.clone();
                 bar = bar.child(
@@ -600,7 +472,7 @@ impl CallsList {
                         ellipsize(&facet.label, 14),
                         Some(facet.count),
                         active,
-                        color_hex(color),
+                        color,
                     )
                     .on_click(move |_, _, cx| {
                         let id = id.clone();
@@ -609,93 +481,36 @@ impl CallsList {
                 );
             }
         }
-        // Active one-off filters as removable chips.
-        let mut extra: Vec<(SharedString, CallFilter)> = Vec::new();
-        if let Some((title, _)) = self.filter.ids.as_ref() {
-            let mut next = self.filter.clone();
-            next.ids = None;
-            extra.push((format!("{} ×", ellipsize(title, 28)).into(), next));
-        }
-        if let Some(access) = self.filter.access.as_ref() {
-            let mut next = self.filter.clone();
-            next.access = None;
-            extra.push((format!("{} ×", access.action).into(), next));
-        }
-        if let Some((start, end)) = self.filter.time_window {
-            let mut next = self.filter.clone();
-            next.time_window = None;
-            extra.push((
-                format!("{}–{} ×", format_offset(start), format_offset(end)).into(),
-                next,
-            ));
-        }
-        for (index, (title, next)) in extra.into_iter().enumerate() {
-            let entity = entity.clone();
-            bar = bar.child(
-                widgets::chip(
-                    ui,
-                    ElementId::named_usize("f-extra", index),
-                    title,
-                    None,
-                    true,
-                    t.accent,
-                )
-                .on_click(move |_, _, cx| {
-                    let next = next.clone();
-                    entity.update(cx, |list, cx| list.set_filter(next, cx));
-                }),
-            );
-        }
-        let sess_ref = self.session.read(cx);
-        let evicted = sess_ref.evicted;
-        let unbounded = sess_ref.store.is_unbounded();
-        let skipped = sess_ref.skipped;
-        let session_ent = self.session.clone();
-
+        let session = self.session.read(cx);
+        let (evicted, skipped) = (session.evicted, session.skipped);
+        let max = crate::model::MAX_ROWS;
         bar = bar.child(div().flex_1());
-        if evicted > 0 && !unbounded {
-            bar = bar.child(
-                widgets::chip(
-                    ui,
-                    "load-all-evicted",
-                    ui.tr(&tr!(
-                        "+{evicted} earlier · Load all",
-                        "+{evicted} 更早调用 · 加载全部"
-                    ))
-                    .to_string(),
-                    None,
-                    true,
-                    t.amber,
-                )
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "Showing newest 5,000 calls for speed; click to load 100% of calls in this trace",
-                        "默认展示最新 5,000 条调用；点击无损加载该追踪文件的全部记录",
-                    ),
-                    None,
-                ))
-                .on_click(move |_, _, cx| {
-                    session_ent.update(cx, |s, cx| s.load_all_calls(cx));
-                }),
-            );
-        }
-        if skipped > 0 {
+        if evicted > 0 {
             bar = bar.child(
                 widgets::badge(
                     ui,
-                    ui.tr(&tr!("{skipped} unreadable lines", "{skipped} 行无法解析"))
+                    ui.tr(&tr!("newest {max} shown", "仅显示最新 {max} 条"))
                         .to_string(),
-                    t.red,
+                    t.text_muted,
                 )
-                .id("corrupt-lines-badge")
+                .id("evicted")
                 .tooltip(widgets::tip(
-                    ui.t(
-                        "Malformed or truncated JSONL lines were encountered in the trace file",
-                        "追踪文件中存在损坏或截断的 JSONL 行",
-                    ),
+                    ui.tr(&tr!(
+                        "{evicted} earlier calls are not shown; the Access view still counts them",
+                        "另有 {evicted} 条更早的调用未显示；权限视图仍会统计它们"
+                    ))
+                    .to_string(),
                     None,
                 )),
             );
+        }
+        if skipped > 0 {
+            bar = bar.child(widgets::badge(
+                ui,
+                ui.tr(&tr!("{skipped} unreadable lines", "{skipped} 行无法解析"))
+                    .to_string(),
+                t.red,
+            ));
         }
         bar.when(!self.tokens.is_empty() || self.filter.is_active(), |bar| {
             bar.child(
@@ -709,309 +524,108 @@ impl CallsList {
         })
     }
 
-    fn render_findings(
-        &self,
-        ui: &Ui,
-        findings: &[Finding],
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        if findings.is_empty() {
+    fn render_findings(&self, ui: &Ui, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let t = ui.p;
+        let session = self.session.read(cx);
+        let items = strip_items(
+            &session.failures,
+            &self.rows,
+            session.run.as_ref().and_then(|r| r.regressions()),
+            session.not_in_lock,
+            session.lock.exists(),
+        );
+        if items.is_empty() {
             return None;
         }
-        let t = ui.p;
-        let open = self.findings_open;
-        let errors = findings
-            .iter()
-            .filter(|f| f.severity == Severity::Error)
-            .count();
-        let header = div()
-            .id("findings-toggle")
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(28.0))
-            .px(px(theme::ROW_PAD_X))
-            .cursor_pointer()
-            .hover(move |s| s.bg(theme::h(t.text, 0.03)))
-            .on_click(cx.listener(|list, _, _, cx| {
-                list.findings_open = !list.findings_open;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .text_size(px(text::XS))
-                    .text_color(rgb(t.text_muted))
-                    .child(if open { "▾" } else { "▸" }),
-            )
-            .child(widgets::label(ui, ui.t("FINDINGS", "发现")))
-            .child(
-                div()
-                    .font_family(fonts::mono())
-                    .text_size(px(text::XS))
-                    .text_color(rgb(if errors > 0 { t.red } else { t.text_muted }))
-                    .child(findings.len().to_string()),
-            );
         let mut strip = div()
+            .id("findings")
             .flex()
             .flex_col()
+            .py(px(4.0))
             .border_b_1()
             .border_color(rgb(t.border_subtle))
-            .bg(rgb(t.panel))
-            .child(header);
-        if open {
-            let mut list = div().flex().flex_col().pb(px(4.0));
-            for (index, finding) in findings.iter().take(6).enumerate() {
-                let color = match finding.severity {
-                    Severity::Error => t.red,
-                    Severity::Warning => t.amber,
-                    Severity::Info => t.accent,
-                };
-                let glyph = match finding.severity {
-                    Severity::Error => "●",
-                    Severity::Warning => "▲",
-                    Severity::Info => "◆",
-                };
-                let finding_clone = finding.clone();
-                let mut row = div()
-                    .id(ElementId::named_usize("finding", index))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(24.0))
-                    .px(px(theme::ROW_PAD_X))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgb(t.row_hover)))
-                    .on_click(cx.listener(move |list, _, _, cx| {
-                        list.show_finding(&finding_clone, cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(12.0))
-                            .text_size(px(9.0))
-                            .text_color(rgb(color))
-                            .child(glyph),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(text::MD))
-                            .text_color(rgb(t.text_soft))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(finding.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .font(fonts::mono_font())
-                            .text_size(px(text::XS))
-                            .text_color(rgb(t.text_muted))
-                            .child(i18n::calls_count(finding.calls.len(), ui.lang)),
-                    );
-                if let Some(detail) = finding.detail.clone() {
-                    row = row.tooltip(widgets::tip(detail, None));
-                }
-                list = list.child(row);
-            }
-            if findings.len() > 6 {
-                list = list.child(
+            .bg(rgb(t.panel));
+        let item = |id: ElementId, color: u32, glyph_text: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(24.0))
+                .px(px(theme::ROW_PAD_X))
+                .child(
                     div()
-                        .px(px(theme::ROW_PAD_X + 20.0))
-                        .text_size(px(text::SM))
-                        .text_color(rgb(t.text_muted))
-                        .child(i18n::more_count(findings.len() - 6, ui.lang)),
-                );
-            }
-            strip = strip.child(list);
+                        .w(px(12.0))
+                        .text_size(px(9.0))
+                        .text_color(rgb(color))
+                        .child(glyph_text),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_size(px(text::MD))
+                        .text_color(rgb(t.text_soft))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(label),
+                )
+        };
+        for (index, entry) in items.into_iter().enumerate() {
+            let id = ElementId::named_usize("finding", index);
+            let row = match entry {
+                StripItem::Failure {
+                    finding,
+                    title,
+                    new,
+                } => {
+                    let calls = finding.calls.len();
+                    item(id, t.red, "●", ui.tr(&title).to_string())
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(rgb(t.row_hover)))
+                        .on_click(
+                            cx.listener(move |list, _, _, cx| list.show_finding(&finding, cx)),
+                        )
+                        .when(new, |row| {
+                            row.child(widgets::badge(ui, ui.t("NEW", "新"), t.red))
+                        })
+                        .when(calls > 1, |row| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font(fonts::mono_font())
+                                    .text_size(px(text::XS))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(i18n::calls_count(calls, ui.lang)),
+                            )
+                        })
+                }
+                StripItem::More(n) => item(id, t.text_muted, "", i18n::more_count(n, ui.lang)),
+                StripItem::Fixed(text) => item(id, t.green, "✓", ui.tr(&text).to_string()),
+                StripItem::NotInLock(text) => item(id, t.amber, "▲", ui.tr(&text).to_string())
+                    .child(
+                        widgets::button(ui, "finding-review", ui.t("Review →", "查看 →")).on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(CallsEvent::ReviewNotInLock)),
+                        ),
+                    ),
+            };
+            strip = strip.child(row);
         }
         Some(strip)
     }
 
-    fn render_timeline(
-        &self,
-        ui: &Ui,
-        start_ms: Option<i64>,
-        span_ms: i64,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        const BUCKETS: usize = 48;
-        let start_ms = start_ms?;
-        if self.rows.is_empty() {
-            return None;
-        }
+    fn render_head(&self, ui: &Ui) -> Div {
         let t = ui.p;
-        let mut counts = [0u16; BUCKETS];
-        let mut severity = [0u8; BUCKETS];
-        for row in self.rows.iter() {
-            let Some(at) = row.at_ms() else { continue };
-            let rel_s = (at - start_ms).max(0);
-            let rel_e = (rel_s + row.ms as i64).max(rel_s + 1);
-            let b0 = ((rel_s as f64 / span_ms as f64) * BUCKETS as f64) as usize;
-            let b1 = ((rel_e as f64 / span_ms as f64) * BUCKETS as f64) as usize;
-            let sev = if row.blocked {
-                3
-            } else if row.is_error() {
-                2
-            } else if row.is_retry() || row.is_slow() {
-                1
-            } else {
-                0
-            };
-            for idx in b0.min(BUCKETS - 1)..=b1.min(BUCKETS - 1) {
-                counts[idx] = counts[idx].saturating_add(1);
-                severity[idx] = severity[idx].max(sev);
-            }
-        }
-        let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
-        let active = self.filter.time_window;
-        let mut bars = div()
-            .flex()
-            .items_end()
-            .flex_1()
-            .min_w(px(0.0))
-            .h(px(14.0))
-            .gap(px(2.0));
-        for idx in 0..BUCKETS {
-            let width = (span_ms as f64 / BUCKETS as f64).max(1.0);
-            let win_s = (idx as f64 * width).floor() as i64;
-            let win_e = (((idx + 1) as f64 * width).ceil() as i64).max(win_s + 1);
-            let selected = active.is_some_and(|(s, e)| win_s >= s && win_e <= e + 1);
-            let count = counts[idx];
-            let height = if count == 0 {
-                2.0
-            } else {
-                ((count as f32 / max).sqrt().clamp(0.25, 1.0) * 14.0).max(3.0)
-            };
-            let hex = match severity[idx] {
-                3 => t.purple,
-                2 => t.red,
-                1 => t.amber,
-                _ => t.accent,
-            };
-            let alpha = if count == 0 {
-                0.10
-            } else if selected {
-                1.0
-            } else if active.is_some() {
-                0.25
-            } else {
-                0.70
-            };
-            bars = bars.child(
-                div()
-                    .id(ElementId::named_usize("tl", idx))
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_end()
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |list, _, _, cx| {
-                            list.timeline_drag_anchor = Some(idx);
-                            let mut filter = list.filter.clone();
-                            let next = Some((win_s, win_e));
-                            filter.time_window = if filter.time_window == next {
-                                None
-                            } else {
-                                next
-                            };
-                            list.set_filter(filter, cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |list, event: &MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(MouseButton::Left)
-                            && let Some(anchor) = list.timeline_drag_anchor
-                            && anchor != idx
-                        {
-                            let lo = anchor.min(idx);
-                            let hi = anchor.max(idx);
-                            let bs = (lo as f64 * width).floor() as i64;
-                            let be = (((hi + 1) as f64 * width).ceil() as i64).max(bs + 1);
-                            let mut filter = list.filter.clone();
-                            filter.time_window = Some((bs, be));
-                            list.set_filter(filter, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(height))
-                            .rounded(px(1.5))
-                            .bg(theme::h(hex, alpha)),
-                    ),
-            );
-        }
-        Some(
-            div()
-                .id("timeline")
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(theme::TIMELINE_H))
-                .px(px(theme::ROW_PAD_X))
-                .bg(rgb(t.strip))
-                .border_b_1()
-                .border_color(rgb(t.border_subtle))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|list, _, _, _| list.timeline_drag_anchor = None),
-                )
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(|list, _, _, _| list.timeline_drag_anchor = None),
-                )
-                .child(bars)
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .font_family(fonts::mono())
-                        .text_size(px(text::XS))
-                        .text_color(rgb(t.text_faint))
-                        .child(format_latency(span_ms as u64)),
-                ),
-        )
-    }
-
-    fn render_head(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
-        let t = ui.p;
-        let sort_col = self.sort_col;
-        let sort_asc = self.sort_asc;
-        let entity = cx.entity();
-        let head = |id: &'static str,
-                    col: SortCol,
-                    label: &'static str,
-                    width: Option<f32>,
-                    right: bool| {
-            let entity = entity.clone();
-            let active = sort_col == col;
-            let arrow = if !active || (col == SortCol::Time && sort_asc) {
-                ""
-            } else if sort_asc {
-                " ▲"
-            } else {
-                " ▼"
-            };
+        let cell = |label: &str, width: Option<f32>, right: bool| {
             let cell = div()
-                .id(id)
                 .flex()
                 .items_center()
                 .when(right, |el| el.justify_end())
                 .text_size(px(text::XS))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(if active && !arrow.is_empty() {
-                    t.accent
-                } else {
-                    t.text_muted
-                }))
-                .cursor_pointer()
-                .hover(move |s| s.text_color(rgb(t.text)))
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |list, cx| list.toggle_sort(col, cx));
-                })
-                .child(format!("{label}{arrow}"));
+                .text_color(rgb(t.text_muted))
+                .child(label.to_string());
             match width {
                 Some(w) => cell.w(px(w)).flex_shrink_0(),
                 None => cell.flex_1().min_w(px(0.0)),
@@ -1026,37 +640,15 @@ impl CallsList {
             .bg(rgb(t.table_head))
             .border_b_1()
             .border_color(rgb(t.border_subtle))
-            .child(head(
-                "sort-time",
-                SortCol::Time,
-                ui.t("TIME", "时间"),
-                Some(theme::COL_TIME),
-                false,
-            ))
-            .child(head(
-                "sort-svc",
-                SortCol::Service,
-                "SERVICE",
+            .child(cell(ui.t("TIME", "时间"), Some(theme::COL_TIME), false))
+            .child(cell(
+                ui.t("SERVICE", "服务"),
                 Some(theme::COL_SERVICE),
                 false,
             ))
-            .child(head(
-                "sort-op",
-                SortCol::Operation,
-                "OPERATION",
-                None,
-                false,
-            ))
-            .child(head(
-                "sort-status",
-                SortCol::Status,
-                "STATUS",
-                Some(theme::COL_STATUS),
-                false,
-            ))
-            .child(head(
-                "sort-dur",
-                SortCol::Duration,
+            .child(cell(ui.t("OPERATION", "操作"), None, false))
+            .child(cell(ui.t("STATUS", "状态"), Some(theme::COL_STATUS), false))
+            .child(cell(
                 ui.t("DURATION", "耗时"),
                 Some(theme::COL_LATENCY),
                 true,
@@ -1066,107 +658,20 @@ impl CallsList {
     fn render_empty(&self, ui: &Ui, health: &Health, cx: &mut Context<Self>) -> AnyElement {
         match health {
             Health::Loading => widgets::skeleton_rows(ui, 10).into_any_element(),
-            Health::Missing => {
-                let t = ui.p;
-                let status = &self.emulator;
-                let color = if status.ok() { t.green } else { t.amber };
-                let mut status_row = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(glyph::dot(theme::h(color, 1.0), 7.0))
-                    .child(
-                        div()
-                            .text_size(px(text::MD))
-                            .text_color(rgb(t.text_soft))
-                            .child(ui.tr(&status.message()).to_string()),
-                    );
-                if *status == EmulatorStatus::Missing {
-                    let weak = cx.entity().downgrade();
-                    status_row = status_row.child(
-                        widgets::button(ui, "welcome-copy-install", ui.t("Copy", "复制")).on_click(
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    MOTO_INSTALL.to_string(),
-                                ));
-                                weak.update(cx, |_, cx| {
-                                    cx.emit(CallsEvent::Toast(i18n::copied("pip install")))
-                                })
-                                .ok();
-                            },
-                        ),
-                    );
-                }
-                widgets::empty_state(
-                    ui,
-                    ui.t("Welcome to Lenslet", "欢迎使用 Lenslet"),
-                    ui.t(
-                        "Open your project and press ▶ to run its tests against a local AWS emulator. Every call they make shows up here.",
-                        "打开项目并按 ▶，即可针对本地 AWS 模拟器运行测试，所有调用都会显示在这里。",
-                    ),
-                    Some(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(12.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        widgets::primary_button(
-                                            ui,
-                                            "empty-open-project",
-                                            ui.t("Open Project Folder…", "打开项目目录…"),
-                                        )
-                                        .on_click(|_, window, cx| {
-                                            window.dispatch_action(
-                                                Box::new(super::OpenWorkspace),
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .child(
-                                        widgets::button(
-                                            ui,
-                                            "empty-explore-demo",
-                                            ui.t("Explore the Demo", "浏览演示"),
-                                        )
-                                        .on_click(|_, window, cx| {
-                                            window.dispatch_action(
-                                                Box::new(super::ToggleDemoAction),
-                                                cx,
-                                            );
-                                        }),
-                                    ),
-                            )
-                            .child(status_row)
-                            .into_any_element(),
-                    ),
-                )
-                .into_any_element()
-            }
+            Health::Missing => self.render_welcome(ui, cx),
             Health::Error(error) => widgets::empty_state(
                 ui,
-                ui.t("Can't read the run file", "无法读取运行文件"),
-                format!(
-                    "{error}. {}",
-                    ui.t(
-                        "Pick the run again from the run list to retry.",
-                        "请从运行列表中重新选择该运行以重试。"
-                    )
-                ),
+                ui.t("Can't show this run", "无法显示此运行"),
+                ui.tr(error).to_string(),
                 None,
             )
             .into_any_element(),
             Health::Ready if self.rows.is_empty() => widgets::empty_state(
                 ui,
-                ui.t("Waiting for the first call", "等待第一个请求"),
+                ui.t("Waiting for the first call", "等待第一个调用"),
                 ui.t(
-                    "The run has started. Point your AWS SDK at the endpoint above; calls appear here live.",
-                    "运行已开始。将 AWS SDK 指向上方的 endpoint，请求会实时出现在这里。",
+                    "The tests are running. Every AWS call they make shows up here as it happens.",
+                    "测试正在运行。它们发出的每个 AWS 调用都会实时显示在这里。",
                 ),
                 None,
             )
@@ -1175,16 +680,16 @@ impl CallsList {
                 let entity = cx.entity();
                 widgets::empty_state(
                     ui,
-                    ui.t("No calls match", "没有匹配的请求"),
+                    ui.t("No calls match", "没有匹配的调用"),
                     ui.t(
                         "Nothing matches the search and filters. Press Esc to clear them one at a time.",
-                        "没有符合搜索与筛选条件的请求。按 Esc 逐个清除筛选。",
+                        "没有符合搜索与筛选条件的调用。按 Esc 逐个清除。",
                     ),
                     Some(
                         widgets::button(ui, "clear-filters", ui.t("Clear filters", "清除筛选"))
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |list, cx| {
-                                    list.set_filter(CallFilter::default(), cx);
+                                    list.set_filter(CallFilter::default(), cx)
                                 })
                             })
                             .into_any_element(),
@@ -1194,6 +699,191 @@ impl CallsList {
             }
         }
     }
+
+    fn render_welcome(&self, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let t = ui.p;
+        let status = &self.emulator;
+        let color = if status.ok() { t.green } else { t.amber };
+        let mut status_row = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(glyph::dot(theme::h(color, 1.0), 7.0))
+            .child(
+                div()
+                    .text_size(px(text::MD))
+                    .text_color(rgb(t.text_soft))
+                    .child(ui.tr(&status.message()).to_string()),
+            );
+        if *status == EmulatorStatus::Missing {
+            let weak = cx.entity().downgrade();
+            status_row = status_row.child(widgets::mono(ui, MOTO_INSTALL)).child(
+                widgets::button(ui, "welcome-copy-install", ui.t("Copy", "复制")).on_click(
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            MOTO_INSTALL.to_string(),
+                        ));
+                        weak.update(cx, |_, cx| {
+                            cx.emit(CallsEvent::Toast(i18n::copied(MOTO_INSTALL)))
+                        })
+                        .ok();
+                    },
+                ),
+            );
+        }
+        widgets::empty_state(
+            ui,
+            ui.t(
+                "See what AWS access your code needs, and why its calls failed",
+                "看清代码需要哪些 AWS 权限，以及调用为何失败",
+            ),
+            ui.t(
+                "Open your project and press ▶ to run its tests against a local emulator — or run them from a terminal with the command below.",
+                "打开项目并按 ▶，即可针对本地模拟器运行测试 — 也可以在终端中运行下面的命令。",
+            ),
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        widgets::primary_button(
+                            ui,
+                            "empty-open-project",
+                            ui.t("Open Project Folder…", "打开项目目录…"),
+                        )
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(super::OpenProject), cx)
+                        }),
+                    )
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .bg(rgb(t.code))
+                            .font(fonts::mono_font())
+                            .text_size(px(text::MD))
+                            .text_color(rgb(t.text_body))
+                            .child(ui.t(
+                                "lenslet run --ui -- <your tests>",
+                                "lenslet run --ui -- <你的测试命令>",
+                            )),
+                    )
+                    .child(status_row)
+                    .into_any_element(),
+            ),
+        )
+        .into_any_element()
+    }
+}
+
+/// One line of the Findings strip.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StripItem {
+    /// A failure (the first call it names is selected on click).
+    Failure {
+        finding: Finding,
+        title: Tr,
+        new: bool,
+    },
+    /// Failures beyond the first few.
+    More(usize),
+    /// Failure kinds fixed since the previous run.
+    Fixed(Tr),
+    /// Permissions not in lenslet.lock, with a Review button.
+    NotInLock(Tr),
+}
+
+/// The Findings strip: failures (new ones marked), what was fixed since the
+/// previous run, and how many permissions lenslet.lock lacks.
+pub fn strip_items(
+    failures: &[Finding],
+    rows: &[Arc<Trace>],
+    regressions: Option<&Regressions>,
+    not_in_lock: usize,
+    lock_exists: bool,
+) -> Vec<StripItem> {
+    let new_failures: BTreeSet<&FailureKind> = regressions
+        .map(|r| r.new_failures.iter().collect())
+        .unwrap_or_default();
+    let mut items: Vec<StripItem> = failures
+        .iter()
+        .take(FINDINGS_SHOWN)
+        .map(|finding| {
+            let call = finding
+                .calls
+                .first()
+                .and_then(|id| rows.iter().find(|row| &row.id == id));
+            let title = match call {
+                Some(call) => {
+                    let service = call.service_name();
+                    let op = operation_label(call);
+                    let code = call.problem.as_ref().map_or("", |p| p.code.as_str());
+                    tr!(
+                        "{service} {op} failed: {code}",
+                        "{service} {op} 失败：{code}"
+                    )
+                }
+                None => Tr::new(finding.title.clone(), finding.title.clone()),
+            };
+            let new = call
+                .and_then(|c| c.failure_kind())
+                .is_some_and(|kind| new_failures.contains(&kind));
+            StripItem::Failure {
+                finding: finding.clone(),
+                title,
+                new,
+            }
+        })
+        .collect();
+    if failures.len() > FINDINGS_SHOWN {
+        items.push(StripItem::More(failures.len() - FINDINGS_SHOWN));
+    }
+    if let Some(regressions) = regressions.filter(|r| !r.fixed.is_empty()) {
+        let names = regressions
+            .fixed
+            .iter()
+            .map(|k| {
+                format!(
+                    "{} {} ({})",
+                    k.service.to_ascii_uppercase(),
+                    k.operation,
+                    k.code
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        items.push(StripItem::Fixed(tr!(
+            "Fixed since the previous run: {names}",
+            "相比上次运行已修复：{names}"
+        )));
+    }
+    if not_in_lock > 0 {
+        let n = not_in_lock;
+        let permissions = i18n::permissions(n);
+        items.push(StripItem::NotInLock(if lock_exists {
+            tr!(
+                "{n} {permissions} not in lenslet.lock",
+                "{n} 项权限不在 lenslet.lock 中"
+            )
+        } else {
+            tr!(
+                "No lenslet.lock yet — {n} {permissions} not in lock",
+                "还没有 lenslet.lock — {n} 项权限未入锁"
+            )
+        }));
+    }
+    items
+}
+
+/// The first failing call in the view.
+pub fn first_failure(rows: &[Arc<Trace>], view: &[u32]) -> Option<String> {
+    view.iter()
+        .map(|&ix| &rows[ix as usize])
+        .find(|row| row.is_error())
+        .map(|row| row.id.clone())
 }
 
 fn color_hex(color: gpui::Rgba) -> u32 {
@@ -1203,70 +893,13 @@ fn color_hex(color: gpui::Rgba) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// The view, changed-call count, and per-call collapsed attempt counts.
-fn compute_view(
-    rows: &[Arc<Trace>],
-    query: &ViewQuery,
-    sort_col: SortCol,
-    sort_asc: bool,
-    group_retries: bool,
-) -> (Vec<u32>, usize, HashMap<String, usize>) {
-    let changed = if query.changes.new_access || !query.changes.new_failures.is_empty() {
-        rows.iter()
-            .filter(|row| query.changes.is_changed(row))
-            .count()
-    } else {
-        0
-    };
-    let mut indices = filter_rows(rows, query);
-    let mut collapsed_counts: HashMap<String, usize> = HashMap::new();
-    if group_retries {
-        // Keep only the latest row for each non-replay `invocation_id` in `indices`.
-        let mut last_for_inv: HashMap<&str, (u32, usize)> = HashMap::new();
-        for &ix in &indices {
-            let r = &rows[ix as usize];
-            if r.replay_of.is_none()
-                && let Some(inv) = r.invocation_id.as_deref()
-            {
-                let entry = last_for_inv.entry(inv).or_insert((ix, 0));
-                entry.0 = ix;
-                entry.1 += 1;
-            }
-        }
-        indices.retain(|&ix| {
-            let r = &rows[ix as usize];
-            if r.replay_of.is_none()
-                && let Some(inv) = r.invocation_id.as_deref()
-                && let Some(&(keep_ix, count)) = last_for_inv.get(inv)
-            {
-                if count > 1 && keep_ix == ix {
-                    collapsed_counts.insert(r.id.clone(), count);
-                }
-                return keep_ix == ix;
-            }
-            true
-        });
-    }
-    if !(sort_col == SortCol::Time && sort_asc) {
-        indices.sort_by(|&a, &b| {
-            let ra = &rows[a as usize];
-            let rb = &rows[b as usize];
-            let ord = match sort_col {
-                SortCol::Time => a.cmp(&b),
-                SortCol::Service => ra
-                    .service_name()
-                    .cmp(rb.service_name())
-                    .then_with(|| a.cmp(&b)),
-                SortCol::Operation => operation_label(ra)
-                    .cmp(operation_label(rb))
-                    .then_with(|| a.cmp(&b)),
-                SortCol::Status => ra.status.cmp(&rb.status).then_with(|| a.cmp(&b)),
-                SortCol::Duration => ra.ms.cmp(&rb.ms).then_with(|| a.cmp(&b)),
-            };
-            if sort_asc { ord } else { ord.reverse() }
-        });
-    }
-    (indices, changed, collapsed_counts)
+/// The view and how many calls need a permission not in the lock.
+fn compute_view(rows: &[Arc<Trace>], query: &ViewQuery) -> (Vec<u32>, usize) {
+    let not_in_lock = rows
+        .iter()
+        .filter(|row| row.not_in_lock(&query.lock))
+        .count();
+    (filter_rows(rows, query), not_in_lock)
 }
 
 impl Render for CallsList {
@@ -1276,113 +909,19 @@ impl Render for CallsList {
         let t = ui.p;
         let session = self.session.read(cx);
         let health = session.health.clone();
-        let findings = session.findings.clone();
-        let start_ms = session.run_start_ms();
-        let span_ms = session.run_span_ms().max(1);
-        let changes = session.changes.clone();
-        let is_demo = session.demo;
-        let has_policy_gate = session
+        let start_ms = session
             .run
             .as_ref()
-            .is_some_and(|r| r.header.policy.is_some());
-        let vs_lock = session.baseline == super::session::Baseline::Lock && !has_policy_gate;
-        let not_in_lock = if vs_lock {
+            .and_then(|run| parse_rfc3339_ms(&run.header.started))
+            .or_else(|| self.rows.first().and_then(|row| row.at_ms()));
+        let new_failures: Arc<BTreeSet<FailureKind>> = Arc::new(
             session
-                .access_rows
-                .iter()
-                .filter(|r| r.used && !r.in_lock)
-                .count()
-        } else {
-            0
-        };
-
-        let guided_banner: Option<Div> = if is_demo {
-            Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(34.0))
-                    .px(px(theme::ROW_PAD_X))
-                    .border_b_1()
-                    .border_color(theme::h(t.accent, 0.30))
-                    .bg(theme::h(t.accent, 0.08))
-                    .child(glyph::dot(theme::h(t.accent, 1.0), 6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(text::SM))
-                            .text_color(rgb(t.text))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(ui.t(
-                                "Interactive Demo · Inspect sample AWS calls, causal failure hints, and derived IAM permissions",
-                                "示例模式 · 正在浏览订单服务 AWS 调用、跨请求故障原因诊断与自动推导的最小 IAM 权限",
-                            )),
-                    )
-                    .child(
-                        widgets::primary_button(
-                            &ui,
-                            "demo-open-ws",
-                            ui.t("Open My Project…", "打开我的项目…"),
-                        )
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(super::OpenWorkspace), cx);
-                        }),
-                    )
-                    .child(
-                        widgets::button(&ui, "demo-exit", ui.t("Exit Demo", "退出示例")).on_click(
-                            |_, window, cx| {
-                                window.dispatch_action(Box::new(super::ToggleDemoAction), cx);
-                            },
-                        ),
-                    ),
-            )
-        } else if not_in_lock > 0 {
-            let n = not_in_lock;
-            Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(34.0))
-                    .px(px(theme::ROW_PAD_X))
-                    .border_b_1()
-                    .border_color(theme::h(t.amber, 0.30))
-                    .bg(theme::h(t.amber, 0.08))
-                    .child(glyph::dot(theme::h(t.amber, 1.0), 6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(text::SM))
-                            .text_color(rgb(t.text))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(
-                                ui.tr(&tr!(
-                                    "This run used {n} permissions that are not in lenslet.lock",
-                                    "本次运行使用了 {n} 项不在 lenslet.lock 中的权限"
-                                ))
-                                .to_string(),
-                            ),
-                    )
-                    .child(
-                        widgets::primary_button(
-                            &ui,
-                            "banner-review",
-                            ui.tr(&tr!("Review {n} permissions →", "查看 {n} 项权限 →"))
-                                .to_string(),
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CallsEvent::ReviewNotInLock))),
-                    ),
-            )
-        } else {
-            None
-        };
+                .run
+                .as_ref()
+                .and_then(|r| r.regressions())
+                .map(|r| r.new_failures.iter().cloned().collect())
+                .unwrap_or_default(),
+        );
 
         let body: AnyElement = if self.view.is_empty() {
             self.render_empty(&ui, &health, cx)
@@ -1391,29 +930,27 @@ impl Render for CallsList {
             let rows = self.rows.clone();
             let view = self.view.clone();
             let selected = self.selected.clone();
-            let attempt_counts = self.attempt_counts.clone();
+            let lock = self.lock.clone();
             let entity = cx.entity().downgrade();
             uniform_list("calls", view.len(), move |range, _window, cx| {
                 let _scope = crate::fsguard::RenderScope::enter();
                 let ui = Ui::of(cx);
                 range
                     .map(|position| {
-                        let index = view[position] as usize;
-                        let row = &rows[index];
-                        let prev_end = index.checked_sub(1).and_then(|prev| {
-                            rows[prev].at_ms().map(|at| at + rows[prev].ms as i64)
-                        });
-                        let grouped_attempts = attempt_counts.get(&row.id).copied();
+                        let row = &rows[view[position] as usize];
+                        let badges = RowBadges {
+                            not_in_lock: row.not_in_lock(&lock),
+                            new_failure: row
+                                .failure_kind()
+                                .is_some_and(|kind| new_failures.contains(&kind)),
+                        };
                         call_row(
                             &ui,
                             row,
                             position,
                             selected.as_deref() == Some(row.id.as_str()),
-                            changes.is_changed(row),
-                            grouped_attempts,
+                            badges,
                             start_ms,
-                            span_ms,
-                            prev_end,
                             entity.clone(),
                         )
                     })
@@ -1425,6 +962,7 @@ impl Render for CallsList {
             .into_any_element()
         };
 
+        let has_run = health == Health::Ready;
         div()
             .id("calls-list")
             .size_full()
@@ -1436,47 +974,40 @@ impl Render for CallsList {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .bg(rgb(t.panel))
-            .children(self.render_findings(&ui, &findings, cx))
-            .children(guided_banner)
-            .child(self.render_subbar(&ui, cx))
-            .children(self.render_timeline(&ui, start_ms, span_ms, cx))
-            .child(self.render_head(&ui, cx))
+            .children(has_run.then(|| self.render_findings(&ui, cx)).flatten())
+            .when(has_run, |el| {
+                el.child(self.render_chips(&ui, cx))
+                    .child(self.render_head(&ui))
+            })
             .child(body)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct RowBadges {
+    not_in_lock: bool,
+    new_failure: bool,
+}
+
 fn call_row(
     ui: &Ui,
     trace: &Arc<Trace>,
     position: usize,
     selected: bool,
-    changed: bool,
-    grouped_attempts: Option<usize>,
+    badges: RowBadges,
     run_start_ms: Option<i64>,
-    run_span_ms: i64,
-    prev_end_ms: Option<i64>,
     list: gpui::WeakEntity<CallsList>,
 ) -> Stateful<Div> {
     let t = ui.p;
-    let comfortable = ui.density == crate::prefs::Density::Comfortable;
     let service_color = ui.service_color(trace.service_name());
     let rel = match (trace.at_ms(), run_start_ms) {
         (Some(at), Some(start)) => format_offset(at - start),
         _ => short_clock(&trace.at),
     };
-    let gap = match (trace.at_ms(), prev_end_ms) {
-        (Some(at), Some(prev)) if at - prev >= 500 => Some(at - prev),
-        _ => None,
-    };
     let id = trace.id.clone();
     let menu_trace = trace.clone();
     let click_list = list.clone();
-    let status_color = if trace.pending {
-        rgb(t.amber)
-    } else {
-        ui.status_color(trace.status)
-    };
+    let status_color = ui.status_color(trace.status);
     let semantic = trace.semantic_target();
 
     let mut title = div()
@@ -1493,42 +1024,11 @@ fn call_row(
                 .whitespace_nowrap()
                 .child(operation_label(trace).to_string()),
         );
-    if !comfortable {
-        let compact_hint = if let Some(problem) = trace.problem.as_ref() {
-            Some((problem.code.clone(), status_color))
-        } else {
-            (!semantic.is_empty()).then(|| (semantic.clone(), rgb(t.text_muted)))
-        };
-        if let Some((hint_text, hint_color)) = compact_hint {
-            title = title.child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .font(fonts::mono_font())
-                    .text_size(px(text::XS))
-                    .text_color(hint_color)
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(hint_text),
-            );
-        }
+    if badges.new_failure {
+        title = title.child(widgets::badge(ui, ui.t("NEW FAILURE", "新失败"), t.red));
     }
-    if trace.blocked {
-        title = title.child(widgets::badge(ui, "BLOCKED", t.purple));
-    }
-    if changed && trace.is_error() {
-        title = title.child(widgets::badge(ui, "NEW FAILURE", t.red));
-    } else if !trace.blocked && (changed && !trace.is_error()) {
-        title = title.child(widgets::badge(ui, "NEW ACCESS", t.amber));
-    }
-    if let Some(n) = grouped_attempts {
-        title = title.child(widgets::badge(ui, format!("↻ ×{n}"), t.accent));
-    } else if let Some(retry) = trace.retry_badge() {
-        title = title.child(widgets::badge(ui, retry, t.accent));
-    }
-    if trace.replay_of.is_some() {
-        title = title.child(widgets::badge(ui, "REPLAY", t.accent));
+    if badges.not_in_lock {
+        title = title.child(widgets::badge(ui, ui.t("NOT IN LOCK", "未入锁"), t.amber));
     }
     if let Some(role) = trace.caller_role.as_deref() {
         let short_role = role.rsplit('/').next().unwrap_or(role);
@@ -1539,101 +1039,42 @@ fn call_row(
         ));
     }
 
-    let detail = match trace.problem.as_ref() {
-        Some(problem) => div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
+    let line = |s: String, color: u32| {
+        div()
+            .flex_1()
             .min_w(px(0.0))
+            .text_color(rgb(color))
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .text_ellipsis()
+            .child(s)
+    };
+    let detail = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .text_size(px(text::SM));
+    let detail = match trace.problem.as_ref() {
+        Some(problem) => detail
             .child(
                 div()
                     .flex_shrink_0()
                     .font(fonts::mono_font())
-                    .text_size(px(text::SM))
                     .text_color(status_color)
                     .child(ellipsize(&problem.code, 40)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(text::SM))
-                    .text_color(rgb(t.text_dim))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(
-                        problem
-                            .message
-                            .clone()
-                            .filter(|m| !m.is_empty())
-                            .unwrap_or_else(|| semantic.clone()),
-                    ),
-            ),
-        None if !semantic.is_empty() => div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_w(px(0.0))
+            .child(line(
+                problem
+                    .message
+                    .clone()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| semantic.clone()),
+                t.text_dim,
+            )),
+        None => detail
             .font(fonts::mono_font())
-            .text_size(px(text::SM))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_color(rgb(t.text_soft))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(semantic),
-            ),
-        None => div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_w(px(0.0))
-            .font(fonts::mono_font())
-            .text_size(px(text::SM))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(rgb(t.text_muted))
-                    .child(trace.method.to_ascii_uppercase()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_color(rgb(t.text_muted))
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(display_path(trace).to_string()),
-            ),
-    };
-
-    const TRACK_W: f32 = 44.0;
-    let (wf_left, wf_w) = match (trace.at_ms(), run_start_ms) {
-        (Some(at), Some(start)) => {
-            let s = ((at - start).max(0) as f32 / run_span_ms as f32).clamp(0.0, 0.92);
-            // Log-scaled duration width so 2ms vs 50ms vs 800ms calls stay visually legible
-            // even across multi-minute sessions.
-            let log_ratio = ((1.0 + trace.ms.max(1) as f32).ln()
-                / (1.0 + run_span_ms.max(20) as f32).ln())
-            .clamp(0.08, 0.75);
-            let left = (s * TRACK_W).min(TRACK_W - 4.0);
-            (left, (log_ratio * TRACK_W).clamp(3.5, TRACK_W - left))
-        }
-        _ => (0.0, 6.0),
-    };
-    let wf_color = if trace.blocked {
-        theme::h(t.purple, 0.9)
-    } else if trace.is_error() {
-        theme::h(t.red, 0.9)
-    } else if trace.is_slow() {
-        theme::h(t.amber, 0.9)
-    } else {
-        theme::tint(service_color, 0.75)
+            .child(line(semantic, t.text_soft)),
     };
 
     div()
@@ -1707,18 +1148,12 @@ fn call_row(
                         .text_color(rgb(t.text_dim))
                         .child(rel),
                 )
-                .when(comfortable, |col| {
-                    col.child(match gap {
-                        Some(gap) => div()
-                            .text_size(px(text::XS))
-                            .text_color(rgb(t.amber))
-                            .child(format!("Δ {}", format_latency(gap as u64))),
-                        None => div()
-                            .text_size(px(text::XS))
-                            .text_color(rgb(t.text_faint))
-                            .child(short_clock(&trace.at)),
-                    })
-                }),
+                .child(
+                    div()
+                        .text_size(px(text::XS))
+                        .text_color(rgb(t.text_faint))
+                        .child(short_clock(&trace.at)),
+                ),
         )
         .child(
             div()
@@ -1749,7 +1184,7 @@ fn call_row(
                 .flex_col()
                 .gap(px(2.0))
                 .child(title)
-                .when(comfortable, |col| col.child(detail)),
+                .child(detail),
         )
         .child(
             div()
@@ -1763,60 +1198,84 @@ fn call_row(
                     div()
                         .font_family(fonts::mono())
                         .text_size(px(text::SM))
-                        .text_color(if trace.is_error() || trace.pending {
+                        .text_color(if trace.is_error() {
                             status_color
                         } else {
                             rgb(t.text_body)
                         })
-                        .child(if trace.pending {
-                            "…".to_string()
-                        } else {
-                            status_label(trace.status)
-                        }),
+                        .child(status_label(trace.status)),
                 ),
         )
         .child(
             div()
                 .w(px(theme::COL_LATENCY))
                 .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .relative()
-                        .w(px(TRACK_W))
-                        .h(px(4.0))
-                        .rounded(px(2.0))
-                        .bg(theme::h(t.text, 0.06))
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(px(wf_left))
-                                .w(px(wf_w))
-                                .rounded(px(2.0))
-                                .bg(wf_color),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_right()
-                        .font_family(fonts::mono())
-                        .text_size(px(text::SM))
-                        .text_color(if trace.pending {
-                            rgb(t.amber)
-                        } else {
-                            ui.latency_color(trace.ms)
-                        })
-                        .child(if trace.pending {
-                            ui.t("running", "进行中").to_string()
-                        } else {
-                            format_latency(trace.ms)
-                        }),
-                ),
+                .text_right()
+                .font_family(fonts::mono())
+                .text_size(px(text::SM))
+                .text_color(ui.latency_color(trace.ms))
+                .child(format_latency(trace.ms)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::parse_run_text, testdata::RUN_V4};
+
+    #[test]
+    fn a_run_opens_on_its_first_failure_not_its_newest_call() {
+        let (_, calls) = parse_run_text(RUN_V4);
+        let rows: Vec<Arc<Trace>> = calls.into_iter().map(Arc::new).collect();
+        let view: Vec<u32> = (0..rows.len() as u32).collect();
+        let first = first_failure(&rows, &view).unwrap();
+        let call = rows.iter().find(|r| r.id == first).unwrap();
+        assert_eq!(call.operation, "GetObject");
+        assert_eq!(call.status, 404);
+        assert_ne!(Some(&first), rows.last().map(|r| &r.id));
+        // A filtered view picks its own first failure.
+        let sqs: Vec<u32> = (0..rows.len() as u32)
+            .filter(|&i| rows[i as usize].service == "sqs")
+            .collect();
+        let call_id = first_failure(&rows, &sqs).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.id == call_id && r.operation == "GetQueueUrl")
+        );
+        assert_eq!(first_failure(&rows, &[]), None);
+    }
+
+    #[test]
+    fn the_findings_strip_lists_failures_regressions_and_the_lock() {
+        let (run, calls) = parse_run_text(RUN_V4);
+        let rows: Vec<Arc<Trace>> = calls.into_iter().map(Arc::new).collect();
+        let failures: Vec<Finding> = run.failures().into_iter().cloned().collect();
+        assert_eq!(failures.len(), 2);
+        let items = strip_items(&failures, &rows, run.regressions(), 1, true);
+        assert_eq!(items.len(), 4, "{items:?}");
+        let StripItem::Failure { title, new, .. } = &items[0] else {
+            panic!("{:?}", items[0]);
+        };
+        assert_eq!(title.en, "S3 GetObject failed: NoSuchKey");
+        assert_eq!(title.zh, "S3 GetObject 失败：NoSuchKey");
+        assert!(!new);
+        let StripItem::Failure { new, .. } = &items[1] else {
+            panic!("{:?}", items[1]);
+        };
+        assert!(new, "GetQueueUrl is a new failure since the previous run");
+        assert!(matches!(&items[2], StripItem::Fixed(t) if t.en.contains("DYNAMODB Query")));
+        assert!(
+            matches!(&items[3], StripItem::NotInLock(t) if t.en == "1 permission not in lenslet.lock")
+        );
+
+        // No lock file: the strip says so; a clean run shows nothing.
+        let items = strip_items(&[], &rows, None, 17, false);
+        assert!(
+            matches!(&items[..], [StripItem::NotInLock(t)] if t.en.starts_with("No lenslet.lock yet"))
+        );
+        assert!(strip_items(&[], &rows, None, 0, true).is_empty());
+        let many = vec![failures[0].clone(); FINDINGS_SHOWN + 2];
+        let items = strip_items(&many, &rows, None, 0, true);
+        assert_eq!(items.last(), Some(&StripItem::More(2)));
+    }
 }

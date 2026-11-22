@@ -229,15 +229,6 @@ pub fn segmented(
     segmented_impl(ui, segments, false, on)
 }
 
-/// [`segmented`] for dialogs: each segment is a Tab stop.
-pub fn segmented_tabbable(
-    ui: &Ui,
-    segments: Vec<Segment>,
-    on: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
-) -> Div {
-    segmented_impl(ui, segments, true, on)
-}
-
 fn segmented_impl(
     ui: &Ui,
     segments: Vec<Segment>,
@@ -377,9 +368,7 @@ pub fn popover_card(ui: &Ui, id: &'static str, width: f32) -> Stateful<Div> {
 
 /// Fade (and settle 4px) in over ~120ms.
 pub fn appear(ui: &Ui, id: impl Into<ElementId>, element: Stateful<Div>) -> AnyElement {
-    if ui.reduce_motion {
-        return element.into_any_element();
-    }
+    let _ = ui;
     element
         .with_animation(
             id,
@@ -540,58 +529,6 @@ pub fn tabbable(ui: &Ui, el: Stateful<Div>) -> Stateful<Div> {
         .focus(move |s| s.border_color(theme::h(accent, 0.9)))
 }
 
-/// A labelled checkbox row.
-pub fn checkbox(
-    ui: &Ui,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    checked: bool,
-) -> Stateful<Div> {
-    let t = ui.p;
-    let el = div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .h(px(26.0))
-        .px(px(4.0))
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(theme::h(t.border, 0.0))
-        .cursor_pointer()
-        .hover(move |s| s.bg(theme::h(t.text, 0.04)))
-        .child(
-            div()
-                .size(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.0))
-                .border_1()
-                .border_color(if checked {
-                    theme::h(t.accent, 0.9)
-                } else {
-                    theme::h(t.border, 1.0)
-                })
-                .bg(if checked {
-                    theme::h(t.accent, 0.9)
-                } else {
-                    theme::h(t.text, 0.0)
-                })
-                .text_size(px(10.0))
-                .text_color(rgb(t.canvas))
-                .when(checked, |el| el.child("✓")),
-        )
-        .child(
-            div()
-                .text_size(px(text::MD))
-                .text_color(rgb(t.text))
-                .child(label.into()),
-        );
-    tabbable(ui, el)
-}
-
-/// The dimmed backdrop a dialog sits on.
 pub fn scrim(ui: &Ui) -> Div {
     div()
         .absolute()

@@ -1,34 +1,27 @@
-//! The Access view: every permission the run needed, compared with the
-//! baseline (the lock by default, or another run), an optional IAM Policy
-//! Simulator (`Check policy…`), and a detail workbench to accept permissions
-//! into `lenslet.lock`, mark `# test`, or export a least-privilege policy as
-//! IAM JSON or Terraform.
+//! The Access view: every permission the run needed against lenslet.lock,
+//! and the detail pane where they are accepted into the lock (one at a time,
+//! or all after a confirmation), removed, or marked `# test`. In-lock state
+//! comes from one place ([`crate::store::access_rows`]), so the chips, rows,
+//! badges and the Calls view always agree — with no lock file, every used
+//! permission is "not in lock".
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, PathPromptOptions, Pixels,
-    Point, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window, div, prelude::*,
-    px, rgb, uniform_list,
-};
-use lenslet_core::{
-    iac::{CompileOptions, PolicyFormat},
-    lock::{Decision, Reason},
+    AnyElement, App, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollStrategy,
+    Stateful, UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
 };
 
 use super::{
-    bodyview::{BodyView, BodyViewEvent},
-    session::{Baseline, Session, SessionEvent},
+    session::{Health, Session, SessionEvent},
     widgets,
 };
 use crate::{
-    body::BodyDoc,
     fonts, glyph,
     i18n::{self, Tr},
-    model::{Access, Trace, ellipsize, format_bytes, operation_label, service_label, status_label},
-    store::{AccessDelta, AccessFilter, AccessRow, compile_policy, compile_single_permission},
-    syntax::SyntaxKind,
+    model::{Access, Trace, ellipsize, operation_label, service_label, status_label},
+    store::{AccessFilter, AccessRow, LockState, policy_json},
     theme::{self, Ui, text},
 };
 
@@ -37,8 +30,6 @@ const PAGE_ROWS: isize = 20;
 pub enum AccessEvent {
     Selected(Option<AccessRow>),
     ContextMenu(Point<Pixels>, AccessRow),
-    /// Show the calls that need this permission.
-    FilterCalls(Access),
     SelectCall(String),
     /// Ask before accepting every permission not in the lock.
     AcceptAll(Vec<(Access, bool, bool)>),
@@ -52,9 +43,11 @@ pub struct AccessView {
     filter: AccessFilter,
     tokens: Vec<String>,
     rows: Arc<Vec<AccessRow>>,
-    sim_decisions: Arc<BTreeMap<Access, Decision>>,
     view: Arc<Vec<usize>>,
     selected: Option<Access>,
+    /// The viewer picked the selection; until then it is the first row
+    /// (what is not in the lock comes first).
+    picked: bool,
     _subscription: gpui::Subscription,
 }
 
@@ -68,9 +61,13 @@ impl Focusable for AccessView {
 
 impl AccessView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.subscribe(&session, |this, _, event, cx| match event {
-            SessionEvent::Derived | SessionEvent::RunChanged => this.refresh(cx),
-            _ => {}
+        let subscription = cx.subscribe(&session, |this, _, event, cx| {
+            if matches!(event, SessionEvent::RunChanged) {
+                this.picked = false;
+            }
+            if matches!(event, SessionEvent::Derived | SessionEvent::RunChanged) {
+                this.refresh(cx);
+            }
         });
         let mut view = AccessView {
             session,
@@ -79,9 +76,9 @@ impl AccessView {
             filter: AccessFilter::All,
             tokens: Vec::new(),
             rows: Arc::new(Vec::new()),
-            sim_decisions: Arc::new(BTreeMap::new()),
             view: Arc::new(Vec::new()),
             selected: None,
+            picked: false,
             _subscription: subscription,
         };
         view.refresh(cx);
@@ -92,18 +89,14 @@ impl AccessView {
         let selected = self.selected.as_ref()?;
         self.rows
             .iter()
-            .find(|row| &row.access == selected)
+            .find(|row| row.access() == selected)
             .cloned()
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let session = self.session.read(cx);
-        let rows = session.access_rows.clone();
-        let sim = session.sim_decisions.clone();
-        let same = Arc::ptr_eq(&rows, &self.rows) && Arc::ptr_eq(&sim, &self.sim_decisions);
-        self.rows = rows;
-        self.sim_decisions = sim;
-        if !same {
+        let rows = self.session.read(cx).access_rows.clone();
+        if !Arc::ptr_eq(&rows, &self.rows) {
+            self.rows = rows;
             self.recompute(cx);
         }
     }
@@ -120,10 +113,9 @@ impl AccessView {
         let still_there = self
             .selected
             .as_ref()
-            .is_some_and(|sel| self.view.iter().any(|&ix| &self.rows[ix].access == sel));
-        if !still_there {
-            let first = self.view.first().map(|&ix| self.rows[ix].access.clone());
-            self.selected = first;
+            .is_some_and(|sel| self.view.iter().any(|&ix| self.rows[ix].access() == sel));
+        if !still_there || !self.picked {
+            self.selected = self.view.first().map(|&ix| self.rows[ix].access().clone());
         }
         cx.emit(AccessEvent::Selected(self.selected()));
         cx.notify();
@@ -147,12 +139,8 @@ impl AccessView {
 
     /// Show only the permissions this run used that the lock lacks.
     pub fn show_not_in_lock(&mut self, cx: &mut Context<Self>) {
-        self.filter = AccessFilter::Added;
+        self.filter = AccessFilter::NotInLock;
         self.recompute(cx);
-        let first = self.view.first().map(|&ix| self.rows[ix].access.clone());
-        if let Some(first) = first {
-            self.select(first, cx);
-        }
     }
 
     pub fn clear_filter(&mut self, cx: &mut Context<Self>) -> bool {
@@ -165,15 +153,20 @@ impl AccessView {
     }
 
     pub fn select(&mut self, access: Access, cx: &mut Context<Self>) {
-        if !self.rows.iter().any(|row| row.access == access) {
+        if !self.rows.iter().any(|row| *row.access() == access) {
             return;
         }
-        if !self.view.iter().any(|&ix| self.rows[ix].access == access) {
+        if !self
+            .view
+            .iter()
+            .any(|&ix| *self.rows[ix].access() == access)
+        {
             self.filter = AccessFilter::All;
             self.tokens.clear();
             self.recompute(cx);
         }
         self.selected = Some(access);
+        self.picked = true;
         if let Some(position) = self.position() {
             self.scroll.scroll_to_item(position, ScrollStrategy::Center);
         }
@@ -185,7 +178,7 @@ impl AccessView {
         let selected = self.selected.as_ref()?;
         self.view
             .iter()
-            .position(|&ix| &self.rows[ix].access == selected)
+            .position(|&ix| self.rows[ix].access() == selected)
     }
 
     pub fn move_by(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -194,10 +187,11 @@ impl AccessView {
         }
         let last = self.view.len() as isize - 1;
         let next = match self.position() {
-            Some(position) => (position as isize + delta).clamp(0, last),
+            Some(position) => (position as isize).saturating_add(delta).clamp(0, last),
             None => 0,
         } as usize;
-        self.selected = Some(self.rows[self.view[next]].access.clone());
+        self.selected = Some(self.rows[self.view[next]].access().clone());
+        self.picked = true;
         self.scroll.scroll_to_item(next, ScrollStrategy::Top);
         cx.emit(AccessEvent::Selected(self.selected()));
         cx.notify();
@@ -208,46 +202,61 @@ impl AccessView {
     }
 
     pub fn select_edge(&mut self, last: bool, cx: &mut Context<Self>) {
-        let delta = if last { isize::MAX / 2 } else { isize::MIN / 2 };
-        self.move_by(delta, cx);
+        self.move_by(if last { isize::MAX } else { isize::MIN }, cx);
     }
 
-    fn prompt_policy(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        let session = self.session.clone();
-        cx.spawn(async move |_, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(path) = paths.into_iter().next()
-            {
-                session.update(cx, |s, cx| s.load_sim_policy(path, cx)).ok();
-            }
-        })
-        .detach();
+    // -- Lock actions (also bound to a, ⌘⇧A, t, ⌫) ------------------------------
+
+    /// Accept the selected permission into the lock.
+    pub fn accept_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.selected().filter(|r| r.state == LockState::NotInLock) {
+            let entry = vec![(row.access().clone(), false, row.used.implied)];
+            self.session.update(cx, |s, cx| s.accept(entry, cx));
+        }
     }
+
+    /// Ask to accept every permission not in the lock.
+    pub fn accept_all(&mut self, cx: &mut Context<Self>) {
+        let entries = not_in_lock_entries(&self.rows);
+        if !entries.is_empty() {
+            cx.emit(AccessEvent::AcceptAll(entries));
+        }
+    }
+
+    pub fn remove_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.selected().filter(AccessRow::in_lock) {
+            let entry = vec![row.access().clone()];
+            self.session
+                .update(cx, |s, cx| s.remove_from_lock(entry, cx));
+        }
+    }
+
+    pub fn toggle_test_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.selected() {
+            let (access, test) = (row.access().clone(), !row.test);
+            self.session
+                .update(cx, |s, cx| s.set_test_mark(access, test, cx));
+        }
+    }
+
+    pub fn copy_policy(&mut self, cx: &mut Context<Self>) {
+        let policy = policy_json(&self.rows);
+        cx.write_to_clipboard(ClipboardItem::new_string(policy));
+        cx.emit(AccessEvent::Toast(i18n::copied("IAM JSON")));
+    }
+
+    // -- Render ------------------------------------------------------------------
 
     fn render_subbar(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
         let count = |f: AccessFilter| self.rows.iter().filter(|row| f.matches(row)).count();
-        let added = count(AccessFilter::Added);
-        let removed = count(AccessFilter::Removed);
-        let session = self.session.read(cx);
-        let vs_lock = session.baseline == Baseline::Lock || session.baseline_run.is_none();
-        let editable = session.can_edit_lock();
-        let sim_label = session.sim_policy.as_ref().map(|(l, _)| l.clone());
         let entity = cx.entity();
-        let chip = |id: &'static str, label: String, n: usize, f: AccessFilter, color: u32| {
+        let chip = |id: &'static str, label: &str, n: usize, f: AccessFilter, color: u32| {
             let entity = entity.clone();
-            widgets::chip(ui, id, label, Some(n), self.filter == f, color).on_click(
-                move |_, _, cx| {
-                    entity.update(cx, |view, cx| view.set_filter(f, cx));
-                },
-            )
+            widgets::chip(ui, id, label.to_string(), Some(n), self.filter == f, color)
+                .on_click(move |_, _, cx| entity.update(cx, |view, cx| view.set_filter(f, cx)))
         };
+        let not_in_lock = count(AccessFilter::NotInLock);
         let mut bar = div()
             .flex()
             .items_center()
@@ -259,147 +268,80 @@ impl AccessView {
             .bg(rgb(t.toolbar))
             .child(chip(
                 "a-all",
-                ui.t("All", "全部").into(),
+                ui.t("All", "全部"),
                 self.rows.len(),
                 AccessFilter::All,
                 t.accent,
             ))
             .child(chip(
-                "a-added",
-                if vs_lock {
-                    ui.t("+ Not in lock", "+ 未入锁").into()
-                } else {
-                    ui.t("+ Added", "+ 新增").into()
-                },
-                added,
-                AccessFilter::Added,
+                "a-not-in-lock",
+                ui.t("Not in lock", "未入锁"),
+                not_in_lock,
+                AccessFilter::NotInLock,
                 t.amber,
             ))
             .child(chip(
-                "a-removed",
-                if vs_lock {
-                    ui.t("− Unused", "− 未使用").into()
-                } else {
-                    ui.t("− Removed", "− 移除").into()
-                },
-                removed,
-                AccessFilter::Removed,
+                "a-unused",
+                ui.t("Unused", "未使用"),
+                count(AccessFilter::Unused),
+                AccessFilter::Unused,
                 t.text_muted,
-            ))
-            .child(chip(
-                "a-implied",
-                ui.t("Implied", "隐含").into(),
-                count(AccessFilter::Implied),
-                AccessFilter::Implied,
-                t.accent,
             ))
             .child(
                 chip(
                     "a-test",
-                    ui.t("Test-only", "仅测试").into(),
+                    ui.t("Test-only", "仅测试"),
                     count(AccessFilter::Test),
                     AccessFilter::Test,
                     t.text_muted,
                 )
                 .tooltip(widgets::tip(
                     ui.t(
-                        "Fixture-only permissions (`# test` in lenslet.lock) — excluded when exporting IAM / Terraform policies",
-                        "测试夹具专用权限（lenslet.lock 中的 `# test`），导出生产 IAM / Terraform 策略时自动排除",
+                        "`# test` lines stay in lenslet.lock but out of the policy",
+                        "`# test` 行保留在 lenslet.lock 中，但不进入策略",
                     ),
-                    None,
+                    Some(i18n::key("t")),
                 )),
             )
             .child(div().flex_1());
-
-        if let Some(label) = sim_label {
-            let session = self.session.clone();
+        if self.session.read(cx).lock_target().is_some() && not_in_lock > 0 {
             bar = bar.child(
-                widgets::chip(
-                    ui,
-                    "clear-sim-policy",
-                    format!("{} {label} ×", ui.t("Policy:", "模拟策略:")),
-                    None,
-                    true,
-                    t.purple,
-                )
-                .on_click(move |_, _, cx| {
-                    session.update(cx, |s, cx| s.clear_sim_policy(cx));
-                }),
-            );
-        } else {
-            bar = bar.child(
-                widgets::button(ui, "check-policy", ui.t("Check policy…", "模拟策略…"))
+                widgets::primary_button(ui, "accept-all", ui.t("Accept all…", "全部写入…"))
                     .tooltip(widgets::tip(
                         ui.t(
-                            "Simulate an IAM policy JSON file against this run",
-                            "加载 IAM 策略 JSON 文件模拟评估本次运行",
+                            "Review the list, then add every permission not in the lock",
+                            "确认列表后，写入所有未入锁的权限",
                         ),
-                        None,
+                        Some(i18n::shortcut("⇧A")),
                     ))
-                    .on_click(cx.listener(|view, _, _, cx| view.prompt_policy(cx))),
+                    .on_click(cx.listener(|view, _, _, cx| view.accept_all(cx))),
             );
         }
-
-        let not_in_lock: Vec<(Access, bool, bool)> = self
-            .rows
-            .iter()
-            .filter(|row| row.used && !row.in_lock)
-            .map(|row| (row.access.clone(), false, row.implied))
-            .collect();
-        if editable && !not_in_lock.is_empty() && self.filter == AccessFilter::Added {
-            let n = not_in_lock.len();
-            bar = bar.child(
-                widgets::primary_button(
-                    ui,
-                    "accept-all",
-                    ui.tr(&crate::tr!("Accept all {n}…", "全部写入（{n}）…"))
-                        .to_string(),
-                )
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "Review the list, then add every permission this run used that the lock lacks",
-                        "确认列表后，将本次运行使用但 lock 中缺少的权限全部写入",
-                    ),
-                    None,
-                ))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(AccessEvent::AcceptAll(not_in_lock.clone()));
-                })),
-            );
-        }
-        let unused_in_lock: Vec<Access> = self
-            .rows
-            .iter()
-            .filter(|row| row.in_lock && !row.used && !row.test)
-            .map(|row| row.access.clone())
-            .collect();
-        if editable && self.filter == AccessFilter::Removed && !unused_in_lock.is_empty() {
-            let session = self.session.clone();
-            let n = unused_in_lock.len();
-            bar = bar.child(
-                widgets::danger_button(
-                    ui,
-                    "prune-unused",
-                    ui.tr(&crate::tr!("Remove {n} unused", "移除未使用（{n}）"))
-                        .to_string(),
-                )
-                .on_click(move |_, _, cx| {
-                    let entries = unused_in_lock.clone();
-                    session.update(cx, |session, cx| session.remove_from_lock(entries, cx));
-                }),
-            );
-        }
-        bar
+        bar.child(
+            widgets::button(
+                ui,
+                "copy-policy",
+                ui.t("Copy policy (IAM JSON)", "复制策略（IAM JSON）"),
+            )
+            .tooltip(widgets::tip(
+                ui.t(
+                    "The least-privilege policy for what this run used, without `# test` lines",
+                    "本次运行所用权限的最小权限策略（不含 `# test` 行）",
+                ),
+                None,
+            ))
+            .on_click(cx.listener(|view, _, _, cx| view.copy_policy(cx))),
+        )
     }
 
     fn render_head(&self, ui: &Ui) -> Div {
         let t = ui.p;
-        let head = |label: &'static str| {
+        let head = |label: &str| {
             div()
                 .text_size(px(text::XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(t.text_muted))
-                .child(label)
+                .child(label.to_string())
         };
         div()
             .flex()
@@ -411,10 +353,23 @@ impl AccessView {
             .border_b_1()
             .border_color(rgb(t.border_subtle))
             .child(div().w(px(14.0)))
-            .child(head("ACTION").w(px(220.0)).flex_shrink_0())
-            .child(head("RESOURCE").flex_1().min_w(px(0.0)))
-            .child(head("CALLS").w(px(56.0)).flex_shrink_0().text_right())
+            .child(head(ui.t("ACTION", "操作")).w(px(220.0)).flex_shrink_0())
+            .child(head(ui.t("RESOURCE", "资源")).flex_1().min_w(px(0.0)))
+            .child(
+                head(ui.t("CALLS", "调用"))
+                    .w(px(56.0))
+                    .flex_shrink_0()
+                    .justify_end(),
+            )
     }
+}
+
+/// `(access, test, implied)` for every used permission the lock lacks.
+pub fn not_in_lock_entries(rows: &[AccessRow]) -> Vec<(Access, bool, bool)> {
+    rows.iter()
+        .filter(|row| row.state == LockState::NotInLock)
+        .map(|row| (row.access().clone(), false, row.used.implied))
+        .collect()
 }
 
 impl Render for AccessView {
@@ -423,7 +378,7 @@ impl Render for AccessView {
         let ui = Ui::of(cx);
         let t = ui.p;
         let body: AnyElement = if self.view.is_empty() {
-            let health_ready = self.session.read(cx).health == super::session::Health::Ready;
+            let ready = self.session.read(cx).health == Health::Ready;
             widgets::empty_state(
                 &ui,
                 if self.rows.is_empty() {
@@ -431,20 +386,21 @@ impl Render for AccessView {
                 } else {
                     ui.t("Nothing matches", "没有匹配项")
                 },
-                if self.rows.is_empty() && health_ready {
+                if !self.rows.is_empty() {
+                    ui.t("Press Esc to clear the filter.", "按 Esc 清除筛选。")
+                } else if ready {
                     ui.t(
-                        "Permissions appear as calls that need them arrive.",
-                        "当需要权限的调用到达时，这里会列出所需权限。",
+                        "Permissions appear as the calls that need them arrive.",
+                        "需要权限的调用到达后，这里会列出所需权限。",
                     )
                 } else {
-                    ui.t("Press Esc to clear the filter.", "按 Esc 清除筛选。")
+                    ""
                 },
                 None,
             )
             .into_any_element()
         } else {
             let rows = self.rows.clone();
-            let sim = self.sim_decisions.clone();
             let view = self.view.clone();
             let selected = self.selected.clone();
             let entity = cx.entity().downgrade();
@@ -454,14 +410,8 @@ impl Render for AccessView {
                 range
                     .map(|position| {
                         let row = &rows[view[position]];
-                        access_row(
-                            &ui,
-                            row,
-                            sim.get(&row.access),
-                            position,
-                            selected.as_ref() == Some(&row.access),
-                            entity.clone(),
-                        )
+                        let selected = selected.as_ref() == Some(row.access());
+                        access_row(&ui, row, position, selected, entity.clone())
                     })
                     .collect()
             })
@@ -487,50 +437,51 @@ impl Render for AccessView {
     }
 }
 
-fn sim_badge(ui: &Ui, decision: &Decision) -> Div {
+/// The badge for where a permission stands against the lock.
+pub fn state_badge(ui: &Ui, state: LockState) -> Div {
     let t = ui.p;
-    if decision.allowed {
-        widgets::badge(ui, "SIM: ALLOW", t.green)
-    } else {
-        match decision.reason {
-            Reason::NeedsContext => widgets::badge(ui, "NEEDS CONTEXT", t.amber),
-            Reason::ExplicitDeny => widgets::badge(ui, "EXPLICIT DENY", t.red),
-            _ => widgets::badge(ui, "IMPLICIT DENY", t.purple),
-        }
+    match state {
+        LockState::NotInLock => widgets::badge(ui, ui.t("NOT IN LOCK", "未入锁"), t.amber),
+        LockState::InLock => widgets::badge(ui, ui.t("IN LOCK", "已入锁"), t.green),
+        LockState::Unused => widgets::badge(ui, ui.t("UNUSED", "未使用"), t.text_muted),
     }
 }
 
 fn access_row(
     ui: &Ui,
     row: &AccessRow,
-    sim: Option<&Decision>,
     position: usize,
     selected: bool,
     view: gpui::WeakEntity<AccessView>,
-) -> gpui::Stateful<Div> {
+) -> Stateful<Div> {
     let t = ui.p;
-    let (glyph, color) = match row.delta {
-        AccessDelta::Added => ("+", t.amber),
-        AccessDelta::Removed => ("−", t.text_muted),
-        AccessDelta::Same => ("", t.text_muted),
+    let (glyph_text, color) = match row.state {
+        LockState::NotInLock => ("+", t.amber),
+        LockState::Unused => ("−", t.text_muted),
+        LockState::InLock => ("", t.text_muted),
     };
-    let service = row.access.action.split(':').next().unwrap_or("");
+    let access = row.access().clone();
+    let service = access.action.split(':').next().unwrap_or("");
     let service_color = ui.service_color(&service_label(service));
-    let access = row.access.clone();
     let menu_row = row.clone();
     let click_view = view.clone();
     let mut flags = div().flex().items_center().gap(px(4.0)).flex_shrink_0();
-    if let Some(decision) = sim {
-        flags = flags.child(sim_badge(ui, decision));
+    if row.state == LockState::NotInLock {
+        flags = flags.child(state_badge(ui, row.state));
     }
-    if row.implied {
-        flags = flags.child(widgets::badge(ui, "IMPLIED", t.text_muted));
+    if row.used.implied {
+        flags = flags.child(widgets::badge(ui, ui.t("IMPLIED", "隐含"), t.text_muted));
     }
     if row.test {
         flags = flags.child(widgets::badge(ui, "# test", t.text_muted));
     }
-    if row.errors > 0 {
-        flags = flags.child(widgets::badge(ui, format!("{} ERR", row.errors), t.red));
+    if row.used.errors > 0 {
+        let n = row.used.errors;
+        flags = flags.child(widgets::badge(
+            ui,
+            ui.tr(&crate::tr!("{n} failed", "{n} 次失败")).to_string(),
+            t.red,
+        ));
     }
     div()
         .id(ElementId::named_usize("access-row", position))
@@ -554,16 +505,14 @@ fn access_row(
                 rgb(t.row_hover)
             })
         })
-        .when(!row.used, |el| el.opacity(0.65))
+        .when(row.state == LockState::Unused, |el| el.opacity(0.65))
         .cursor_pointer()
         .on_click(move |_, window, cx| {
             let access = access.clone();
             click_view
                 .update(cx, |view, cx| {
                     window.focus(&view.focus);
-                    view.selected = Some(access);
-                    cx.emit(AccessEvent::Selected(view.selected()));
-                    cx.notify();
+                    view.select(access, cx);
                 })
                 .ok();
         })
@@ -573,10 +522,8 @@ fn access_row(
                 let row = menu_row.clone();
                 view.update(cx, |view, cx| {
                     window.focus(&view.focus);
-                    view.selected = Some(row.access.clone());
-                    cx.emit(AccessEvent::Selected(Some(row.clone())));
+                    view.select(row.access().clone(), cx);
                     cx.emit(AccessEvent::ContextMenu(event.position, row));
-                    cx.notify();
                 })
                 .ok();
             },
@@ -589,7 +536,7 @@ fn access_row(
                 .text_size(px(text::MD))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(color))
-                .child(glyph),
+                .child(glyph_text),
         )
         .child(
             div()
@@ -600,17 +547,7 @@ fn access_row(
                 .gap(px(6.0))
                 .overflow_hidden()
                 .child(glyph::dot(service_color, 6.0))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .font(fonts::mono_font())
-                        .text_size(px(text::SM))
-                        .text_color(rgb(t.text))
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(row.access.action.clone()),
-                ),
+                .child(widgets::mono(ui, row.access().action.clone()).text_color(rgb(t.text))),
         )
         .child(
             div()
@@ -620,16 +557,9 @@ fn access_row(
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    div()
+                    widgets::mono(ui, row.access().resource.clone())
                         .flex_1()
-                        .min_w(px(0.0))
-                        .font(fonts::mono_font())
-                        .text_size(px(text::SM))
-                        .text_color(rgb(t.text_dim))
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(row.access.resource.clone()),
+                        .text_color(rgb(t.text_dim)),
                 )
                 .child(flags),
         )
@@ -641,40 +571,29 @@ fn access_row(
                 .font(fonts::mono_font())
                 .text_size(px(text::SM))
                 .text_color(rgb(t.text_muted))
-                .child(if row.used {
-                    row.calls.to_string()
+                .child(if row.state == LockState::Unused {
+                    "—".to_string()
                 } else {
-                    "—".into()
+                    row.used.calls.to_string()
                 }),
         )
 }
 
-/// The right-hand workbench of the Access view: permission status, policy
-/// simulation verdict, the policy (IAM JSON or Terraform) and triggering calls.
+/// The right-hand pane of the Access view: where a permission stands, the
+/// lock actions, and the calls that needed it.
 pub struct AccessDetail {
     session: Entity<Session>,
     row: Option<AccessRow>,
     calls: Vec<Arc<Trace>>,
-    iac_format: PolicyFormat,
-    iac_full_run: bool,
-    iac_text: String,
-    iac_body: Entity<BodyView>,
-    _subscriptions: Vec<gpui::Subscription>,
+    _subscription: gpui::Subscription,
 }
 
 impl EventEmitter<AccessEvent> for AccessDetail {}
 
 impl AccessDetail {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
-        let iac_body = cx.new(|cx| BodyView::new("iac-preview", cx));
-        let sub_body = cx.subscribe(&iac_body, |_, _, event, cx| match event {
-            BodyViewEvent::Copied(bytes) => {
-                cx.emit(AccessEvent::Toast(i18n::copied(&format_bytes(*bytes))));
-            }
-        });
-        let sub_sess = cx.subscribe(&session, |this, _, event, cx| {
-            if matches!(event, SessionEvent::Derived | SessionEvent::RunChanged) {
-                this.rebuild_iac(cx);
+        let subscription = cx.subscribe(&session, |_, _, event, cx| {
+            if matches!(event, SessionEvent::Derived) {
                 cx.notify();
             }
         });
@@ -682,11 +601,7 @@ impl AccessDetail {
             session,
             row: None,
             calls: Vec::new(),
-            iac_format: PolicyFormat::IamJson,
-            iac_full_run: false,
-            iac_text: String::new(),
-            iac_body,
-            _subscriptions: vec![sub_body, sub_sess],
+            _subscription: subscription,
         }
     }
 
@@ -701,351 +616,110 @@ impl AccessDetail {
                 .store
                 .rows()
                 .iter()
-                .filter(|call| !call.pending && call.uses(&row.access))
+                .filter(|call| call.uses(row.access()))
                 .take(40)
                 .cloned()
                 .collect(),
             None => Vec::new(),
         };
         self.row = row;
-        self.rebuild_iac(cx);
         cx.notify();
     }
 
-    pub fn restyle(&mut self, cx: &mut Context<Self>) {
-        self.rebuild_iac(cx);
-    }
-
-    fn rebuild_iac(&mut self, cx: &mut Context<Self>) {
-        let ui = Ui::of(cx);
-        let Some(row) = self.row.as_ref() else {
-            self.iac_text.clear();
-            self.iac_body
-                .update(cx, |b, cx| b.set_doc(Arc::new(BodyDoc::default()), cx));
-            return;
-        };
-        let opts = CompileOptions {
-            format: self.iac_format,
-            ..CompileOptions::default()
-        };
-        let code = if self.iac_full_run {
-            let rows = self.session.read(cx).access_rows.clone();
-            compile_policy(&rows, &opts)
-        } else {
-            compile_single_permission(row, &opts)
-        };
-        let kind = match self.iac_format {
-            PolicyFormat::IamJson => SyntaxKind::Json,
-            PolicyFormat::Terraform => SyntaxKind::Iac,
-        };
-        let doc = Arc::new(BodyDoc::from_text(code.clone(), kind, &[], &ui.p));
-        self.iac_text = code;
-        self.iac_body.update(cx, |b, cx| b.set_doc(doc, cx));
-    }
-
-    fn export_iac(&mut self, cx: &mut Context<Self>) {
-        let code = self.iac_text.clone();
-        if code.is_empty() {
-            return;
-        }
-        let ext = match self.iac_format {
-            PolicyFormat::IamJson => "lenslet-policy.json",
-            PolicyFormat::Terraform => "lenslet-policy.tf",
-        };
-        let dir = self
-            .session
-            .read(cx)
-            .run
-            .as_ref()
-            .filter(|r| !r.header.cwd.is_empty())
-            .map(|r| std::path::PathBuf::from(&r.header.cwd))
-            .unwrap_or_else(super::home);
-        let rx = cx.prompt_for_new_path(&dir, Some(ext));
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
-                let target = path.clone();
-                let res = cx
-                    .background_executor()
-                    .spawn(async move {
-                        crate::fsguard::assert_io_allowed();
-                        std::fs::write(&target, code)
-                    })
-                    .await;
-                this.update(cx, |_, cx| {
-                    let p = path.display();
-                    let msg = match res {
-                        Ok(()) => crate::tr!("Exported {p}", "已导出 {p}"),
-                        Err(e) => crate::tr!("Could not export {p}: {e}", "无法导出 {p}：{e}"),
-                    };
-                    cx.emit(AccessEvent::Toast(msg));
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-}
-
-impl Render for AccessDetail {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _scope = crate::fsguard::RenderScope::enter();
-        let ui = Ui::of(cx);
-        let t = ui.p;
-        let container = div()
-            .id("access-detail")
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(t.panel_raised));
-        let Some(row) = self.row.clone() else {
-            return container.child(widgets::empty_state(
-                &ui,
-                ui.t("Select a permission", "选择一项权限"),
-                "",
-                None,
-            ));
-        };
-        let session = self.session.read(cx);
-        let editable = session.can_edit_lock();
-        let sim_decision = session.sim_decisions.get(&row.access).cloned();
-        let (service, action) = row
-            .access
-            .action
-            .split_once(':')
-            .unwrap_or(("", row.access.action.as_str()));
-        let service_color = ui.service_color(&service_label(service));
-
-        let mut badges = div().flex().flex_wrap().items_center().gap(px(6.0));
-        badges = badges.child(widgets::badge(
-            ui_ref(&ui),
-            service_label(service),
-            color_of(service_color),
-        ));
-        badges = badges.child(match (row.delta, row.in_lock) {
-            (AccessDelta::Added, false) => widgets::badge(&ui, "NOT IN LOCK", t.amber),
-            (AccessDelta::Added, true) => widgets::badge(&ui, "NEW VS BASELINE", t.amber),
-            (AccessDelta::Removed, _) => widgets::badge(&ui, "UNUSED", t.text_muted),
-            (AccessDelta::Same, true) => widgets::badge(&ui, "IN LOCK", t.green),
-            (AccessDelta::Same, false) => widgets::badge(&ui, "ALLOWED", t.green),
-        });
-        if row.implied {
-            badges = badges.child(widgets::badge(&ui, "IMPLIED", t.accent));
-        }
-        if row.test {
-            badges = badges.child(widgets::badge(&ui, "# test", t.text_muted));
-        }
-        if let Some(ref dec) = sim_decision {
-            badges = badges.child(sim_badge(&ui, dec));
-        }
-
+    fn render_actions(&self, ui: &Ui, row: &AccessRow, cx: &mut Context<Self>) -> Div {
+        let can_edit = self.session.read(cx).lock_target().is_some();
         let mut actions = div().flex().flex_wrap().items_center().gap(px(8.0));
-        if editable && row.used && !row.in_lock {
-            let session = self.session.clone();
-            let access = row.access.clone();
-            let implied = row.implied;
-            actions = actions.child(
-                widgets::primary_button(&ui, "accept", ui.t("Accept into lock", "写入 lock"))
+        if !can_edit {
+            return actions.child(
+                widgets::primary_button(
+                    ui,
+                    "choose-project",
+                    ui.t("Open Project Folder…", "打开项目目录…"),
+                )
+                .tooltip(widgets::tip(
+                    ui.t(
+                        "Choose the project whose lenslet.lock to update",
+                        "选择要更新其 lenslet.lock 的项目",
+                    ),
+                    Some(i18n::shortcut("⇧O")),
+                ))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(super::OpenProject), cx)),
+            );
+        }
+        let session = self.session.clone();
+        let access = row.access().clone();
+        match row.state {
+            LockState::NotInLock => {
+                let implied = row.used.implied;
+                actions = actions.child(
+                    widgets::primary_button(
+                        ui,
+                        "accept",
+                        ui.t("Accept into lock", "写入 lenslet.lock"),
+                    )
+                    .tooltip(widgets::tip(
+                        ui.t("Add it to lenslet.lock", "将其加入 lenslet.lock"),
+                        Some(i18n::key("a")),
+                    ))
                     .on_click(move |_, _, cx| {
                         let entries = vec![(access.clone(), false, implied)];
                         session.update(cx, |session, cx| session.accept(entries, cx));
                     }),
-            );
-        } else if row.used && !row.in_lock {
-            actions = actions.child(
-                widgets::primary_button(
-                    &ui,
-                    "choose-ws-for-lock",
-                    ui.t("Choose project folder…", "选择项目目录…"),
-                )
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "Pick a project folder to create or update lenslet.lock",
-                        "选择一个项目目录以创建或更新 lenslet.lock",
-                    ),
-                    Some(i18n::shortcut("⌥O")),
-                ))
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(super::OpenWorkspace), cx);
-                }),
-            );
-        }
-        if editable && row.in_lock {
-            let session = self.session.clone();
-            let access = row.access.clone();
-            actions = actions.child(
-                widgets::danger_button(
-                    &ui,
-                    "remove-lock",
-                    ui.t("Remove from lock", "从 lock 移除"),
-                )
-                .on_click(move |_, _, cx| {
-                    session.update(cx, |s, cx| s.remove_from_lock(vec![access.clone()], cx));
-                }),
-            );
-        }
-        if editable && (row.in_lock || row.used) {
-            let session = self.session.clone();
-            let access = row.access.clone();
-            let test = !row.test;
-            actions = actions.child(
-                widgets::button(
-                    &ui,
-                    "mark-test",
-                    if row.test {
-                        ui.t("Unmark Test-only", "取消仅测试标记")
-                    } else {
-                        ui.t("Mark Test-only", "标记为仅测试")
-                    },
-                )
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "Test-only permissions stay in the lock but out of `lenslet policy`",
-                        "仅测试需要的权限保留在 lock 中，但不进入 `lenslet policy`",
-                    ),
-                    None,
-                ))
-                .on_click(move |_, _, cx| {
-                    let access = access.clone();
-                    session.update(cx, |session, cx| session.set_test_mark(access, test, cx));
-                }),
-            );
-        }
-        if row.used {
-            let access = row.access.clone();
-            actions = actions.child(
-                widgets::button(&ui, "show-calls", ui.t("Show calls", "查看调用")).on_click(
-                    cx.listener(move |_, _, _, cx| {
-                        cx.emit(AccessEvent::FilterCalls(access.clone()));
-                    }),
-                ),
-            );
-        }
-
-        // Simulation context banner when NeedsContext / Denied
-        let sim_card = sim_decision.and_then(|dec| match dec.reason {
-            Reason::NeedsContext => Some(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme::h(t.amber, 0.40))
-                    .bg(theme::h(t.amber, 0.06))
-                    .child(widgets::label(
-                        &ui,
-                        ui.t("POLICY NEEDS CLOUD CONTEXT", "策略包含云端运行时上下文条件"),
-                    ))
-                    .child(widgets::mono(&ui, dec.missing_context.join(", "))),
-            ),
-            Reason::ExplicitDeny => Some(
-                div()
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme::h(t.red, 0.40))
-                    .bg(theme::h(t.red, 0.06))
-                    .child(widgets::label(
-                        &ui,
-                        ui.t(
-                            "EXPLICITLY DENIED BY SIMULATED POLICY",
-                            "被所选策略显式拒绝 (Explicit Deny)",
-                        ),
-                    )),
-            ),
-            _ => None,
-        });
-
-        // Multi-Format IaC Policy Compiler section
-        let formats = [
-            (PolicyFormat::IamJson, "IAM JSON"),
-            (PolicyFormat::Terraform, "Terraform"),
-        ];
-        let mut fmt_row = div().flex().flex_wrap().items_center().gap(px(4.0));
-        for (fmt, label) in formats {
-            let active = self.iac_format == fmt;
-            fmt_row = fmt_row.child(
-                widgets::chip(&ui, label, label, None, active, t.accent).on_click(cx.listener(
-                    move |detail, _, _, cx| {
-                        detail.iac_format = fmt;
-                        detail.rebuild_iac(cx);
-                        cx.notify();
-                    },
-                )),
-            );
-        }
-        let ent = cx.entity();
-        let scope_seg = widgets::segmented(
-            &ui,
-            vec![
-                widgets::Segment {
-                    id: "iac-one",
-                    label: ui.t("This Permission", "当前权限").into(),
-                    active: !self.iac_full_run,
-                    tooltip: None,
-                },
-                widgets::Segment {
-                    id: "iac-all",
-                    label: ui.t("Full Run", "全部权限").into(),
-                    active: self.iac_full_run,
-                    tooltip: None,
-                },
-            ],
-            move |ix, _, cx| {
-                ent.update(cx, |detail, cx| {
-                    detail.iac_full_run = ix == 1;
-                    detail.rebuild_iac(cx);
-                    cx.notify();
-                });
-            },
-        );
-        let code_copy = self.iac_text.clone();
-        let iac_section = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(widgets::label(&ui, ui.t("POLICY", "策略")))
-                    .child(div().flex_1())
-                    .child(scope_seg),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(fmt_row)
-                    .child(div().flex_1())
-                    .child(
-                        widgets::button(&ui, "iac-copy", ui.t("Copy", "复制")).on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code_copy.clone()));
-                                cx.emit(AccessEvent::Toast(i18n::copied("policy")));
-                            }),
-                        ),
+                );
+            }
+            LockState::InLock | LockState::Unused => {
+                actions = actions.child(
+                    widgets::danger_button(
+                        ui,
+                        "remove-lock",
+                        ui.t("Remove from lock", "从 lenslet.lock 移除"),
                     )
-                    .child(
-                        widgets::button(&ui, "iac-export", ui.t("Export…", "导出…"))
-                            .on_click(cx.listener(|detail, _, _, cx| detail.export_iac(cx))),
-                    ),
+                    .tooltip(widgets::tip(
+                        ui.t(
+                            "Delete its line from lenslet.lock",
+                            "从 lenslet.lock 删除这一行",
+                        ),
+                        Some(i18n::key("⌫")),
+                    ))
+                    .on_click(move |_, _, cx| {
+                        let entries = vec![access.clone()];
+                        session.update(cx, |s, cx| s.remove_from_lock(entries, cx));
+                    }),
+                );
+            }
+        }
+        let session = self.session.clone();
+        let access = row.access().clone();
+        let test = !row.test;
+        actions.child(
+            widgets::button(
+                ui,
+                "mark-test",
+                if row.test {
+                    ui.t("Unmark `# test`", "取消 `# test` 标记")
+                } else {
+                    ui.t("Mark `# test`", "标记 `# test`")
+                },
             )
-            .child(
-                div()
-                    .h(px(210.0))
-                    .flex()
-                    .flex_col()
-                    .child(super::cached(&self.iac_body)),
-            );
+            .tooltip(widgets::tip(
+                ui.t(
+                    "Test-only permissions stay in the lock but out of the policy",
+                    "仅测试需要的权限保留在 lock 中，但不进入策略",
+                ),
+                Some(i18n::key("t")),
+            ))
+            .on_click(move |_, _, cx| {
+                let access = access.clone();
+                session.update(cx, |session, cx| session.set_test_mark(access, test, cx));
+            }),
+        )
+    }
 
+    fn render_calls(&self, ui: &Ui, row: &AccessRow, cx: &mut Context<Self>) -> Div {
+        let t = ui.p;
         let mut calls = div().flex().flex_col();
         for (index, call) in self.calls.iter().enumerate() {
             let id = call.id.clone();
-            let target_str = call.semantic_target();
             calls = calls.child(
                 div()
                     .id(ElementId::named_usize("access-call", index))
@@ -1077,16 +751,10 @@ impl Render for AccessDetail {
                             .child(format!("{} {}", call.service_name(), operation_label(call))),
                     )
                     .child(
-                        div()
+                        widgets::mono(ui, ellipsize(&call.semantic_target(), 44))
                             .flex_1()
-                            .min_w(px(0.0))
-                            .font(fonts::mono_font())
                             .text_size(px(text::XS))
-                            .text_color(rgb(t.text_muted))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(ellipsize(&target_str, 44)),
+                            .text_color(rgb(t.text_muted)),
                     ),
             );
         }
@@ -1095,18 +763,89 @@ impl Render for AccessDetail {
                 div()
                     .text_size(px(text::MD))
                     .text_color(rgb(t.text_muted))
-                    .child(if row.used {
+                    .child(if row.state == LockState::Unused {
+                        ui.t("No call in this run needed it.", "本次运行没有调用需要它。")
+                    } else {
                         ui.t(
                             "The calls that needed it are no longer in view.",
                             "相关调用已不在当前列表中。",
                         )
-                    } else {
-                        ui.t("No call in this run needed it.", "本次运行没有调用需要它。")
                     }),
             );
         }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(widgets::label(ui, ui.t("CALLS", "调用")))
+            .child(calls)
+    }
+}
 
-        let via: SharedString = row.via.join(", ").into();
+impl Render for AccessDetail {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _scope = crate::fsguard::RenderScope::enter();
+        let ui = Ui::of(cx);
+        let t = ui.p;
+        let container = div()
+            .id("access-detail")
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(t.panel_raised));
+        let Some(row) = self.row.clone() else {
+            return container.child(widgets::empty_state(
+                &ui,
+                ui.t("Select a permission", "选择一项权限"),
+                "",
+                None,
+            ));
+        };
+        let (service, action) = row
+            .access()
+            .action
+            .split_once(':')
+            .unwrap_or(("", row.access().action.as_str()));
+        let service_color = ui.service_color(&service_label(service));
+        let mut badges = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .child(glyph::dot(service_color, 7.0))
+            .child(
+                div()
+                    .text_size(px(text::SM))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(service_color)
+                    .child(service_label(service)),
+            )
+            .child(state_badge(&ui, row.state));
+        if row.used.implied {
+            badges = badges.child(widgets::badge(&ui, ui.t("IMPLIED", "隐含"), t.accent));
+        }
+        if row.test {
+            badges = badges.child(widgets::badge(&ui, "# test", t.text_muted));
+        }
+        if row.used.unverified {
+            badges = badges.child(widgets::badge(&ui, ui.t("UNVERIFIED", "未核实"), t.amber));
+        }
+        let explain = match row.state {
+            LockState::NotInLock if !self.session.read(cx).lock.exists() => ui.t(
+                "There is no lenslet.lock yet: accepting creates it.",
+                "还没有 lenslet.lock：写入时会创建它。",
+            ),
+            LockState::NotInLock => ui.t(
+                "This run needed it and lenslet.lock does not have it.",
+                "本次运行需要它，但 lenslet.lock 中没有。",
+            ),
+            LockState::InLock => ui.t("lenslet.lock already has it.", "lenslet.lock 中已有它。"),
+            LockState::Unused => ui.t(
+                "lenslet.lock has it, but no call in this run needed it.",
+                "lenslet.lock 中有它，但本次运行没有调用需要它。",
+            ),
+        };
+        let via = row.used.via.join(", ");
         container.child(
             div()
                 .id("access-detail-scroll")
@@ -1137,11 +876,16 @@ impl Render for AccessDetail {
                                 .text_size(px(text::MD))
                                 .line_height(px(18.0))
                                 .text_color(rgb(t.text_dim))
-                                .child(row.access.resource.clone()),
+                                .child(row.access().resource.clone()),
                         ),
                 )
-                .child(actions)
-                .children(sim_card)
+                .child(
+                    div()
+                        .text_size(px(text::MD))
+                        .text_color(rgb(t.text_soft))
+                        .child(explain),
+                )
+                .child(self.render_actions(&ui, &row, cx))
                 .when(!via.is_empty(), |el| {
                     el.child(widgets::meta_row(
                         &ui,
@@ -1149,25 +893,7 @@ impl Render for AccessDetail {
                         widgets::mono(&ui, via.clone()),
                     ))
                 })
-                .child(iac_section)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(widgets::label(&ui, ui.t("CALLS", "调用")))
-                        .child(calls),
-                ),
+                .child(self.render_calls(&ui, &row, cx)),
         )
     }
-}
-
-fn ui_ref(ui: &Ui) -> &Ui {
-    ui
-}
-
-fn color_of(color: gpui::Rgba) -> u32 {
-    ((color.r * 255.0).round() as u32) << 16
-        | ((color.g * 255.0).round() as u32) << 8
-        | (color.b * 255.0).round() as u32
 }

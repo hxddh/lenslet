@@ -1,9 +1,8 @@
-//! Lenslet: the desktop window over Lenslet runs.
+//! Lenslet: see what AWS access your code needs, and why its AWS calls failed.
 
 mod app;
 mod body;
 mod daemon;
-mod demo;
 mod feed;
 mod fonts;
 mod fsguard;
@@ -13,10 +12,7 @@ mod icons;
 mod lockfile;
 mod model;
 mod prefs;
-mod replay;
 mod search;
-mod sigv4;
-mod sse;
 mod store;
 mod syntax;
 #[cfg(test)]
@@ -36,37 +32,32 @@ use gpui::{
 
 use crate::{app::*, prefs::Lang};
 
+pub const DOCS_URL: &str = "https://github.com/hxddh/lenslet#readme";
+const ISSUES_URL: &str = "https://github.com/hxddh/lenslet/issues";
+
 /// Context predicates for the key map.
-const LIST: &str = "LensletApp && !Search && !Palette && !Body && !ComposerField";
-const NOT_TYPING: &str = "LensletApp && !Search && !Palette && !ComposerField";
-const TYPING: &str = "Search || Palette || ComposerField";
+const LIST: &str = "LensletApp && !Search && !Body && !Field";
+const NOT_TYPING: &str = "LensletApp && !Search && !Field";
+const TYPING: &str = "Search || Field";
+const ACCESS: &str = "Access && !Search && !Field";
 
 /// The whole key map. Every `cmd-` binding gets a `ctrl-` twin off macOS.
 fn key_bindings() -> Vec<KeyBinding> {
     type Make = Box<dyn Fn(&str) -> KeyBinding>;
     let app = Some("LensletApp");
-    // ⌘N is Run options everywhere except inside the palette, where ⌃N moves
-    // down the list (scoped by context so the two never collide).
-    let not_palette = Some("LensletApp && !Palette");
     let primary: Vec<(&str, Make)> = vec![
+        ("o", Box::new(move |k| KeyBinding::new(k, OpenFile, app))),
+        (
+            "shift-o",
+            Box::new(move |k| KeyBinding::new(k, OpenProject, app)),
+        ),
         ("r", Box::new(move |k| KeyBinding::new(k, RunTests, app))),
         (".", Box::new(move |k| KeyBinding::new(k, StopRun, app))),
-        (
-            "n",
-            Box::new(move |k| KeyBinding::new(k, RunOptions, not_palette)),
-        ),
-        ("k", Box::new(move |k| KeyBinding::new(k, OpenPalette, app))),
-        ("f", Box::new(move |k| KeyBinding::new(k, FocusSearch, app))),
-        (
-            ",",
-            Box::new(move |k| KeyBinding::new(k, OpenSettings, app)),
-        ),
+        ("[", Box::new(move |k| KeyBinding::new(k, PrevRun, app))),
+        ("]", Box::new(move |k| KeyBinding::new(k, NextRun, app))),
         ("1", Box::new(move |k| KeyBinding::new(k, ShowCalls, app))),
         ("2", Box::new(move |k| KeyBinding::new(k, ShowAccess, app))),
-        (
-            "0",
-            Box::new(move |k| KeyBinding::new(k, ToggleSidebar, app)),
-        ),
+        ("f", Box::new(move |k| KeyBinding::new(k, FocusSearch, app))),
         (
             "b",
             Box::new(move |k| KeyBinding::new(k, ToggleInspector, app)),
@@ -75,29 +66,13 @@ fn key_bindings() -> Vec<KeyBinding> {
             "j",
             Box::new(move |k| KeyBinding::new(k, ToggleOutput, app)),
         ),
-        ("o", Box::new(move |k| KeyBinding::new(k, OpenFile, app))),
-        (
-            "s",
-            Box::new(move |k| KeyBinding::new(k, ExportReport, app)),
-        ),
-        ("[", Box::new(move |k| KeyBinding::new(k, PrevRun, app))),
-        ("]", Box::new(move |k| KeyBinding::new(k, NextRun, app))),
-        ("g", Box::new(move |k| KeyBinding::new(k, NextMatch, app))),
-        (
-            "shift-g",
-            Box::new(move |k| KeyBinding::new(k, PrevMatch, app)),
-        ),
-        (
-            "enter",
-            Box::new(|k| KeyBinding::new(k, Replay, Some(NOT_TYPING))),
-        ),
-        (
-            "shift-enter",
-            Box::new(|k| KeyBinding::new(k, EditReplay, Some(NOT_TYPING))),
-        ),
         (
             "shift-c",
             Box::new(|k| KeyBinding::new(k, CopyCurl, Some(NOT_TYPING))),
+        ),
+        (
+            "shift-a",
+            Box::new(|k| KeyBinding::new(k, AcceptAll, Some(ACCESS))),
         ),
         ("x", Box::new(|k| KeyBinding::new(k, Cut, Some(TYPING)))),
         ("v", Box::new(|k| KeyBinding::new(k, Paste, Some(TYPING)))),
@@ -108,19 +83,11 @@ fn key_bindings() -> Vec<KeyBinding> {
         ),
         (
             "c",
-            Box::new(|k| {
-                KeyBinding::new(k, Copy, Some("Body || Search || Palette || ComposerField"))
-            }),
+            Box::new(|k| KeyBinding::new(k, Copy, Some("Body || Search || Field"))),
         ),
         (
             "a",
-            Box::new(|k| {
-                KeyBinding::new(
-                    k,
-                    SelectAll,
-                    Some("Body || Search || Palette || ComposerField"),
-                )
-            }),
+            Box::new(|k| KeyBinding::new(k, SelectAll, Some("Body || Search || Field"))),
         ),
         ("w", Box::new(move |k| KeyBinding::new(k, CloseWindow, app))),
         ("q", Box::new(|k| KeyBinding::new(k, Quit, None))),
@@ -141,7 +108,6 @@ fn key_bindings() -> Vec<KeyBinding> {
         ]);
     } else {
         bindings.push(KeyBinding::new("f11", ToggleFullScreen, app));
-        bindings.push(KeyBinding::new("ctrl-y", Redo, Some(TYPING)));
     }
     bindings.extend([
         KeyBinding::new("/", FocusSearch, Some(NOT_TYPING)),
@@ -156,32 +122,37 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", Confirm, Some(NOT_TYPING)),
         // Esc closes whatever is on top, from anywhere, text fields included.
         KeyBinding::new("escape", Cancel, Some(NOT_TYPING)),
-        KeyBinding::new("escape", Cancel, Some("ComposerField")),
-        KeyBinding::new("enter", SubmitField, Some("ComposerField")),
+        KeyBinding::new("escape", Cancel, Some("Field")),
+        KeyBinding::new("enter", SubmitField, Some("Field")),
         // Tab / Shift-Tab move between a dialog's fields and buttons.
         KeyBinding::new("tab", FocusNextControl, app),
         KeyBinding::new("shift-tab", FocusPrevControl, app),
         // While typing a search, ↑/↓ still move through the results.
         KeyBinding::new("down", SelectNext, Some("Search")),
         KeyBinding::new("up", SelectPrev, Some("Search")),
-        KeyBinding::new("down", SelectNext, Some("Palette")),
-        KeyBinding::new("up", SelectPrev, Some("Palette")),
-        KeyBinding::new("ctrl-n", SelectNext, Some("Palette")),
-        KeyBinding::new("ctrl-p", SelectPrev, Some("Palette")),
-        KeyBinding::new("enter", Confirm, Some("Palette")),
-        KeyBinding::new("escape", Cancel, Some("Palette")),
+        // The Access view's lock keys.
+        KeyBinding::new("a", AcceptPermission, Some(ACCESS)),
+        KeyBinding::new("t", ToggleTestMark, Some(ACCESS)),
+        KeyBinding::new("backspace", RemovePermission, Some(ACCESS)),
+        KeyBinding::new("delete", RemovePermission, Some(ACCESS)),
     ]);
     bindings
 }
 
-/// The macOS menu bar (`Lenslet`, `File`, `Edit`, `View`, `Run`, `Window`,
-/// `Help`). `Window` and `Help` keep their English titles so macOS attaches
-/// the window list and menu search.
+/// The macOS menu bar. `Window` and `Help` keep their English titles so
+/// macOS attaches the window list and menu search.
 pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
     let t = |en: &'static str, zh: &'static str| -> &'static str {
         match lang {
             Lang::En => en,
             Lang::Zh => zh,
+        }
+    };
+    let check = |on: bool, label: &'static str| -> String {
+        if on {
+            format!("✓ {label}")
+        } else {
+            label.to_string()
         }
     };
     vec![
@@ -190,7 +161,8 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
             items: vec![
                 MenuItem::action(t("About Lenslet", "关于 Lenslet"), OpenAbout),
                 MenuItem::separator(),
-                MenuItem::action(t("Settings…", "设置…"), OpenSettings),
+                MenuItem::action(check(lang == Lang::En, "Language: English"), UseEnglish),
+                MenuItem::action(check(lang == Lang::Zh, "Language: 中文"), UseChinese),
                 MenuItem::separator(),
                 MenuItem::os_submenu(t("Services", "服务"), SystemMenuType::Services),
                 MenuItem::separator(),
@@ -204,17 +176,8 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
         Menu {
             name: t("File", "文件").into(),
             items: vec![
-                MenuItem::action(t("Open Project Folder…", "打开项目目录…"), OpenWorkspace),
+                MenuItem::action(t("Open Project Folder…", "打开项目目录…"), OpenProject),
                 MenuItem::action(t("Open Run File…", "打开运行文件…"), OpenFile),
-                MenuItem::separator(),
-                MenuItem::action(t("Export Run Summary…", "导出运行摘要…"), ExportReport),
-                MenuItem::action(
-                    t(
-                        "Generate GitHub Actions Workflow…",
-                        "生成 GitHub Actions 工作流…",
-                    ),
-                    InitCiWorkflow,
-                ),
                 MenuItem::separator(),
                 MenuItem::action(t("Close Window", "关闭窗口"), CloseWindow),
             ],
@@ -230,24 +193,18 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
                 MenuItem::os_action(t("Paste", "粘贴"), Paste, OsAction::Paste),
                 MenuItem::os_action(t("Select All", "全选"), SelectAll, OsAction::SelectAll),
                 MenuItem::separator(),
-                MenuItem::action(t("Copy Call as curl", "复制为 curl"), CopyCurl),
-                MenuItem::separator(),
+                MenuItem::action(t("Copy as curl", "复制为 curl"), CopyCurl),
                 MenuItem::action(t("Find…", "查找…"), FocusSearch),
-                MenuItem::action(t("Find Next", "查找下一个"), NextMatch),
-                MenuItem::action(t("Find Previous", "查找上一个"), PrevMatch),
             ],
         },
         Menu {
             name: t("View", "视图").into(),
             items: vec![
-                MenuItem::action(t("Calls", "请求"), ShowCalls),
+                MenuItem::action(t("Calls", "调用"), ShowCalls),
                 MenuItem::action(t("Access", "权限"), ShowAccess),
                 MenuItem::separator(),
-                MenuItem::action(t("Output", "输出"), ToggleOutput),
-                MenuItem::action(t("Sidebar", "侧栏"), ToggleSidebar),
                 MenuItem::action(t("Inspector", "详情栏"), ToggleInspector),
-                MenuItem::separator(),
-                MenuItem::action(t("Command Palette…", "命令面板…"), OpenPalette),
+                MenuItem::action(t("Output", "输出"), ToggleOutput),
                 MenuItem::separator(),
                 MenuItem::action(t("Enter Full Screen", "进入全屏幕"), ToggleFullScreen),
             ],
@@ -257,15 +214,11 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
             items: vec![
                 MenuItem::action(t("Run Tests", "运行测试"), RunTests),
                 MenuItem::action(t("Stop", "停止"), StopRun),
-                MenuItem::action(t("Run Options…", "运行选项…"), RunOptions),
-                MenuItem::separator(),
-                MenuItem::action(t("Replay Call", "重放请求"), Replay),
-                MenuItem::action(t("Edit & Replay…", "编辑并重放…"), EditReplay),
+                MenuItem::action(t("Edit Test Command…", "编辑测试命令…"), EditCommand),
                 MenuItem::separator(),
                 MenuItem::action(t("Previous Run", "上一个运行"), PrevRun),
                 MenuItem::action(t("Next Run", "下一个运行"), NextRun),
-                MenuItem::separator(),
-                MenuItem::action(t("Demo", "演示"), ToggleDemoAction),
+                MenuItem::action(t("Follow Newest Run", "跟随最新运行"), FollowNewest),
             ],
         },
         Menu {
@@ -273,8 +226,6 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
             items: vec![
                 MenuItem::action(t("Minimize", "最小化"), MinimizeWindow),
                 MenuItem::action(t("Zoom", "缩放"), ZoomWindow),
-                MenuItem::separator(),
-                MenuItem::action(t("Bring All to Front", "前置全部窗口"), BringAllToFront),
             ],
         },
         Menu {
@@ -282,27 +233,8 @@ pub(crate) fn menus(lang: Lang) -> Vec<Menu> {
             items: vec![
                 MenuItem::action(t("Lenslet Documentation", "Lenslet 使用文档"), OpenDocs),
                 MenuItem::action(t("Report an Issue…", "反馈问题…"), OpenIssues),
-                MenuItem::separator(),
-                MenuItem::action(
-                    t("Install Command-Line Tool…", "安装命令行工具…"),
-                    InstallCliAction,
-                ),
             ],
         },
-    ]
-}
-
-pub(crate) fn dock_menu(lang: Lang) -> Vec<MenuItem> {
-    let t = |en: &'static str, zh: &'static str| -> &'static str {
-        match lang {
-            Lang::En => en,
-            Lang::Zh => zh,
-        }
-    };
-    vec![
-        MenuItem::action(t("Run Tests", "运行测试"), RunTests),
-        MenuItem::action(t("Open Project Folder…", "打开项目目录…"), OpenWorkspace),
-        MenuItem::action(t("Open Run File…", "打开运行文件…"), OpenFile),
     ]
 }
 
@@ -336,19 +268,11 @@ fn open_main_window(initial_paths: Vec<PathBuf>, cx: &mut App) -> WindowHandle<L
     let width = saved.window_width.unwrap_or(1360.0).clamp(960.0, 3840.0);
     let height = saved.window_height.unwrap_or(850.0).clamp(640.0, 2400.0);
     let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
-
-    let titlebar = if cfg!(target_os = "macos") {
-        gpui::TitlebarOptions {
-            title: Some("Lenslet".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(gpui::point(px(14.0), px(15.0))),
-        }
-    } else {
-        gpui::TitlebarOptions {
-            title: Some("Lenslet".into()),
-            appears_transparent: false,
-            traffic_light_position: None,
-        }
+    let mac = cfg!(target_os = "macos");
+    let titlebar = gpui::TitlebarOptions {
+        title: Some("Lenslet".into()),
+        appears_transparent: mac,
+        traffic_light_position: mac.then(|| gpui::point(px(14.0), px(15.0))),
     };
     let handle = cx
         .open_window(
@@ -378,7 +302,7 @@ fn ensure_window(cx: &mut App) -> WindowHandle<LensletApp> {
     open_main_window(Vec::new(), cx)
 }
 
-/// Signal every window's children; never waits (see `stop_all_children`).
+/// Signal every window's run; never waits.
 fn stop_all_window_children(cx: &mut App) {
     for win in cx.windows() {
         if let Some(handle) = win.downcast::<LensletApp>() {
@@ -417,14 +341,12 @@ fn parse_cli_args() -> Vec<PathBuf> {
             }
             "-h" | "--help" => {
                 println!(
-                    "Usage: lenslet-ui [RUN_FILE_OR_PROJECT_FOLDER...]\n\n\
-                     Open the Lenslet window."
+                    "Usage: lenslet-ui [RUN_FILE_OR_PROJECT_FOLDER...]\n\nOpen the Lenslet window."
                 );
                 std::process::exit(0);
             }
-            s if s.starts_with("-psn_") => {
-                // macOS LaunchServices process serial number flag; ignore.
-            }
+            // macOS LaunchServices process serial number flag.
+            s if s.starts_with("-psn_") => {}
             other => paths.push(PathBuf::from(other)),
         }
     }
@@ -483,17 +405,15 @@ fn main() {
         cx.on_action(|_: &HideApp, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        cx.on_action(|_: &OpenDocs, cx| cx.open_url("https://github.com/hxddh/lenslet#readme"));
-        cx.on_action(|_: &OpenIssues, cx| cx.open_url("https://github.com/hxddh/lenslet/issues"));
+        cx.on_action(|_: &OpenDocs, cx| cx.open_url(DOCS_URL));
+        cx.on_action(|_: &OpenIssues, cx| cx.open_url(ISSUES_URL));
         cx.on_action(|_: &RunTests, cx| with_window(cx, Box::new(RunTests)));
         cx.on_action(|_: &OpenFile, cx| with_window(cx, Box::new(OpenFile)));
-        cx.on_action(|_: &OpenWorkspace, cx| with_window(cx, Box::new(OpenWorkspace)));
+        cx.on_action(|_: &OpenProject, cx| with_window(cx, Box::new(OpenProject)));
         cx.on_action(|_: &OpenAbout, cx| with_window(cx, Box::new(OpenAbout)));
 
-        let saved = prefs::load(&app::home());
         if cfg!(target_os = "macos") {
-            cx.set_menus(menus(saved.lang));
-            cx.set_dock_menu(dock_menu(saved.lang));
+            cx.set_menus(menus(prefs::load(&app::home()).lang));
         }
 
         open_main_window(cli_paths, cx);
@@ -515,25 +435,100 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn bound(bindings: &[KeyBinding], key: &str, action: &str) -> bool {
+        bindings.iter().any(|b| {
+            b.keystrokes().len() == 1
+                && b.keystrokes()[0].unparse() == key
+                && b.action().name().ends_with(action)
+        })
+    }
+
+    /// The whole keymap, and every shortcut a tooltip or menu advertises, is
+    /// bound (12.0 advertised ⌥O and ⌥S without binding them).
     #[test]
-    fn every_command_binding_has_a_ctrl_twin_off_macos() {
+    fn every_advertised_shortcut_is_bound() {
         let bindings = key_bindings();
-        // The cap is on Lenslet's own shortcuts; macOS's standard window keys
-        // (Hide, Hide Others, Minimize, Full Screen) are platform conventions.
+        let cmd = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        for (key, action) in [
+            ("o", "OpenFile"),
+            ("shift-o", "OpenProject"),
+            ("r", "RunTests"),
+            (".", "StopRun"),
+            ("[", "PrevRun"),
+            ("]", "NextRun"),
+            ("1", "ShowCalls"),
+            ("2", "ShowAccess"),
+            ("f", "FocusSearch"),
+            ("b", "ToggleInspector"),
+            ("j", "ToggleOutput"),
+            ("shift-c", "CopyCurl"),
+            ("shift-a", "AcceptAll"),
+            ("c", "Copy"),
+            ("a", "SelectAll"),
+            ("w", "CloseWindow"),
+            ("q", "Quit"),
+        ] {
+            let key = format!("{cmd}-{key}");
+            assert!(bound(&bindings, &key, action), "{key} → {action}");
+        }
+        for (key, action) in [
+            ("/", "FocusSearch"),
+            ("j", "SelectNext"),
+            ("k", "SelectPrev"),
+            ("down", "SelectNext"),
+            ("up", "SelectPrev"),
+            ("home", "SelectFirst"),
+            ("end", "SelectLast"),
+            ("pageup", "PageUp"),
+            ("pagedown", "PageDown"),
+            ("enter", "Confirm"),
+            ("escape", "Cancel"),
+            ("tab", "FocusNextControl"),
+            ("a", "AcceptPermission"),
+            ("t", "ToggleTestMark"),
+            ("backspace", "RemovePermission"),
+        ] {
+            assert!(bound(&bindings, key, action), "{key} → {action}");
+        }
+
+        // Every shortcut the views advertise (`i18n::shortcut("…")`) is one
+        // of the bindings above.
+        let advertised = [
+            include_str!("app/header.rs"),
+            include_str!("app/calls.rs"),
+            include_str!("app/inspector.rs"),
+            include_str!("app/access.rs"),
+            include_str!("app/mod.rs"),
+            include_str!("search.rs"),
+        ];
+        for source in advertised {
+            for piece in source.split("i18n::shortcut(\"").skip(1) {
+                let key = piece.split('"').next().unwrap();
+                let spelled = key.replace('⇧', "shift-").to_lowercase();
+                let combo = format!("{cmd}-{spelled}");
+                assert!(
+                    bindings
+                        .iter()
+                        .any(|b| b.keystrokes().len() == 1 && b.keystrokes()[0].unparse() == combo),
+                    "advertised {key} ({combo}) is not bound"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_keymap_stays_small_and_has_ctrl_twins_off_macos() {
+        let bindings = key_bindings();
         let platform = [
             "HideApp",
             "HideOthers",
             "MinimizeWindow",
             "ToggleFullScreen",
         ];
-        for (action, name) in [
-            (gpui::Action::name(&HideApp), "HideApp"),
-            (gpui::Action::name(&HideOthers), "HideOthers"),
-            (gpui::Action::name(&MinimizeWindow), "MinimizeWindow"),
-            (gpui::Action::name(&ToggleFullScreen), "ToggleFullScreen"),
-        ] {
-            assert!(action.ends_with(name), "{action}");
-        }
         let cmd = bindings
             .iter()
             .filter(|b| b.keystrokes()[0].modifiers().platform)
@@ -550,36 +545,18 @@ mod tests {
                 .count();
             assert!(ctrl >= cmd, "{ctrl} ctrl bindings for {cmd} cmd bindings");
         }
-        assert!(cmd >= 20);
-        assert!(cmd <= 30, "{cmd} command shortcuts; keep the key map small");
+        assert!(cmd <= 22, "{cmd} command shortcuts; keep the key map small");
     }
 
     #[test]
-    fn escape_and_tab_reach_dialogs_even_from_a_text_field() {
-        let bindings = key_bindings();
-        let has = |key: &str, ctx: &str| {
-            bindings.iter().any(|b| {
-                b.keystrokes().len() == 1
-                    && b.keystrokes()[0].unparse() == key
-                    && b.predicate().is_some_and(|p| p.to_string().contains(ctx))
-            })
-        };
-        assert!(has("escape", "ComposerField"));
-        assert!(has("escape", "Palette"));
-        assert!(has("tab", "LensletApp"));
-        assert!(has("shift-tab", "LensletApp"));
-    }
-
-    #[test]
-    fn macos_hig_menus_cover_standard_sections_and_os_actions() {
+    fn menus_are_bilingual_and_keep_the_standard_sections() {
         for lang in [Lang::En, Lang::Zh] {
             let built = menus(lang);
             assert_eq!(built.len(), 7);
             assert_eq!(built[0].name.as_ref(), "Lenslet");
             assert_eq!(built[5].name.as_ref(), "Window");
             assert_eq!(built[6].name.as_ref(), "Help");
-
-            let edit_os_actions: Vec<OsAction> = built[2]
+            let os_actions: Vec<OsAction> = built[2]
                 .items
                 .iter()
                 .filter_map(|item| match item {
@@ -587,17 +564,10 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            for expected in [
-                OsAction::Undo,
-                OsAction::Redo,
-                OsAction::Cut,
-                OsAction::Copy,
-                OsAction::Paste,
-                OsAction::SelectAll,
-            ] {
-                assert!(edit_os_actions.contains(&expected));
-            }
+            assert_eq!(os_actions.len(), 6);
         }
+        let zh = menus(Lang::Zh);
+        assert_eq!(zh[1].name.as_ref(), "文件");
     }
 
     #[test]
