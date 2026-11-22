@@ -300,6 +300,45 @@ fn workbench(engine: Engine) -> AnyElement {
 
 // -- Pieces ---------------------------------------------------------------------
 
+/// A resource count ("3 objects") in the window's language.
+fn localize_count(detail: &str) -> String {
+    if lang().get() == Lang::En {
+        return detail.to_string();
+    }
+    let Some((n, unit)) = detail.split_once(' ') else {
+        return detail.to_string();
+    };
+    match unit {
+        "object" | "objects" => format!("{n} 个对象"),
+        "item" | "items" => format!("{n} 项"),
+        "message" | "messages" => format!("{n} 条消息"),
+        _ => detail.to_string(),
+    }
+}
+
+/// A service's short display name, from its signing name.
+fn service_name(service: &str) -> String {
+    match service {
+        "s3" => "S3",
+        "dynamodb" => "DynamoDB",
+        "sqs" => "SQS",
+        "sns" => "SNS",
+        "sts" => "STS",
+        "iam" => "IAM",
+        "kms" => "KMS",
+        "lambda" => "Lambda",
+        "secretsmanager" => "Secrets",
+        "ssm" => "SSM",
+        "events" => "EventBridge",
+        "logs" => "Logs",
+        "states" => "Step Functions",
+        "kinesis" => "Kinesis",
+        "aws" => "AWS",
+        other => return other.to_uppercase(),
+    }
+    .to_string()
+}
+
 fn small_button(
     label: impl Fn() -> String + 'static,
     press: impl Fn() + 'static,
@@ -351,9 +390,12 @@ fn resource_group(
                 }))
                 .child(text(name.clone()).font_family(MONO).text_sm().flex_1())
                 .child(
-                    text(detail.clone().unwrap_or_default())
-                        .text_xs()
-                        .text_color(move || theme().muted_foreground),
+                    text({
+                        let detail = detail.clone();
+                        move || localize_count(detail.as_deref().unwrap_or_default())
+                    })
+                    .text_xs()
+                    .text_color(move || theme().muted_foreground),
                 ),
         );
     }
@@ -408,7 +450,7 @@ fn call_row(
                 })
                 .on_press(move || selected.set(Some(i)))
                 .child(
-                    text(move || call().map(|c| c.service.to_uppercase()).unwrap_or_default())
+                    text(move || call().map(|c| service_name(&c.service)).unwrap_or_default())
                         .w(px(88.0))
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD),
@@ -519,7 +561,7 @@ fn detail_view(snapshot: Signal<Snapshot>, selected: Signal<Option<usize>>) -> i
         .p_4()
         .gap_3()
         .child(
-            text(move || call().map(|c| format!("{} {}", c.service.to_uppercase(), c.operation)).unwrap_or_else(|| t("Select a call", "选择一次调用").into()))
+            text(move || call().map(|c| format!("{} {}", service_name(&c.service), c.operation)).unwrap_or_else(|| t("Select a call", "选择一次调用").into()))
                 .text_lg()
                 .font_weight(FontWeight::SEMIBOLD),
         )

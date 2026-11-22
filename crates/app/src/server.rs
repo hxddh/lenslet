@@ -117,14 +117,19 @@ fn record(
         .unwrap_or_else(|| "/".into());
     let info = wire::wire_info(&request.headers, &path);
     let content_type = header(&request.headers, "content-type");
-    let operation = info.operation.clone().unwrap_or_else(|| {
-        wire::fallback_operation(
-            &info.service,
-            request.method.as_str(),
-            &path,
-            &request.headers,
-        )
-    });
+    // Query-protocol services (SNS, IAM, STS) name the action in the body.
+    let operation = info
+        .operation
+        .clone()
+        .or_else(|| wire::form_action(body))
+        .unwrap_or_else(|| {
+            wire::fallback_operation(
+                &info.service,
+                request.method.as_str(),
+                &path,
+                &request.headers,
+            )
+        });
     let status = response.status.as_u16();
     let request_text = text_of(body, content_type.as_deref());
     let response_type = header(&response.headers, "content-type");
