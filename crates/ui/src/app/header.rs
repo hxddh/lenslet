@@ -129,10 +129,9 @@ impl LensletApp {
             (Health::Ready, None) => String::new(),
             (Health::Ready, Some(run)) => {
                 match run.report.as_ref().map(|r| r.exit_code) {
-                    Some(Some(0)) => parts.push(("exit 0".into(), t.green)),
                     Some(Some(code)) => parts.push((
                         ui.tr(&tr!("exit {code}", "退出码 {code}")).to_string(),
-                        t.red,
+                        if code == 0 { t.green } else { t.red },
                     )),
                     Some(None) => parts.push((ui.t("ended", "已结束").into(), t.text_muted)),
                     None => parts.push((ui.t("running", "运行中").into(), t.amber)),

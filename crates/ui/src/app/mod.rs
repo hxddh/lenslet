@@ -125,7 +125,8 @@ pub enum Cmd {
     ToggleInspector,
     ToggleOutput,
     FocusSearch,
-    CopyText(&'static str, String),
+    /// Copy text; the label names it in the toast.
+    CopyText(Tr, String),
     CopyCurl(Arc<Trace>),
     Accept(Vec<(Access, bool, bool)>),
     Remove(Access),
@@ -816,12 +817,15 @@ impl LensletApp {
             }
             Cmd::CopyText(label, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.show_toast(i18n::copied(label), cx);
+                let (en, zh) = (label.en, label.zh);
+                self.show_toast(tr!("Copied {en}", "已复制{zh}"), cx);
             }
             Cmd::CopyCurl(call) => {
                 let endpoint = self.session.read(cx).header_endpoint().map(str::to_string);
                 match to_curl(&call, endpoint.as_deref()) {
-                    Some(curl) => self.run_cmd_cx(Cmd::CopyText("curl", curl), cx),
+                    Some(curl) => {
+                        self.run_cmd_cx(Cmd::CopyText(Tr::new("curl", " curl"), curl), cx)
+                    }
                     None => self.show_toast(
                         tr!(
                             "This request's body can't be rebuilt as curl",
@@ -897,7 +901,7 @@ impl LensletApp {
             entries.push(MenuEntry {
                 title: ui.t("Copy error code", "复制错误码").into(),
                 hint: None,
-                cmd: Cmd::CopyText("error code", problem.code.clone()),
+                cmd: Cmd::CopyText(tr!("the error code", "错误码"), problem.code.clone()),
             });
         }
         if let Some(access) = call.access().next() {
@@ -912,7 +916,7 @@ impl LensletApp {
         entries.push(MenuEntry {
             title: ui.t("Copy call ID", "复制调用 ID").into(),
             hint: None,
-            cmd: Cmd::CopyText("call ID", call.id.clone()),
+            cmd: Cmd::CopyText(tr!("the call ID", "调用 ID"), call.id.clone()),
         });
         entries
     }
@@ -948,12 +952,12 @@ impl LensletApp {
         entries.push(MenuEntry {
             title: ui.t("Copy action", "复制 Action").into(),
             hint: None,
-            cmd: Cmd::CopyText("action", access.action.clone()),
+            cmd: Cmd::CopyText(tr!("the action", "权限名"), access.action.clone()),
         });
         entries.push(MenuEntry {
             title: ui.t("Copy resource ARN", "复制资源 ARN").into(),
             hint: None,
-            cmd: Cmd::CopyText("ARN", access.resource.clone()),
+            cmd: Cmd::CopyText(tr!("the ARN", " ARN"), access.resource.clone()),
         });
         entries
     }
