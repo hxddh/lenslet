@@ -52,7 +52,11 @@ fn system_lang() -> Lang {
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
         .unwrap_or_default();
-    if locale.starts_with("zh") { Lang::Zh } else { Lang::En }
+    if locale.starts_with("zh") {
+        Lang::Zh
+    } else {
+        Lang::En
+    }
 }
 
 // -- The window -----------------------------------------------------------------
@@ -60,15 +64,15 @@ fn system_lang() -> Lang {
 #[component]
 pub fn App() -> impl IntoElement {
     lang().set(system_lang());
-    let content = match Engine::start(Engine::port_from_env()) {
-        Ok(engine) => workbench(engine),
-        Err(error) => cannot_start(error),
-    };
+    let started = Engine::start(Engine::port_from_env());
     app_window()
         .id("main")
         .title("Lenslet")
         .default_size(size(px(1280.0), px(800.0)))
-        .content(move || content.clone())
+        .content(move || match &started {
+            Ok(engine) => workbench(engine.clone()),
+            Err(error) => cannot_start(error.clone()),
+        })
 }
 
 fn cannot_start(error: String) -> AnyElement {
@@ -79,16 +83,31 @@ fn cannot_start(error: String) -> AnyElement {
         .gap_3()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
-        .child(text(move || t("Lenslet could not start its endpoint", "Lenslet 无法启动本地端点")).text_lg())
-        .child(text(error.clone()).font_family(MONO).text_sm().text_color(rgb(RED)))
         .child(
-            text(move || t(
-                "Another Lenslet may be running. Set LENSLET_PORT to use another port.",
-                "可能已有另一个 Lenslet 在运行。设置 LENSLET_PORT 可换一个端口。",
-            ))
+            text(move || {
+                t(
+                    "Lenslet could not start its endpoint",
+                    "Lenslet 无法启动本地端点",
+                )
+            })
+            .text_lg(),
+        )
+        .child(
+            text(error.clone())
+                .font_family(MONO)
+                .text_sm()
+                .text_color(rgb(RED)),
+        )
+        .child(
+            text(move || {
+                t(
+                    "Another Lenslet may be running. Set LENSLET_PORT to use another port.",
+                    "可能已有另一个 Lenslet 在运行。设置 LENSLET_PORT 可换一个端口。",
+                )
+            })
             .text_color(move || theme().muted_foreground),
         )
-        .into_any_element()
+        .into_element()
 }
 
 fn workbench(engine: Engine) -> AnyElement {
@@ -106,18 +125,28 @@ fn workbench(engine: Engine) -> AnyElement {
                 first_seen.update(|seen| {
                     for group in &next.resources {
                         for (name, _) in &group.items {
-                            seen.entry(format!("{}/{name}", group.service)).or_insert_with(session::now_ms);
+                            seen.entry(format!("{}/{name}", group.service))
+                                .or_insert_with(session::now_ms);
                         }
                     }
                 });
-                let fresh_selection = selected.get_untracked().is_none_or(|i| i >= next.calls.len());
+                let fresh_selection = selected
+                    .get_untracked()
+                    .is_none_or(|i| i >= next.calls.len());
                 if fresh_selection {
-                    selected.set(next.calls.iter().position(|c| c.failure.is_some() || c.unsupported));
+                    selected.set(
+                        next.calls
+                            .iter()
+                            .position(|c| c.failure.is_some() || c.unsupported),
+                    );
                 }
                 snapshot.set(next);
             }
             let t = session::now_ms();
-            if first_seen.with_untracked(|s| s.values().any(|&at| t.saturating_sub(at) < NEW_FOR_MS + 500)) {
+            if first_seen.with_untracked(|s| {
+                s.values()
+                    .any(|&at| t.saturating_sub(at) < NEW_FOR_MS + 500)
+            }) {
                 now.set(t);
             }
         });
@@ -147,37 +176,63 @@ fn workbench(engine: Engine) -> AnyElement {
                     .text_color(move || theme().muted_foreground),
             )
             .child(view().flex_1())
-            .child(text(move || toast.get().unwrap_or("")).text_sm().text_color(rgb(GREEN)))
             .child(
-                small_button(move || endpoint.clone()).on_press(move || {
+                text(move || toast.get().unwrap_or(""))
+                    .text_sm()
+                    .text_color(rgb(GREEN)),
+            )
+            .child(small_button(
+                move || endpoint.clone(),
+                move || {
                     set_clipboard(copy_env.env());
                     say(t("Copied the environment", "已复制环境变量"));
-                }),
-            )
-            .child(small_button(move || t("⟲ Fresh start", "⟲ 全新开始").to_string()).on_press(move || {
-                fresh.fresh();
-                say(t("A new, empty AWS", "已换成全新的空 AWS"));
-            }))
-            .child(
-                small_button(move || if lang().get() == Lang::Zh { "EN".into() } else { "中文".into() })
-                    .on_press(move || lang().update(|l| *l = if *l == Lang::Zh { Lang::En } else { Lang::Zh })),
-            )
+                },
+            ))
+            .child(small_button(
+                move || t("⟲ Fresh start", "⟲ 全新开始").to_string(),
+                move || {
+                    fresh.fresh();
+                    say(t("A new, empty AWS", "已换成全新的空 AWS"));
+                },
+            ))
+            .child(small_button(
+                move || {
+                    if lang().get() == Lang::Zh {
+                        "EN".into()
+                    } else {
+                        "中文".into()
+                    }
+                },
+                move || lang().update(|l| *l = if *l == Lang::Zh { Lang::En } else { Lang::Zh }),
+            ))
     };
 
-    let tree = scroll().w(px(240.0)).border_r_1().border_r_color(move || theme().border).child(
-        view()
-            .p_3()
-            .gap_3()
-            .child(caption(move || t("Resources", "资源")))
-            .child(text(move || if snapshot.with(|s| s.resources.is_empty()) { t("Nothing yet", "暂无") } else { "" })
-                .text_sm()
-                .text_color(move || theme().muted_foreground))
-            .child(each(
-                move || snapshot.with(|s| s.resources.clone()),
-                |group: &Group| group.service,
-                move |group, _| resource_group(group.get_untracked(), first_seen, now),
-            )),
-    );
+    let tree = scroll()
+        .w(px(240.0))
+        .border_r_1()
+        .border_r_color(move || theme().border)
+        .child(
+            view()
+                .p_3()
+                .gap_3()
+                .child(caption(move || t("Resources", "资源")))
+                .child(
+                    text(move || {
+                        if snapshot.with(|s| s.resources.is_empty()) {
+                            t("Nothing yet", "暂无")
+                        } else {
+                            ""
+                        }
+                    })
+                    .text_sm()
+                    .text_color(move || theme().muted_foreground),
+                )
+                .child(each(
+                    move || snapshot.with(|s| s.resources.clone()),
+                    |group: &Group| group.service,
+                    move |group, _| resource_group(group.get_untracked(), first_seen, now),
+                )),
+        );
 
     let calls = virtual_list(
         move || snapshot.with(|s| s.calls.len()),
@@ -217,10 +272,13 @@ fn workbench(engine: Engine) -> AnyElement {
                     format!("This session needed {n} IAM permissions")
                 }
             }))
-            .child(small_button(move || t("Copy IAM policy", "复制 IAM 策略").to_string()).on_press(move || {
-                set_clipboard(engine.policy());
-                say(t("Copied the IAM policy", "已复制 IAM 策略"));
-            }))
+            .child(small_button(
+                move || t("Copy IAM policy", "复制 IAM 策略").to_string(),
+                move || {
+                    set_clipboard(engine.policy());
+                    say(t("Copied the IAM policy", "已复制 IAM 策略"));
+                },
+            ))
     };
 
     view()
@@ -228,15 +286,26 @@ fn workbench(engine: Engine) -> AnyElement {
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
         .child(header)
-        .child(view().flex_1().flex_row().child(tree).child(center).child(detail))
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .child(tree)
+                .child(center)
+                .child(detail),
+        )
         .child(footer)
-        .into_any_element()
+        .into_element()
 }
 
 // -- Pieces ---------------------------------------------------------------------
 
-fn small_button(label: impl Fn() -> String + 'static) -> nsh_base::Button {
+fn small_button(
+    label: impl Fn() -> String + 'static,
+    press: impl Fn() + 'static,
+) -> impl IntoElement {
     button()
+        .on_press(press)
         .px_3()
         .py_1()
         .border_1()
@@ -247,12 +316,20 @@ fn small_button(label: impl Fn() -> String + 'static) -> nsh_base::Button {
 }
 
 fn caption(label: impl Fn() -> &'static str + 'static) -> impl IntoElement {
-    text(label).text_xs().text_color(move || theme().muted_foreground)
+    text(label)
+        .text_xs()
+        .text_color(move || theme().muted_foreground)
 }
 
-fn resource_group(group: Group, first_seen: Signal<HashMap<String, u64>>, now: Signal<u64>) -> impl IntoElement {
+fn resource_group(
+    group: Group,
+    first_seen: Signal<HashMap<String, u64>>,
+    now: Signal<u64>,
+) -> impl IntoElement {
     let service = group.service;
-    let mut column = view().gap_1().child(text(service).text_sm().font_weight(FontWeight::SEMIBOLD));
+    let mut column = view()
+        .gap_1()
+        .child(text(service).text_sm().font_weight(FontWeight::SEMIBOLD));
     for (name, detail) in group.items {
         let key = format!("{service}/{name}");
         let is_new = move || {
@@ -265,20 +342,39 @@ fn resource_group(group: Group, first_seen: Signal<HashMap<String, u64>>, now: S
                 .items_center()
                 .gap_2()
                 .pl_2()
-                .child(text("●").text_xs().text_color(move || if is_new() { rgb(GREEN).into() } else { theme().border }))
+                .child(text("●").text_xs().text_color(move || {
+                    if is_new() {
+                        rgb(GREEN).into()
+                    } else {
+                        theme().border
+                    }
+                }))
                 .child(text(name.clone()).font_family(MONO).text_sm().flex_1())
-                .child(text(detail.clone().unwrap_or_default()).text_xs().text_color(move || theme().muted_foreground)),
+                .child(
+                    text(detail.clone().unwrap_or_default())
+                        .text_xs()
+                        .text_color(move || theme().muted_foreground),
+                ),
         );
     }
     column
 }
 
-fn call_row(i: usize, snapshot: Signal<Snapshot>, selected: Signal<Option<usize>>) -> impl IntoElement {
+fn call_row(
+    i: usize,
+    snapshot: Signal<Snapshot>,
+    selected: Signal<Option<usize>>,
+) -> impl IntoElement {
     let call = move || snapshot.with(|s| s.calls.get(i).cloned());
     let starts_generation = move || {
-        snapshot.with(|s| match (i.checked_sub(1).and_then(|p| s.calls.get(p)), s.calls.get(i)) {
-            (Some(prev), Some(this)) => prev.generation != this.generation,
-            _ => false,
+        snapshot.with(|s| {
+            match (
+                i.checked_sub(1).and_then(|p| s.calls.get(p)),
+                s.calls.get(i),
+            ) {
+                (Some(prev), Some(this)) => prev.generation != this.generation,
+                _ => false,
+            }
         })
     };
     let status_color = move || match call() {
@@ -287,12 +383,13 @@ fn call_row(i: usize, snapshot: Signal<Snapshot>, selected: Signal<Option<usize>
         _ => rgb(GREEN),
     };
     view()
-        .child(
-            text(move || if starts_generation() { t("— fresh start —", "— 全新开始 —") } else { "" })
+        .child(when(starts_generation, move || {
+            text(move || t("— fresh start —", "— 全新开始 —"))
                 .text_xs()
+                .py_1()
                 .self_center()
-                .text_color(move || theme().muted_foreground),
-        )
+                .text_color(move || theme().muted_foreground)
+        }))
         .child(
             view()
                 .flex_row()
@@ -302,7 +399,13 @@ fn call_row(i: usize, snapshot: Signal<Snapshot>, selected: Signal<Option<usize>
                 .py_2()
                 .border_b_1()
                 .border_b_color(move || theme().border)
-                .bg(move || if selected.get() == Some(i) { theme().accent } else { theme().background })
+                .bg(move || {
+                    if selected.get() == Some(i) {
+                        theme().accent
+                    } else {
+                        theme().background
+                    }
+                })
                 .on_press(move || selected.set(Some(i)))
                 .child(
                     text(move || call().map(|c| c.service.to_uppercase()).unwrap_or_default())
@@ -313,13 +416,19 @@ fn call_row(i: usize, snapshot: Signal<Snapshot>, selected: Signal<Option<usize>
                 .child(
                     view()
                         .flex_1()
-                        .child(text(move || call().map(|c| c.operation).unwrap_or_default()))
+                        .child(text(move || {
+                            call().map(|c| c.operation).unwrap_or_default()
+                        }))
                         .child(
                             text(move || call().map(|c| subtitle(&c)).unwrap_or_default())
                                 .text_xs()
                                 .font_family(MONO)
                                 .text_color(move || {
-                                    if call().is_some_and(|c| c.status >= 400) { status_color().into() } else { theme().muted_foreground }
+                                    if call().is_some_and(|c| c.status >= 400) {
+                                        status_color().into()
+                                    } else {
+                                        theme().muted_foreground
+                                    }
                                 }),
                         ),
                 )
@@ -362,11 +471,29 @@ fn empty_state(endpoint: String, snapshot: Signal<Snapshot>) -> impl IntoElement
         .items_center()
         .justify_center()
         .gap_3()
-        .opacity(move || if shown() { 1.0 } else { 0.0 })
-        .child(text(move || if shown() { t("Your local AWS is ready", "本地 AWS 已就绪") } else { "" }).text_xl())
+        .opacity(move || if shown() { 1.0_f32 } else { 0.0 })
         .child(
-            text(move || if shown() { t("Point your code at it, and every call shows up here:", "把代码指向它，每次调用都会出现在这里：") } else { "" })
-                .text_color(move || theme().muted_foreground),
+            text(move || {
+                if shown() {
+                    t("Your local AWS is ready", "本地 AWS 已就绪")
+                } else {
+                    ""
+                }
+            })
+            .text_xl(),
+        )
+        .child(
+            text(move || {
+                if shown() {
+                    t(
+                        "Point your code at it, and every call shows up here:",
+                        "把代码指向它，每次调用都会出现在这里：",
+                    )
+                } else {
+                    ""
+                }
+            })
+            .text_color(move || theme().muted_foreground),
         )
         .child(
             text(move || {
@@ -383,7 +510,11 @@ fn empty_state(endpoint: String, snapshot: Signal<Snapshot>) -> impl IntoElement
 }
 
 fn detail_view(snapshot: Signal<Snapshot>, selected: Signal<Option<usize>>) -> impl IntoElement {
-    let call = move || selected.get().and_then(|i| snapshot.with(|s| s.calls.get(i).cloned()));
+    let call = move || {
+        selected
+            .get()
+            .and_then(|i| snapshot.with(|s| s.calls.get(i).cloned()))
+    };
     view()
         .p_4()
         .gap_3()

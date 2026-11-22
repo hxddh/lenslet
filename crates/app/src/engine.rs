@@ -36,7 +36,12 @@ impl Engine {
         let emulator = Emulator::new(&endpoint);
         let session = Session::default();
         let refresher = Refresher::default();
-        let engine = Engine { port, emulator, session, refresher };
+        let engine = Engine {
+            port,
+            emulator,
+            session,
+            refresher,
+        };
         let background = engine.clone();
         std::thread::Builder::new()
             .name("lenslet-engine".into())
@@ -55,8 +60,13 @@ impl Engine {
                             .clone()
                             .run(background.emulator.clone(), background.session.clone()),
                     );
-                    server::serve(listener, background.emulator, background.session, background.refresher)
-                        .await;
+                    server::serve(
+                        listener,
+                        background.emulator,
+                        background.session,
+                        background.refresher,
+                    )
+                    .await;
                 });
             })
             .map_err(|e| e.to_string())?;

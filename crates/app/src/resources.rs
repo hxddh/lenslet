@@ -66,7 +66,10 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
 
     // DynamoDB: tables and their item counts.
     let mut tables = Vec::new();
-    if let Some(v) = ask.json("dynamodb", "DynamoDB_20120810.ListTables", "1.0", "{}").await {
+    if let Some(v) = ask
+        .json("dynamodb", "DynamoDB_20120810.ListTables", "1.0", "{}")
+        .await
+    {
         for name in strings(&v["TableNames"]).into_iter().take(MAX_ITEMS) {
             let body = serde_json::json!({"TableName": name, "Select": "COUNT"}).to_string();
             let count = ask
@@ -86,14 +89,27 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
             let waiting = ask
                 .json("sqs", "AmazonSQS.GetQueueAttributes", "1.0", &body)
                 .await
-                .and_then(|v| v["Attributes"]["ApproximateNumberOfMessages"].as_str()?.parse::<usize>().ok());
+                .and_then(|v| {
+                    v["Attributes"]["ApproximateNumberOfMessages"]
+                        .as_str()?
+                        .parse::<usize>()
+                        .ok()
+                });
             let name = url.rsplit('/').next().unwrap_or(&url).to_string();
             queues.push((name, waiting.map(|n| messages(n))));
         }
     }
     add("SQS", queues);
 
-    add("SNS", names(ask.query("sns", "Action=ListTopics&Version=2010-03-31").await, "TopicArn", true));
+    add(
+        "SNS",
+        names(
+            ask.query("sns", "Action=ListTopics&Version=2010-03-31")
+                .await,
+            "TopicArn",
+            true,
+        ),
+    );
     add(
         "Lambda",
         ask.rest_json("lambda", "GET", "/2015-03-31/functions/")
@@ -133,7 +149,12 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
         "Kinesis",
         ask.json("kinesis", "Kinesis_20131202.ListStreams", "1.1", "{}")
             .await
-            .map(|v| strings(&v["StreamNames"]).into_iter().map(|n| (n, None)).collect())
+            .map(|v| {
+                strings(&v["StreamNames"])
+                    .into_iter()
+                    .map(|n| (n, None))
+                    .collect()
+            })
             .unwrap_or_default(),
     );
     add(
@@ -150,18 +171,38 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
             .map(|v| field_list(&v["Aliases"], "AliasName"))
             .unwrap_or_default(),
     );
-    add("IAM", names(ask.query("iam", "Action=ListRoles&Version=2010-05-08").await, "RoleName", false));
+    add(
+        "IAM",
+        names(
+            ask.query("iam", "Action=ListRoles&Version=2010-05-08")
+                .await,
+            "RoleName",
+            false,
+        ),
+    );
     groups
 }
 
 fn objects(n: usize) -> String {
-    if n == 1 { "1 object".into() } else { format!("{n} objects") }
+    if n == 1 {
+        "1 object".into()
+    } else {
+        format!("{n} objects")
+    }
 }
 fn items(n: usize) -> String {
-    if n == 1 { "1 item".into() } else { format!("{n} items") }
+    if n == 1 {
+        "1 item".into()
+    } else {
+        format!("{n} items")
+    }
 }
 fn messages(n: usize) -> String {
-    if n == 1 { "1 message".into() } else { format!("{n} messages") }
+    if n == 1 {
+        "1 message".into()
+    } else {
+        format!("{n} messages")
+    }
 }
 
 struct Ask<'a> {
@@ -169,7 +210,12 @@ struct Ask<'a> {
 }
 
 impl Ask<'_> {
-    async fn send(&self, service: &str, request: http::request::Builder, body: &str) -> Option<String> {
+    async fn send(
+        &self,
+        service: &str,
+        request: http::request::Builder,
+        body: &str,
+    ) -> Option<String> {
         // Auth is off; the credential scope only tells the router the service.
         let scope = format!(
             "AWS4-HMAC-SHA256 Credential=lenslet/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
@@ -187,7 +233,12 @@ impl Ask<'_> {
     }
 
     async fn rest(&self, service: &str, method: &str, path: &str) -> Option<String> {
-        self.send(service, http::Request::builder().method(method).uri(path), "").await
+        self.send(
+            service,
+            http::Request::builder().method(method).uri(path),
+            "",
+        )
+        .await
     }
 
     async fn rest_json(&self, service: &str, method: &str, path: &str) -> Option<Value> {
@@ -237,7 +288,11 @@ fn names(xml: Option<String>, tag: &str, arn_tail: bool) -> Vec<(String, Option<
             .into_iter()
             .take(MAX_ITEMS)
             .map(|name| {
-                let name = if arn_tail { name.rsplit(':').next().unwrap_or(&name).to_string() } else { name };
+                let name = if arn_tail {
+                    name.rsplit(':').next().unwrap_or(&name).to_string()
+                } else {
+                    name
+                };
                 (name, None)
             })
             .collect()

@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use emulator_server::EmulatorService;
-use smithy_server_runtime::MultiServiceRouter;
+use smithy_server_runtime::{MultiServiceRouter, UNSERVED_URL_BASE};
 
 /// Assembling the router needs a deep stack (AWS Emulator's own binary uses
 /// the same size); it runs on a thread of its own.
@@ -16,8 +16,20 @@ const BUILD_STACK: usize = 64 * 1024 * 1024;
 /// The services Lenslet serves, by their signing names, for the window's
 /// "not emulated here" answer.
 pub const SERVICES: &[&str] = &[
-    "s3", "dynamodb", "sqs", "sns", "sts", "iam", "kms", "lambda", "secretsmanager", "ssm",
-    "events", "logs", "states", "kinesis",
+    "s3",
+    "dynamodb",
+    "sqs",
+    "sns",
+    "sts",
+    "iam",
+    "kms",
+    "lambda",
+    "secretsmanager",
+    "ssm",
+    "events",
+    "logs",
+    "states",
+    "kinesis",
 ];
 
 #[derive(Clone)]
@@ -30,22 +42,26 @@ impl Emulator {
     /// An emulator whose resources name `endpoint` (queue URLs, presigned URLs).
     pub fn new(endpoint: &str) -> Self {
         Self {
-            router: Arc::new(RwLock::new(build(endpoint))),
+            router: Arc::new(RwLock::new(build())),
             endpoint: endpoint.into(),
         }
     }
 
     /// Throw every resource away: a new, empty AWS account.
     pub fn fresh(&self) {
-        let router = build(&self.endpoint);
+        let router = build();
         *self.router.write().unwrap_or_else(|e| e.into_inner()) = router;
     }
 
     pub async fn handle(&self, request: http::Request<Bytes>) -> http::Response<Bytes> {
-        let router = self.router.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let router = self
+            .router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // A panic in a service answers 500 instead of taking the window down.
         match tokio::spawn(async move { router.handle_request(request).await }).await {
-            Ok(response) => response,
+            Ok(response) => localize(response, &self.endpoint),
             Err(_) => http::Response::builder()
                 .status(500)
                 .header("content-type", "application/json")
@@ -57,8 +73,50 @@ impl Emulator {
     }
 }
 
-fn build(endpoint: &str) -> MultiServiceRouter {
-    let endpoint = endpoint.to_string();
+/// The emulator names only `https://` URLs: [`UNSERVED_URL_BASE`] when
+/// embedded, or `https://` and the request's host (SQS queue URLs). Lenslet
+/// serves plain HTTP on loopback, so the URLs it hands out (queue URLs,
+/// `Location` headers, presigned URLs, which are not checked with
+/// authentication off) are rewritten to name Lenslet.
+fn localize(response: http::Response<Bytes>, endpoint: &str) -> http::Response<Bytes> {
+    let (mut parts, body) = response.into_parts();
+    let port = endpoint.rsplit(':').next().unwrap_or_default();
+    let names = [
+        UNSERVED_URL_BASE.to_string(),
+        format!("https://127.0.0.1:{port}"),
+        format!("https://localhost:{port}"),
+    ];
+    let names_any = |text: &str| names.iter().any(|n| text.contains(n.as_str()));
+    let rewrite = |text: &str| {
+        names
+            .iter()
+            .fold(text.to_string(), |t, n| t.replace(n.as_str(), endpoint))
+    };
+    for value in parts.headers.values_mut() {
+        if let Ok(text) = value.to_str()
+            && names_any(text)
+            && let Ok(local) = http::HeaderValue::from_str(&rewrite(text))
+        {
+            *value = local;
+        }
+    }
+    // Only service documents, never object or blob data.
+    let document = parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t.contains("xml") || t.contains("json"));
+    let body = match std::str::from_utf8(&body) {
+        Ok(text) if document && names_any(text) => {
+            parts.headers.remove(http::header::CONTENT_LENGTH);
+            Bytes::from(rewrite(text))
+        }
+        _ => body,
+    };
+    http::Response::from_parts(parts, body)
+}
+
+fn build() -> MultiServiceRouter {
     std::thread::Builder::new()
         .name("lenslet-emulator-build".into())
         .stack_size(BUILD_STACK)
@@ -89,7 +147,6 @@ fn build(endpoint: &str) -> MultiServiceRouter {
             // Any credentials work: Lenslet is local, and keys that change on
             // every fresh start would break the code pointed at it.
             router.set_request_authentication(false);
-            router.serving_at(&endpoint);
             router
         })
         .expect("spawn the emulator build thread")

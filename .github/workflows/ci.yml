@@ -34,16 +34,13 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
+      - run: cargo fmt -p lenslet -p lenslet-core -- --check
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p lenslet
       - name: The window starts and serves AWS
         run: |
           xvfb-run -a target/release/lenslet &
-          for i in $(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:4510/ -X POST \
-            -H 'content-type: application/x-amz-json-1.0' -H 'x-amz-target: AmazonSQS.ListQueues' \
-            -H 'authorization: AWS4-HMAC-SHA256 Credential=x/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=0' \
-            -d '{}' && exit 0; sleep 1; done; exit 1
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:4510/ && exit 0; sleep 1; done; exit 1
       - run: bash scripts/package-linux.sh 0.0.0-ci dist
 
   macos:

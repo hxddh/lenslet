@@ -10,7 +10,13 @@ use std::{
 use lenslet::engine::Engine;
 
 /// One HTTP/1.1 request; returns the status and the body.
-fn send(port: u16, service: &str, target: Option<&str>, content_type: &str, body: &str) -> (u16, String) {
+fn send(
+    port: u16,
+    service: &str,
+    target: Option<&str>,
+    content_type: &str,
+    body: &str,
+) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     let mut request = format!(
         "POST / HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\ncontent-type: {content_type}\r\n\
@@ -32,11 +38,23 @@ fn send(port: u16, service: &str, target: Option<&str>, content_type: &str, body
 }
 
 fn sqs(port: u16, op: &str, body: &str) -> (u16, String) {
-    send(port, "sqs", Some(&format!("AmazonSQS.{op}")), "application/x-amz-json-1.0", body)
+    send(
+        port,
+        "sqs",
+        Some(&format!("AmazonSQS.{op}")),
+        "application/x-amz-json-1.0",
+        body,
+    )
 }
 
 fn ddb(port: u16, op: &str, body: &str) -> (u16, String) {
-    send(port, "dynamodb", Some(&format!("DynamoDB_20120810.{op}")), "application/x-amz-json-1.0", body)
+    send(
+        port,
+        "dynamodb",
+        Some(&format!("DynamoDB_20120810.{op}")),
+        "application/x-amz-json-1.0",
+        body,
+    )
 }
 
 fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
@@ -56,31 +74,60 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     let (status, _) = sqs(port, "CreateQueue", r#"{"QueueName":"orders"}"#);
     assert_eq!(status, 200);
     let call = engine.snapshot().calls[0].clone();
-    assert_eq!((call.service.as_str(), call.operation.as_str()), ("sqs", "CreateQueue"));
+    assert_eq!(
+        (call.service.as_str(), call.operation.as_str()),
+        ("sqs", "CreateQueue")
+    );
     assert_eq!(call.access[0].action, "sqs:CreateQueue");
-    assert!(call.access[0].resource.ends_with(":orders"), "{:?}", call.access);
+    assert!(
+        call.access[0].resource.ends_with(":orders"),
+        "{:?}",
+        call.access
+    );
 
     // The emulator itself says the queue exists, and its URL names Lenslet.
     wait_for("the queue in the resources", || {
-        engine.snapshot().resources.iter().any(|g| g.service == "SQS" && g.items.iter().any(|(n, _)| n == "orders"))
+        engine
+            .snapshot()
+            .resources
+            .iter()
+            .any(|g| g.service == "SQS" && g.items.iter().any(|(n, _)| n == "orders"))
     });
     let (_, body) = sqs(port, "GetQueueUrl", r#"{"QueueName":"orders"}"#);
-    assert!(body.contains(&format!("127.0.0.1:{port}")), "{body}");
+    assert!(
+        body.contains(&format!("\"http://127.0.0.1:{port}/")),
+        "{body}"
+    );
 
     // A failure comes with its code; a conditional write is really checked.
-    ddb(port, "CreateTable", r#"{"TableName":"carts","KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}"#);
+    ddb(
+        port,
+        "CreateTable",
+        r#"{"TableName":"carts","KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}"#,
+    );
     wait_for("the table to become active", || {
-        ddb(port, "DescribeTable", r#"{"TableName":"carts"}"#).1.contains("ACTIVE")
+        ddb(port, "DescribeTable", r#"{"TableName":"carts"}"#)
+            .1
+            .contains("ACTIVE")
     });
     let item = r#"{"TableName":"carts","Item":{"id":{"S":"a"}},"ConditionExpression":"attribute_not_exists(id)"}"#;
     assert_eq!(ddb(port, "PutItem", item).0, 200);
     assert_eq!(ddb(port, "PutItem", item).0, 400);
     let failed = engine.snapshot().calls.last().cloned().unwrap();
-    assert_eq!(failed.failure.unwrap().code, "ConditionalCheckFailedException");
+    assert_eq!(
+        failed.failure.unwrap().code,
+        "ConditionalCheckFailedException"
+    );
     assert!(!failed.unsupported);
 
     // A service Lenslet does not include is marked as such.
-    let (status, _) = send(port, "ec2", None, "application/x-www-form-urlencoded", "Action=DescribeInstances&Version=2016-11-15");
+    let (status, _) = send(
+        port,
+        "ec2",
+        None,
+        "application/x-www-form-urlencoded",
+        "Action=DescribeInstances&Version=2016-11-15",
+    );
     assert!(status >= 400);
     assert!(engine.snapshot().calls.last().unwrap().unsupported);
 
@@ -97,5 +144,7 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     let snapshot = engine.snapshot();
     assert_eq!(snapshot.calls.len(), before + 1);
     assert_eq!(snapshot.calls.last().unwrap().generation, 1);
-    wait_for("the resources to empty", || engine.snapshot().resources.is_empty());
+    wait_for("the resources to empty", || {
+        engine.snapshot().resources.is_empty()
+    });
 }
