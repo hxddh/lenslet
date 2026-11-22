@@ -10,8 +10,8 @@
 //! ```
 
 mod capture;
+mod emulator;
 mod proxy;
-mod sandbox;
 mod trace;
 
 pub(crate) use lenslet_core::{access, findings, iac, lock, problem, runs, summary, wire};
@@ -42,20 +42,21 @@ fn usage() -> String {
 
 Usage:
   lenslet COMMAND [ARGS...]
-      Zero-ceremony shorthand: run any command (`lenslet pytest`, `lenslet npm test`)
-      with AWS_ENDPOINT_URL pointing at Lenslet (auto-using a local emulator or
-      Lenslet's built-in stateful AWS sandbox when no emulator is running).
+      Shorthand: run any command (`lenslet pytest`, `lenslet npm test`) with
+      AWS_ENDPOINT_URL pointing at Lenslet, in front of the local emulator that
+      is running (or moto, started for the run, when none is).
   lenslet run [options] [--] COMMAND [ARGS...]
-      Run COMMAND with options (`--update`, `--check`, `--enforce`, `--sandbox`, …).
+      Run COMMAND with options (`--update`, `--check`, `--enforce`, `--emulator moto`, …).
   lenslet run [options]
       No command: keep a proxy running on 127.0.0.1:9297 until Ctrl-C.
   lenslet shell [options]
       Open an interactive shell pre-configured for Lenslet; prints summary on `exit`.
-  lenslet init [--sandbox | --upstream ADDRESS] [-- COMMAND]
-      Zero-setup onboarding: auto-detect your test command, write lenslet.lock, and
-      add .github/workflows/lenslet.yml (works out of the box with no emulator).
+      Your shell's rc file runs inside it and can set credentials again.
+  lenslet init [--emulator moto | --upstream ADDRESS] [--force] [-- COMMAND]
+      Onboarding: detect your test command, write lenslet.lock from it, and add
+      .github/workflows/lenslet.yml (an existing one is kept without --force).
   lenslet doctor [--json]
-      Check CLI, desktop app, local emulators, built-in sandbox, lock, and CI setup.
+      Check CLI, desktop app, running emulators, managed moto, lock, and CI setup.
   lenslet last [--json]
       The report of the newest run.
   lenslet runs [--json] [--limit N]
@@ -75,7 +76,7 @@ Usage:
       Open the window (same as `lenslet` with no arguments).
 
 Run options:
-  --sandbox            use Lenslet's built-in stateful AWS sandbox (auto-enabled when no emulator is up)
+  --emulator moto      start moto (pip install 'moto[server]') for this run and stop it after
   --enforce            block calls outside lenslet.lock (or --policy) with AWS AccessDenied
   --check              exit {changed} if the run used access not in the lock (or --policy)
   --strict             with --check: also exit {changed} for locked access the run did not use
@@ -89,9 +90,13 @@ Run options:
   --ui                 open the window first
   --no-env             set only AWS_ENDPOINT_URL, leave credentials/config alone
   --listen PORT        loopback port (default: a free port; 9297 without COMMAND)
-  --upstream ADDRESS   AWS Emulator port or http(s) URL (default 9298)
+  --upstream ADDRESS   the emulator: AWS Emulator port or http(s) URL. Without it (or
+                       --emulator), Lenslet uses a loopback AWS_ENDPOINT_URL, AWS Emulator
+                       on 9298, LocalStack on 4566 or moto on 5000 (checked by protocol),
+                       else starts moto when it is installed
   --route SVC=ADDRESS  route specific service(s) to another local emulator (e.g. s3=http://127.0.0.1:9000)
-  --allow-docker       also accept connections from local Docker container bridge interfaces
+  --allow-docker       listen on all interfaces and also serve calls from Docker networks
+                       (172.16.0.0/12, 192.168.65.0/24); /_lenslet/* stays loopback-only
   --emulator-ca PATH   emulator CA (default ~/.aws/emulator/PORT/ca.pem)
   --trace PATH         run file (default: a new file in ~/.lenslet/runs)
 
@@ -277,42 +282,87 @@ struct ChildEnv {
 /// LocalStack) when AWS Emulator's own credentials file is not there.
 const LOCAL_KEYS: (&str, &str) = ("lenslet-local", "lenslet-local");
 
+/// Real credentials never reach the emulator or the trace: keys, profiles,
+/// OIDC web-identity tokens, container credential URIs and bearer tokens.
+/// `lenslet run` removes these from the child; `lenslet env` unsets them.
+const CREDENTIAL_VARS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_BEARER_TOKEN_BEDROCK",
+];
+
+/// Variables that would send calls around the proxy: service-specific
+/// endpoints (`AWS_ENDPOINT_URL_S3`, ...) and the switch that makes SDKs
+/// ignore `AWS_ENDPOINT_URL`. Removed even with `--no-env`.
+fn bypasses_proxy(name: &str) -> bool {
+    name.starts_with("AWS_ENDPOINT_URL_") || name == "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"
+}
+
+/// This process's environment, by name.
+fn current_env() -> BTreeMap<String, OsString> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value)))
+        .collect()
+}
+
+/// The variables `lenslet run` removes from what is set in `current`:
+/// proxy bypasses always, credentials unless `no_env`.
+fn stripped_vars(current: &BTreeMap<String, OsString>, no_env: bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if !no_env {
+        out.extend(
+            CREDENTIAL_VARS
+                .iter()
+                .filter(|name| current.contains_key(**name))
+                .map(|name| name.to_string()),
+        );
+    }
+    out.extend(current.keys().filter(|name| bypasses_proxy(name)).cloned());
+    out
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 fn child_env(
     endpoint: &str,
     emulator_dir: &Path,
     no_env: bool,
-    current: impl Fn(&str) -> Option<OsString>,
+    current: &BTreeMap<String, OsString>,
 ) -> ChildEnv {
-    let mut env = ChildEnv::default();
-    env.set
-        .push(("AWS_ENDPOINT_URL".to_string(), endpoint.to_string()));
+    let mut env = ChildEnv {
+        set: vec![("AWS_ENDPOINT_URL".to_string(), endpoint.to_string())],
+        remove: stripped_vars(current, no_env),
+    };
     if no_env {
         return env;
     }
-    // Real credentials never reach the emulator or the trace: keys, profiles,
-    // OIDC web-identity tokens, container credential URIs and bearer tokens go.
-    for name in [
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_PROFILE",
-        "AWS_DEFAULT_PROFILE",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "AWS_ROLE_ARN",
-        "AWS_ROLE_SESSION_NAME",
-        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-        "AWS_BEARER_TOKEN_BEDROCK",
-    ] {
-        if current(name).is_some() {
-            env.remove.push(name.to_string());
-        }
-    }
     let credentials = emulator_dir.join("emulator_credentials");
     let config = emulator_dir.join("config");
-    if current("AWS_SHARED_CREDENTIALS_FILE").is_none() {
+    // A credentials file stays only when it is the emulator's own: any other
+    // (say ~/.aws/credentials) could hand real keys to the SDK.
+    let keep_file = current
+        .get("AWS_SHARED_CREDENTIALS_FILE")
+        .is_some_and(|file| same_file(Path::new(file), &credentials));
+    if !keep_file {
+        if current.contains_key("AWS_SHARED_CREDENTIALS_FILE") {
+            env.remove.push("AWS_SHARED_CREDENTIALS_FILE".to_string());
+        }
         if credentials.is_file() {
             env.set.push((
                 "AWS_SHARED_CREDENTIALS_FILE".to_string(),
@@ -328,11 +378,153 @@ fn child_env(
             ));
         }
     }
-    if current("AWS_CONFIG_FILE").is_none() && config.is_file() {
+    if !current.contains_key("AWS_CONFIG_FILE") && config.is_file() {
         env.set
             .push(("AWS_CONFIG_FILE".to_string(), config.display().to_string()));
     }
     env
+}
+
+/// What `run_header` names a run's emulator when Lenslet started moto.
+const STARTED_MOTO: &str = "moto (started by Lenslet)";
+
+/// Decide what answers this run's calls and point `options.upstream` at it:
+/// `--emulator moto` (or a removed `--sandbox` alias) starts moto; an
+/// explicit `--upstream` is used as given; otherwise a running emulator is
+/// discovered, and when there is none moto is started if it is installed.
+/// Returns the run's `emulator` label and the moto Lenslet started, if any.
+async fn choose_upstream(
+    options: &mut Options,
+    home: &Path,
+    moto_log: &Path,
+    quiet: bool,
+) -> Result<(String, Option<emulator::Managed>)> {
+    if let Some(alias) = options.removed_alias.as_deref() {
+        eprintln!("lenslet: {alias} was removed in 12.0; using moto instead");
+    }
+    if options.managed {
+        let Some(command) = emulator::moto_command() else {
+            if options.removed_alias.is_some() {
+                bail!("{}", emulator::NOT_FOUND);
+            }
+            bail!("--emulator moto: moto is not installed (pip install 'moto[server]')");
+        };
+        let moto = start_moto(options, &command, moto_log).await?;
+        if !quiet {
+            eprintln!(
+                "lenslet: started moto on 127.0.0.1:{} (log {})",
+                moto.port,
+                tilde(&moto.log, home)
+            );
+        }
+        return Ok((STARTED_MOTO.to_string(), Some(moto)));
+    }
+    if options.upstream_given {
+        let ca = options.emulator_ca();
+        let label = match emulator::identify(&options.upstream, Some(&ca)).await {
+            Some(Some(kind)) => kind.name().to_string(),
+            _ => options.upstream.base.clone(),
+        };
+        if !options.upstream.reachable().await {
+            eprintln!(
+                "lenslet: warning: nothing is listening on {}; start your emulator first",
+                options.upstream.base
+            );
+        }
+        return Ok((label, None));
+    }
+    let endpoint_url = std::env::var("AWS_ENDPOINT_URL").ok();
+    if let Some(found) = emulator::discover(endpoint_url.as_deref(), options.listen, home).await {
+        if !quiet {
+            eprintln!(
+                "lenslet: using {} at {} (found via {})",
+                found.label(),
+                found.upstream.base,
+                found.source
+            );
+        }
+        options.upstream = found.upstream.clone();
+        options.validate()?;
+        return Ok((found.label(), None));
+    }
+    let Some(command) = emulator::moto_command() else {
+        bail!("{}", emulator::NOT_FOUND);
+    };
+    let moto = start_moto(options, &command, moto_log).await?;
+    // Shown even with --quiet: it says what answers the calls.
+    eprintln!(
+        "lenslet: no emulator running; started moto (pip package) on 127.0.0.1:{}",
+        moto.port
+    );
+    Ok((STARTED_MOTO.to_string(), Some(moto)))
+}
+
+/// Start moto and wait for it; Ctrl-C while waiting stops it.
+async fn start_moto(
+    options: &mut Options,
+    command: &[String],
+    log: &Path,
+) -> Result<emulator::Managed> {
+    let mut moto = emulator::Managed::spawn(command, log)?;
+    tokio::select! {
+        ready = moto.ready() => ready?,
+        _ = tokio::signal::ctrl_c() => bail!("interrupted while starting moto"),
+    }
+    options.upstream = moto.upstream.clone();
+    options.validate()?;
+    Ok(moto)
+}
+
+/// The lock or policy a run is compared with (and enforced against).
+struct GateSetup {
+    lock_path: PathBuf,
+    lock_label: String,
+    locked: Option<lock::Lock>,
+    policy_label: Option<String>,
+    gate: Option<lock::Gate>,
+}
+
+impl GateSetup {
+    fn load(
+        lock: Option<PathBuf>,
+        policy: Option<&Path>,
+        cwd: &Path,
+        check: bool,
+        enforce: bool,
+    ) -> Result<GateSetup> {
+        let lock_path = lock.unwrap_or_else(|| lock::path_in(cwd));
+        // How the lock is named in reports: relative to the run's directory.
+        let lock_label = relative_to(&lock_path, cwd);
+        let locked = lock::read(&lock_path)?;
+        let (policy_label, gate) = if let Some(policy_path) = policy {
+            let label = relative_to(policy_path, cwd);
+            let gate = lock::Gate::from_policy_file(policy_path, label.clone())?;
+            (Some(label), Some(gate))
+        } else {
+            if (check || enforce) && locked.is_none() {
+                let flag = if enforce { "--enforce" } else { "--check" };
+                bail!(
+                    "{flag} needs {lock_label} (or --policy PATH); create it with `lenslet run --update -- <tests>`"
+                );
+            }
+            let gate = locked
+                .as_ref()
+                .map(|lock| lock::Gate::from_lock(lock_label.clone(), lock.access.clone()));
+            (None, gate)
+        };
+        Ok(GateSetup {
+            lock_path,
+            lock_label,
+            locked,
+            policy_label,
+            gate,
+        })
+    }
+
+    /// The lock this run is compared with, when there is one and no policy.
+    fn lock_name(&self) -> Option<String> {
+        (self.policy_label.is_none() && self.locked.is_some()).then(|| self.lock_label.clone())
+    }
 }
 
 async fn run(args: Vec<String>) -> Result<i32> {
@@ -353,94 +545,21 @@ async fn run(args: Vec<String>) -> Result<i32> {
         lock,
         policy,
     } = parse_run(args, &home)?;
-    if !options.upstream_given && !options.sandbox {
-        let env_ep = std::env::var("AWS_ENDPOINT_URL").ok();
-        if let Some((discovered, source_label)) =
-            proxy::Upstream::auto_discover(env_ep.as_deref(), options.listen).await
-        {
-            if !quiet {
-                eprintln!(
-                    "lenslet: auto-selected upstream {} ({source_label})",
-                    discovered.base
-                );
-            }
-            options.upstream = discovered;
-            if options.routes.is_empty() && matches!(options.upstream.port, 9000 | 8000 | 9324) {
-                let extra = proxy::Upstream::auto_discover_service_routes(
-                    options.listen,
-                    options.upstream.port,
-                )
-                .await;
-                if !extra.is_empty() && !quiet {
-                    let list: Vec<String> = extra
-                        .iter()
-                        .map(|(s, u)| format!("{s}={}", u.base))
-                        .collect();
-                    eprintln!("lenslet: auto-routed services {}", list.join(", "));
-                }
-                options.routes.extend(extra);
-            }
-            options.validate()?;
-        } else {
-            let default_ready = options.upstream.reachable().await
-                && (!options.upstream.tls || options.emulator_ca().is_file());
-            if !default_ready {
-                options.sandbox = true;
-                if !quiet {
-                    eprintln!(
-                        "lenslet: using built-in local AWS sandbox (no external emulator needed)"
-                    );
-                }
-            }
-        }
-    }
     let cwd = std::env::current_dir().context("read the current directory")?;
-    let lock_path = lock.unwrap_or_else(|| lock::path_in(&cwd));
-    // How the lock is named in reports: relative to the run's directory.
-    let lock_label = relative_to(&lock_path, &cwd);
-    let locked = lock::read(&lock_path)?;
-    let (policy_label, gate) = if let Some(policy_path) = policy.as_ref() {
-        let label = relative_to(policy_path, &cwd);
-        let gate = lock::Gate::from_policy_file(policy_path, label.clone())?;
-        (Some(label), Some(gate))
-    } else {
-        if (check || options.enforce) && locked.is_none() {
-            let flag = if options.enforce {
-                "--enforce"
-            } else {
-                "--check"
-            };
-            bail!(
-                "{flag} needs {lock_label} (or --policy PATH); create it with `lenslet run --update -- <tests>`"
-            );
-        }
-        let gate = locked
-            .as_ref()
-            .map(|lock| lock::Gate::from_lock(lock_label.clone(), lock.access.clone()));
-        (None, gate)
-    };
+    let setup = GateSetup::load(lock, policy.as_deref(), &cwd, check, options.enforce)?;
     let runs_dir = runs::dir(&home);
     let trace_path = match options.trace.clone() {
         Some(path) => path,
         None => runs::create(&runs_dir)?,
     };
-    if !options.sandbox && !options.upstream.reachable().await {
+    let moto_log = runs_dir.join(format!("{}.emulator.log", runs::run_id(&trace_path)));
+    // Held until the run ends: dropping it stops moto (on errors too).
+    let (emulator_label, mut moto) = choose_upstream(&mut options, &home, &moto_log, quiet).await?;
+    if options.allow_docker {
         eprintln!(
-            "lenslet: warning: nothing is listening on {} — start AWS Emulator first:\n  \
-             EMULATOR_TELEMETRY=off aws-emulator --telemetry off --port {}",
-            options.upstream.base, options.upstream.port
+            "lenslet: warning: --allow-docker: the proxy listens on all interfaces; it serves calls only from loopback and Docker networks (172.16.0.0/12, 192.168.65.0/24)"
         );
     }
-    let upstream_label = if options.sandbox {
-        proxy::SANDBOX_UPSTREAM.to_string()
-    } else {
-        options.upstream.base.clone()
-    };
-    let header_routes = options
-        .routes
-        .iter()
-        .map(|(svc, up)| (svc.clone(), up.base.clone()))
-        .collect();
     let header = RunHeader {
         version: trace::VERSION,
         run: runs::run_id(&trace_path),
@@ -448,52 +567,32 @@ async fn run(args: Vec<String>) -> Result<i32> {
         cwd: cwd.display().to_string(),
         pid: std::process::id(),
         started: runs::now(),
-        lock: (policy_label.is_none() && locked.is_some()).then(|| lock_label.clone()),
-        policy: policy_label.clone(),
+        emulator: Some(emulator_label.clone()),
+        lock: setup.lock_name(),
+        policy: setup.policy_label.clone(),
         enforce: options.enforce,
-        routes: header_routes,
+        routes: options
+            .routes
+            .iter()
+            .map(|(svc, up)| (svc.clone(), up.base.clone()))
+            .collect(),
         allow_docker: options.allow_docker,
         max_body: Some(options.max_body as u64),
         log: log.as_ref().map(|p| p.display().to_string()),
         ..RunHeader::default()
     };
+    let gate = setup.gate.clone();
     let server = Server::start(&options, trace_path.clone(), header, gate.clone()).await?;
     let endpoint = server.endpoint();
     let started = Instant::now();
 
     let code = if command.is_empty() {
-        serve_until_interrupted(&server, &options, &home).await;
+        serve_until_interrupted(&server, &options, &emulator_label, &home).await;
         None
     } else {
-        let env = child_env(&endpoint, &options.emulator_dir(), no_env, |name| {
-            std::env::var_os(name)
-        });
+        let env = child_env(&endpoint, &options.emulator_dir(), no_env, &current_env());
         if !quiet {
-            let enforce_note = match (options.enforce, gate.as_ref()) {
-                (true, Some(g)) => format!(" · enforcing {}", g.label),
-                _ => String::new(),
-            };
-            eprintln!(
-                "lenslet: {} → {} · trace {}{enforce_note}",
-                endpoint,
-                upstream_label,
-                tilde(&trace_path, &home)
-            );
-            for (name, value) in &env.set {
-                eprintln!("lenslet:   {name}={}", tilde(Path::new(value), &home));
-            }
-            if !env.remove.is_empty() {
-                eprintln!(
-                    "lenslet:   unset {} (real credentials never reach the emulator)",
-                    env.remove.join(", ")
-                );
-            }
-            if !options.sandbox && env.set.iter().any(|(name, _)| name == "AWS_ACCESS_KEY_ID") {
-                eprintln!(
-                    "lenslet: note: no emulator credentials in {}; using placeholder keys",
-                    tilde(&options.emulator_dir(), &home)
-                );
-            }
+            print_banner(&endpoint, &options, gate.as_ref(), &env, &trace_path, &home);
         }
         if ui && let Err(error) = open_ui(Some(&trace_path)) {
             eprintln!("lenslet: {error:#}");
@@ -531,11 +630,12 @@ async fn run(args: Vec<String>) -> Result<i32> {
         services: summary.services.clone(),
         unmapped: summary.unmapped.clone(),
         failures: summary.failures.clone(),
-        lock: (policy_label.is_none() && locked.is_some()).then(|| lock_label.clone()),
-        policy: policy_label,
+        lock: setup.lock_name(),
+        policy: setup.policy_label.clone(),
         trace: trace_path.display().to_string(),
         endpoint: endpoint.clone(),
-        upstream: upstream_label,
+        upstream: options.upstream.base.clone(),
+        emulator: Some(emulator_label),
         findings: findings::analyze_against(
             &calls,
             gate_label.as_deref().unwrap_or(lock::FILE_NAME),
@@ -556,29 +656,15 @@ async fn run(args: Vec<String>) -> Result<i32> {
     state.trace.end(&report);
     // Live event streams end with the `end` line; let them deliver it.
     server.join(Duration::from_millis(500)).await;
+    if let Some(moto) = moto.as_mut() {
+        moto.stop();
+    }
 
     if !quiet {
         eprint!("{}", report.render(&tilde(&trace_path, &home)));
     }
     if update {
-        // A failed run stops early, so its access is incomplete: keep the old lock.
-        if code == Some(0) {
-            let test = locked
-                .as_ref()
-                .map(|lock| lock.test.clone())
-                .unwrap_or_default();
-            lock::write(&lock_path, &summary.access, &test)?;
-            if !quiet {
-                eprintln!(
-                    "lenslet: wrote {lock_label} ({} permissions)",
-                    summary.access.len()
-                );
-            }
-        } else {
-            eprintln!(
-                "lenslet: {lock_label} not written: the command failed, so its access may be incomplete"
-            );
-        }
+        update_lock(&setup, &summary, code, quiet)?;
     }
     if let Some(target) = json {
         write_json(&report, &target)?;
@@ -592,6 +678,72 @@ async fn run(args: Vec<String>) -> Result<i32> {
         _ if check && changed => EXIT_ACCESS_CHANGED,
         _ => 0,
     })
+}
+
+/// What `lenslet run -- COMMAND` says before the command starts.
+fn print_banner(
+    endpoint: &str,
+    options: &Options,
+    gate: Option<&lock::Gate>,
+    env: &ChildEnv,
+    trace_path: &Path,
+    home: &Path,
+) {
+    let enforce_note = match (options.enforce, gate) {
+        (true, Some(g)) => format!(" · enforcing {}", g.label),
+        _ => String::new(),
+    };
+    eprintln!(
+        "lenslet: {} → {} · trace {}{enforce_note}",
+        endpoint,
+        options.upstream.base,
+        tilde(trace_path, home)
+    );
+    for (name, value) in &env.set {
+        eprintln!("lenslet:   {name}={}", tilde(Path::new(value), home));
+    }
+    if !env.remove.is_empty() {
+        eprintln!(
+            "lenslet:   unset {} (real credentials and other endpoints never reach the command)",
+            env.remove.join(", ")
+        );
+    }
+    if options.upstream.tls && env.set.iter().any(|(name, _)| name == "AWS_ACCESS_KEY_ID") {
+        eprintln!(
+            "lenslet: note: no emulator credentials in {}; using placeholder keys",
+            tilde(&options.emulator_dir(), home)
+        );
+    }
+}
+
+/// `--update`: write the lock from this run, unless the command failed.
+fn update_lock(
+    setup: &GateSetup,
+    summary: &summary::Summary,
+    code: Option<i32>,
+    quiet: bool,
+) -> Result<()> {
+    let lock_label = &setup.lock_label;
+    // A failed run stops early, so its access is incomplete: keep the old lock.
+    if code == Some(0) {
+        let test = setup
+            .locked
+            .as_ref()
+            .map(|lock| lock.test.clone())
+            .unwrap_or_default();
+        lock::write(&setup.lock_path, &summary.access, &test)?;
+        if !quiet {
+            eprintln!(
+                "lenslet: wrote {lock_label} ({} permissions)",
+                summary.access.len()
+            );
+        }
+    } else {
+        eprintln!(
+            "lenslet: {lock_label} not written: the command failed, so its access may be incomplete"
+        );
+    }
+    Ok(())
 }
 
 async fn run_child(
@@ -781,27 +933,25 @@ async fn wait_for_sigterm() {
     std::future::pending::<()>().await;
 }
 
-async fn serve_until_interrupted(server: &Server, options: &Options, home: &Path) {
+async fn serve_until_interrupted(server: &Server, options: &Options, emulator: &str, home: &Path) {
     let stop_notify = server.shutdown_requested();
-    let up_str = if options.sandbox {
-        "sandbox://local (built-in stateful AWS sandbox)".to_string()
-    } else {
-        options.upstream.base.clone()
-    };
     println!("lenslet {} · proxy until Ctrl-C", env!("CARGO_PKG_VERSION"));
     println!("  endpoint  {}", server.endpoint());
-    println!("  upstream  {up_str}");
-    if options.sandbox {
-        println!(
-            "  sdk env   AWS_ENDPOINT_URL={} AWS_ACCESS_KEY_ID=lenslet-local AWS_SECRET_ACCESS_KEY=lenslet-local AWS_DEFAULT_REGION=us-east-1",
-            server.endpoint(),
-        );
-    } else {
+    println!("  upstream  {} ({emulator})", options.upstream.base);
+    let credentials = options.emulator_dir().join("emulator_credentials");
+    if credentials.is_file() {
         println!(
             "  sdk env   AWS_ENDPOINT_URL={} AWS_SHARED_CREDENTIALS_FILE={} AWS_CONFIG_FILE={}",
             server.endpoint(),
-            tilde(&options.emulator_dir().join("emulator_credentials"), home),
+            tilde(&credentials, home),
             tilde(&options.emulator_dir().join("config"), home),
+        );
+    } else {
+        println!(
+            "  sdk env   AWS_ENDPOINT_URL={} AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={} AWS_DEFAULT_REGION=us-east-1",
+            server.endpoint(),
+            LOCAL_KEYS.0,
+            LOCAL_KEYS.1,
         );
     }
     tokio::select! {
@@ -828,7 +978,8 @@ fn write_text(text: &str, target: &str) -> Result<()> {
 }
 
 /// The workflow `lenslet init` writes. `{version}`, `{command}` and
-/// `{upstream}` are filled in; everything else is plain YAML a user can edit.
+/// `{emulator}` (the `with:` lines that pick the emulator) are filled in;
+/// everything else is plain YAML a user can edit.
 const WORKFLOW: &str = r#"# Lenslet: show the AWS access each pull request needs, and fail when it grows.
 # Docs: https://github.com/hxddh/lenslet#ci
 name: Lenslet
@@ -848,10 +999,19 @@ jobs:
       - uses: hxddh/lenslet@lenslet-v{version}
         with:
           command: {command}
-          upstream: {upstream}
+{emulator}"#;
+
+/// The `with:` lines when Lenslet starts moto itself in CI.
+const WORKFLOW_MOTO: &str = r#"          # Lenslet installs moto (pip install 'moto[server]') if needed and
+          # starts it for the run.
+          emulator: moto
+"#;
+
+/// The `with:` lines for an emulator the job starts itself.
+const WORKFLOW_UPSTREAM: &str = r#"          upstream: {upstream}
           # A command that starts your local AWS emulator inside this job, for
           # example `aws-emulator --telemetry off --port 9298` once AWS Emulator
-          # is installed (see its docs), or `moto_server -p 9298`.
+          # is installed (see its docs), or `localstack start -d`.
           emulator: {emulator}
 "#;
 
@@ -881,52 +1041,66 @@ fn yaml_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-fn render_workflow(
-    version: &str,
-    command: &[String],
-    upstream: &str,
-    emulator: Option<&str>,
-) -> String {
-    let emulator_yaml = emulator
-        .map(yaml_quote)
-        .unwrap_or_else(|| "\"\"".to_string());
+/// What CI runs the tests against.
+#[derive(Debug, PartialEq)]
+enum CiEmulator {
+    /// Lenslet starts moto (the action's `emulator: moto`).
+    Moto,
+    /// The job starts this emulator (`emulator:` command, maybe none) and
+    /// Lenslet uses `upstream`.
+    Upstream {
+        upstream: String,
+        start: Option<String>,
+    },
+}
+
+fn render_workflow(version: &str, command: &[String], emulator: &CiEmulator) -> String {
+    let with = match emulator {
+        CiEmulator::Moto => WORKFLOW_MOTO.to_string(),
+        CiEmulator::Upstream { upstream, start } => WORKFLOW_UPSTREAM
+            .replace("{upstream}", &yaml_quote(upstream))
+            .replace(
+                "{emulator}",
+                &start
+                    .as_deref()
+                    .map(yaml_quote)
+                    .unwrap_or_else(|| "\"\"".to_string()),
+            ),
+    };
     WORKFLOW
         .replace("{version}", version)
         .replace("{command}", &yaml_quote(&shell_join(command)))
-        .replace("{upstream}", &yaml_quote(upstream))
-        .replace("{emulator}", &emulator_yaml)
+        .replace("{emulator}", &with)
 }
 
-/// `lenslet init [--sandbox | --upstream ADDRESS] [--force] [-- COMMAND]`:
+/// The command that starts a discovered emulator in CI, when Lenslet knows it.
+fn start_command(found: &emulator::Found) -> Option<String> {
+    let port = found.upstream.port;
+    match found.kind? {
+        emulator::Kind::Moto => Some(format!("moto_server -p {port}")),
+        emulator::Kind::LocalStack => Some("localstack start -d".to_string()),
+        emulator::Kind::AwsEmulator => Some(format!("aws-emulator --telemetry off --port {port}")),
+    }
+}
+
+/// `lenslet init [--emulator moto | --upstream ADDRESS] [--force] [-- COMMAND]`:
 /// from nothing to an enforced lock + GitHub Actions workflow in one step.
 async fn init(args: Vec<String>) -> Result<i32> {
-    let mut upstream = "9298".to_string();
-    let mut upstream_given = false;
-    let mut sandbox = false;
+    let home = home();
+    let mut options = Options::new(&home, 0);
     let mut force = false;
     let mut command = Vec::new();
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
+        let mut value = || it.next().with_context(|| format!("{arg} requires a value"));
         match arg.as_str() {
-            "--sandbox" => {
-                sandbox = true;
-                upstream_given = false;
-            }
-            "--upstream" => {
-                let val = it.next().context("--upstream requires a value")?;
-                if matches!(val.trim(), "sandbox" | "built-in" | "sandbox://local") {
-                    sandbox = true;
-                    upstream_given = false;
-                } else {
-                    upstream = val;
-                    upstream_given = true;
-                    sandbox = false;
-                }
-            }
             "--force" => force = true,
             "--" => {
                 command.extend(it.by_ref());
                 break;
+            }
+            "--emulator" | "--upstream" | "--sandbox" => {
+                options.accept(&arg, &mut value)?;
             }
             flag if flag.starts_with('-') => {
                 bail!("unknown option `{flag}`; try `lenslet --help`")
@@ -954,57 +1128,72 @@ async fn init(args: Vec<String>) -> Result<i32> {
         }
     }
 
-    let mut target = proxy::Upstream::parse(&upstream)?;
-    if !upstream_given && !sandbox {
-        let env_ep = std::env::var("AWS_ENDPOINT_URL").ok();
-        if let Some((discovered, _)) = proxy::Upstream::auto_discover(env_ep.as_deref(), 0).await {
-            upstream = discovered.base.clone();
-            target = discovered;
-        } else {
-            let home_dir = home();
-            let ca = home_dir
-                .join(".aws/emulator")
-                .join(target.port.to_string())
-                .join("ca.pem");
-            let default_ready = target.reachable().await && (!target.tls || ca.is_file());
-            if !default_ready {
-                sandbox = true;
-            }
-        }
+    // What answers: as `lenslet run` decides, without starting anything yet
+    // (the lock run below starts moto when it is needed).
+    if let Some(alias) = options.removed_alias.as_deref() {
+        eprintln!("lenslet: {alias} was removed in 12.0; using moto instead");
     }
-
-    let (workflow_upstream, detected_emulator) = if sandbox {
-        eprintln!("lenslet: 1/3 built-in AWS sandbox ready (no external emulator needed)");
-        ("sandbox".to_string(), None)
-    } else {
+    let ci = if options.managed {
+        if emulator::moto_command().is_none() {
+            bail!("{}", emulator::NOT_FOUND);
+        }
+        eprintln!("lenslet: 1/3 Lenslet will start moto (pip package), here and in CI");
+        CiEmulator::Moto
+    } else if options.upstream_given {
+        let target = &options.upstream;
         eprintln!("lenslet: 1/3 emulator at {}", target.base);
         if !target.reachable().await {
             bail!(
-                "nothing is listening on {}. Start your emulator first, e.g.\n  \
-                 EMULATOR_TELEMETRY=off aws-emulator --telemetry off --port {}\n\
-                 or run `lenslet init` without `--upstream` to use the built-in AWS sandbox",
-                target.base,
-                target.port
+                "nothing is listening on {}. Start your emulator first, or run `lenslet init` without --upstream",
+                target.base
             );
         }
-        let emu = target.detect_emulator().await;
-        if let Some(emulator) = emu.as_deref() {
-            eprintln!("lenslet:   detected `{emulator}`");
+        let ca = options.emulator_ca();
+        let found = emulator::Found {
+            upstream: target.clone(),
+            kind: emulator::identify(target, Some(&ca)).await.flatten(),
+            source: "--upstream",
+        };
+        if found.kind.is_some() {
+            eprintln!("lenslet:   it is {}", found.label());
         }
-        (target.base.clone(), emu)
+        CiEmulator::Upstream {
+            upstream: target.base.clone(),
+            start: start_command(&found),
+        }
+    } else {
+        let endpoint_url = std::env::var("AWS_ENDPOINT_URL").ok();
+        if let Some(found) = emulator::discover(endpoint_url.as_deref(), 0, &home).await {
+            eprintln!(
+                "lenslet: 1/3 {} at {} (found via {})",
+                found.label(),
+                found.upstream.base,
+                found.source
+            );
+            CiEmulator::Upstream {
+                upstream: found.upstream.base.clone(),
+                start: start_command(&found),
+            }
+        } else if emulator::moto_command().is_some() {
+            eprintln!(
+                "lenslet: 1/3 no emulator running; Lenslet will start moto (pip package), here and in CI"
+            );
+            options.managed = true;
+            CiEmulator::Moto
+        } else {
+            bail!("{}", emulator::NOT_FOUND);
+        }
     };
 
     let workflow = cwd.join(".github/workflows/lenslet.yml");
     eprintln!("lenslet: 2/3 workflow {}", workflow.display());
+    let text = render_workflow(env!("CARGO_PKG_VERSION"), &command, &ci);
     if workflow.exists() && !force {
-        eprintln!("lenslet:   exists, left alone (use --force to replace it)");
+        eprintln!("lenslet:   exists, left alone; with --force it would be replaced by:");
+        for line in text.lines() {
+            eprintln!("lenslet:   | {line}");
+        }
     } else {
-        let text = render_workflow(
-            env!("CARGO_PKG_VERSION"),
-            &command,
-            &workflow_upstream,
-            detected_emulator.as_deref(),
-        );
         std::fs::create_dir_all(workflow.parent().unwrap_or(&cwd))
             .with_context(|| format!("create {}", workflow.display()))?;
         std::fs::write(&workflow, text).with_context(|| format!("write {}", workflow.display()))?;
@@ -1012,22 +1201,24 @@ async fn init(args: Vec<String>) -> Result<i32> {
 
     eprintln!("lenslet: 3/3 lenslet.lock from `{}`", shell_join(&command));
     let mut run_args = vec!["--update".to_string()];
-    if sandbox {
-        run_args.push("--sandbox".to_string());
-    } else {
-        run_args.push("--upstream".to_string());
-        run_args.push(upstream);
+    match &ci {
+        CiEmulator::Moto => run_args.extend(["--emulator".to_string(), "moto".to_string()]),
+        CiEmulator::Upstream { upstream, .. } => {
+            run_args.extend(["--upstream".to_string(), upstream.clone()]);
+        }
     }
     run_args.push("--".to_string());
     run_args.extend(command);
     let code = Box::pin(run(run_args)).await?;
     if code == 0 {
-        let emulator_note = if sandbox {
-            "CI runs out of the box using Lenslet's built-in AWS sandbox."
-        } else if detected_emulator.is_some() {
-            "and make sure the workflow installs your emulator and test dependencies."
-        } else {
-            "and set `emulator:` in the workflow to start your emulator in CI."
+        let emulator_note = match &ci {
+            CiEmulator::Moto => "In CI, the action installs moto and Lenslet starts it.",
+            CiEmulator::Upstream { start: Some(_), .. } => {
+                "Make sure the workflow installs your emulator and test dependencies."
+            }
+            CiEmulator::Upstream { start: None, .. } => {
+                "Set `emulator:` in the workflow to start your emulator in CI."
+            }
         };
         eprintln!(
             "\nlenslet: done. Review lenslet.lock (mark fixture-only lines `# test`), then\n  \
@@ -1038,8 +1229,51 @@ async fn init(args: Vec<String>) -> Result<i32> {
     Ok(code)
 }
 
+/// The rc file an interactive `shell` reads at start, when Lenslet knows it.
+fn shell_rc_file(shell: &str, home: &Path) -> Option<PathBuf> {
+    let name = Path::new(shell).file_name()?.to_str()?;
+    match name {
+        "bash" => Some(home.join(".bashrc")),
+        "zsh" => Some(
+            std::env::var_os("ZDOTDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.to_path_buf())
+                .join(".zshrc"),
+        ),
+        "fish" => Some(home.join(".config/fish/config.fish")),
+        _ => std::env::var_os("ENV").map(PathBuf::from),
+    }
+}
+
+/// The AWS credential (or endpoint) variables an rc file sets.
+fn rc_sets_aws_vars(text: &str) -> Vec<&'static str> {
+    let watched = CREDENTIAL_VARS
+        .iter()
+        .copied()
+        .chain(["AWS_ENDPOINT_URL", "AWS_SHARED_CREDENTIALS_FILE"]);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    watched
+        .filter(|name| {
+            lines.iter().any(|line| {
+                line.match_indices(name).any(|(at, _)| {
+                    let after = line[at + name.len()..].chars().next();
+                    let before = line[..at].chars().next_back();
+                    !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '_')
+                        && !matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                })
+            })
+        })
+        .collect()
+}
+
 /// `lenslet shell [options]`: start an interactive shell pre-configured with
 /// `AWS_ENDPOINT_URL` pointing at Lenslet, and print the run report on `exit`.
+/// The shell's rc file runs inside it and can set credentials again: Lenslet
+/// warns when it does.
 async fn shell_cmd(args: Vec<String>) -> Result<i32> {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!("{}", usage());
@@ -1060,6 +1294,19 @@ async fn shell_cmd(args: Vec<String>) -> Result<i32> {
     let has_sep = args.iter().any(|a| a == "--");
     forwarded.extend(args);
     if !has_sep {
+        let home = home();
+        if let Some(rc) = shell_rc_file(&shell_bin, &home)
+            && let Ok(text) = std::fs::read_to_string(&rc)
+        {
+            let set = rc_sets_aws_vars(&text);
+            if !set.is_empty() {
+                eprintln!(
+                    "lenslet: warning: {} sets {}; it runs inside the shell and can bring back real credentials or endpoints (check with `env | grep ^AWS_`)",
+                    tilde(&rc, &home),
+                    set.join(", ")
+                );
+            }
+        }
         forwarded.push("--".to_string());
         forwarded.push(shell_bin);
         if !cfg!(windows) {
@@ -1070,38 +1317,27 @@ async fn shell_cmd(args: Vec<String>) -> Result<i32> {
     Box::pin(run(forwarded)).await
 }
 
-/// `lenslet doctor [--json]`: verify CLI, desktop UI, local emulators, built-in
-/// AWS sandbox, `lenslet.lock`, and GitHub Actions workflow status.
+/// `lenslet doctor [--json]`: verify CLI, desktop UI, running emulators,
+/// whether Lenslet can start moto, `lenslet.lock`, and the CI workflow.
 async fn doctor_cmd(args: Vec<String>) -> Result<i32> {
     let json = match args.as_slice() {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => bail!("usage: lenslet doctor [--json]"),
     };
+    let home = home();
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .unwrap_or_else(|_| PathBuf::from("lenslet"));
     let in_path = command_exists_on_path("lenslet");
     let ui_installed = find_ui_binary(&exe).is_some();
 
-    let mut active_emulators = Vec::new();
-    for (name, url) in [
-        ("AWS Emulator", "https://127.0.0.1:9298"),
-        ("LocalStack", "http://127.0.0.1:4566"),
-        ("Moto", "http://127.0.0.1:5000"),
-        ("MinIO", "http://127.0.0.1:9000"),
-        ("DynamoDB Local", "http://127.0.0.1:8000"),
-        ("ElasticMQ", "http://127.0.0.1:9324"),
-    ] {
-        if let Ok(up) = proxy::Upstream::parse(url)
-            && up.reachable().await
-        {
-            active_emulators.push(format!("{name} ({url})"));
-        }
-    }
+    let endpoint_url = std::env::var("AWS_ENDPOINT_URL").ok();
+    let running = emulator::running(endpoint_url.as_deref(), &home).await;
+    let moto = emulator::moto_command();
 
     let mut installed_emulators = Vec::new();
-    for bin in ["aws-emulator", "localstack", "moto_server", "minio"] {
+    for bin in ["aws-emulator", "localstack", "moto_server"] {
         if command_exists_on_path(bin) {
             installed_emulators.push(bin.to_string());
         }
@@ -1117,6 +1353,15 @@ async fn doctor_cmd(args: Vec<String>) -> Result<i32> {
     let workflow_exists = cwd.join(".github/workflows/lenslet.yml").is_file();
 
     if json {
+        let emulators: Vec<serde_json::Value> = running
+            .iter()
+            .filter_map(|found| {
+                Some(serde_json::json!({
+                    "name": found.kind?.name(),
+                    "url": found.upstream.base,
+                }))
+            })
+            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1124,8 +1369,12 @@ async fn doctor_cmd(args: Vec<String>) -> Result<i32> {
                 "cli_binary": exe.display().to_string(),
                 "cli_in_path": in_path,
                 "desktop_ui_installed": ui_installed,
-                "builtin_sandbox_ready": true,
-                "active_emulators": active_emulators,
+                "emulators": emulators,
+                "managed": {
+                    "name": "moto",
+                    "available": moto.is_some(),
+                    "command": moto,
+                },
                 "installed_emulators": installed_emulators,
                 "workspace": cwd.display().to_string(),
                 "detected_test_command": detected_test,
@@ -1151,13 +1400,23 @@ async fn doctor_cmd(args: Vec<String>) -> Result<i32> {
             "CLI-only install (install full app with `install.sh --app`)"
         }
     );
-    println!(
-        "  ✓ Built-in sandbox    ready (S3, DynamoDB, SQS, SNS, STS, Secrets, SSM, KMS, Logs, Lambda)"
-    );
-    if active_emulators.is_empty() {
-        println!("  · External emulators  none running (Lenslet will auto-use built-in sandbox)");
+    if running.is_empty() {
+        println!("  · Emulators running   none");
     } else {
-        println!("  ✓ External emulators  {}", active_emulators.join(", "));
+        let list: Vec<String> = running
+            .iter()
+            .map(|found| format!("{} ({})", found.label(), found.upstream.base))
+            .collect();
+        println!("  ✓ Emulators running   {}", list.join(", "));
+    }
+    match moto.as_ref() {
+        Some(command) => println!(
+            "  ✓ Managed moto        available (`{}`); used when no emulator is running",
+            command.join(" ")
+        ),
+        None => println!(
+            "  · Managed moto        not installed (pip install 'moto[server]' to let Lenslet start it)"
+        ),
     }
     if let Some(cmd) = detected_test {
         println!("  ✓ Project command     `{cmd}` (run with `lenslet {cmd}`)");
@@ -1345,6 +1604,21 @@ fn last(args: Vec<String>) -> Result<i32> {
     }
 }
 
+/// What `lenslet env` unsets: every credential variable, the switch that
+/// makes SDKs ignore `AWS_ENDPOINT_URL`, and each service-specific endpoint
+/// set in `current` (a superset of what `lenslet run` removes).
+fn env_unset_list(current: &BTreeMap<String, OsString>) -> Vec<String> {
+    let mut out: Vec<String> = CREDENTIAL_VARS
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    out.push("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS".to_string());
+    out.extend(stripped_vars(current, false));
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// `lenslet env [--shell sh|fish|pwsh|dotenv|docker] [--listen PORT]`:
 /// print environment configuration pointing SDKs at a running Lenslet proxy.
 fn env_cmd(args: Vec<String>) -> Result<i32> {
@@ -1377,13 +1651,8 @@ fn env_cmd(args: Vec<String>) -> Result<i32> {
         }
     });
     let endpoint = format!("http://127.0.0.1:{port}");
-    let unset_keys = [
-        "AWS_PROFILE",
-        "AWS_DEFAULT_PROFILE",
-        "AWS_SESSION_TOKEN",
-        "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "AWS_ROLE_ARN",
-    ];
+    // The same variables `lenslet run` removes from its command.
+    let unset_keys = env_unset_list(&current_env());
     match detected.to_ascii_lowercase().as_str() {
         "sh" | "bash" | "zsh" => {
             println!("unset {}", unset_keys.join(" "));
@@ -1393,7 +1662,7 @@ fn env_cmd(args: Vec<String>) -> Result<i32> {
             println!("export AWS_DEFAULT_REGION=us-east-1");
         }
         "fish" => {
-            for k in unset_keys {
+            for k in &unset_keys {
                 println!("set -e {k}");
             }
             println!("set -gx AWS_ENDPOINT_URL {endpoint}");
@@ -1402,7 +1671,7 @@ fn env_cmd(args: Vec<String>) -> Result<i32> {
             println!("set -gx AWS_DEFAULT_REGION us-east-1");
         }
         "pwsh" | "powershell" => {
-            for k in unset_keys {
+            for k in &unset_keys {
                 println!("Remove-Item Env:{k} -ErrorAction SilentlyContinue");
             }
             println!("$env:AWS_ENDPOINT_URL = \"{endpoint}\"");
@@ -2095,6 +2364,13 @@ mod tests {
         assert!(parse_run(strings(&["--nope", "x"]), home).is_err());
     }
 
+    fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, OsString> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), OsString::from(value)))
+            .collect()
+    }
+
     #[test]
     fn child_env_points_sdks_at_lenslet_and_the_emulator() {
         let dir = std::env::temp_dir().join(format!("lenslet-env-{}", std::process::id()));
@@ -2105,19 +2381,16 @@ mod tests {
             env.set.iter().map(|(name, _)| name.clone()).collect()
         };
 
-        let real = |name: &str| {
-            matches!(
-                name,
-                "AWS_PROFILE"
-                    | "AWS_ACCESS_KEY_ID"
-                    | "AWS_SESSION_TOKEN"
-                    | "AWS_WEB_IDENTITY_TOKEN_FILE"
-                    | "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
-                    | "AWS_BEARER_TOKEN_BEDROCK"
-            )
-            .then(|| OsString::from("real"))
-        };
-        let env = child_env("http://127.0.0.1:5000", &dir, false, real);
+        let real = vars(&[
+            ("AWS_PROFILE", "real"),
+            ("AWS_ACCESS_KEY_ID", "real"),
+            ("AWS_SESSION_TOKEN", "real"),
+            ("AWS_WEB_IDENTITY_TOKEN_FILE", "real"),
+            ("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "real"),
+            ("AWS_BEARER_TOKEN_BEDROCK", "real"),
+            ("HOME", "/home/tester"),
+        ]);
+        let env = child_env("http://127.0.0.1:5000", &dir, false, &real);
         assert_eq!(
             names(&env),
             [
@@ -2141,7 +2414,7 @@ mod tests {
         // No emulator credentials: real keys still go, placeholders come in,
         // so the SDK cannot fall back to ~/.aws/credentials.
         let empty = dir.join("nothing");
-        let env = child_env("http://x", &empty, false, real);
+        let env = child_env("http://x", &empty, false, &real);
         assert_eq!(
             names(&env),
             [
@@ -2153,18 +2426,92 @@ mod tests {
         assert_eq!(env.set[1].1, LOCAL_KEYS.0);
         assert!(env.remove.contains(&"AWS_ACCESS_KEY_ID".to_string()));
 
-        // A credentials file the user chose is respected; env keys still go.
-        let env = child_env("http://x", &empty, false, |name| {
-            matches!(name, "AWS_SHARED_CREDENTIALS_FILE" | "AWS_ACCESS_KEY_ID")
-                .then(|| OsString::from("mine"))
-        });
-        assert_eq!(names(&env), ["AWS_ENDPOINT_URL"]);
-        assert_eq!(env.remove, ["AWS_ACCESS_KEY_ID"]);
+        // Another credentials file (say ~/.aws/credentials) goes too...
+        let mine = vars(&[
+            (
+                "AWS_SHARED_CREDENTIALS_FILE",
+                "/home/tester/.aws/credentials",
+            ),
+            ("AWS_ACCESS_KEY_ID", "mine"),
+        ]);
+        let env = child_env("http://x", &empty, false, &mine);
+        assert_eq!(
+            names(&env),
+            [
+                "AWS_ENDPOINT_URL",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY"
+            ]
+        );
+        assert_eq!(
+            env.remove,
+            ["AWS_ACCESS_KEY_ID", "AWS_SHARED_CREDENTIALS_FILE"]
+        );
+        // ...but the emulator's own stays.
+        let emulators = dir.join("emulator_credentials");
+        let own = vars(&[("AWS_SHARED_CREDENTIALS_FILE", emulators.to_str().unwrap())]);
+        let env = child_env("http://x", &dir, false, &own);
+        assert_eq!(names(&env), ["AWS_ENDPOINT_URL", "AWS_CONFIG_FILE"]);
+        assert!(env.remove.is_empty());
 
-        let env = child_env("http://x", &dir, true, real);
+        let env = child_env("http://x", &dir, true, &real);
         assert_eq!(names(&env), ["AWS_ENDPOINT_URL"]);
         assert!(env.remove.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn service_endpoints_that_bypass_the_proxy_are_removed() {
+        let current = vars(&[
+            ("AWS_ENDPOINT_URL", "http://localhost:4566"),
+            ("AWS_ENDPOINT_URL_S3", "http://localhost:9000"),
+            ("AWS_ENDPOINT_URL_DYNAMODB", "http://localhost:8000"),
+            ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true"),
+            ("AWS_REGION", "us-east-1"),
+        ]);
+        let empty = std::env::temp_dir().join("lenslet-env-none");
+        for no_env in [false, true] {
+            let env = child_env("http://127.0.0.1:1", &empty, no_env, &current);
+            assert_eq!(
+                env.remove,
+                [
+                    "AWS_ENDPOINT_URL_DYNAMODB",
+                    "AWS_ENDPOINT_URL_S3",
+                    "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"
+                ],
+                "no_env={no_env}"
+            );
+            assert_eq!(
+                env.set[0],
+                (
+                    "AWS_ENDPOINT_URL".to_string(),
+                    "http://127.0.0.1:1".to_string()
+                )
+            );
+            assert!(
+                !env.set
+                    .iter()
+                    .any(|(name, _)| name.starts_with("AWS_ENDPOINT_URL_"))
+            );
+        }
+        // `lenslet env` unsets what `run` removes (and every credential).
+        let unset = env_unset_list(&current);
+        for name in stripped_vars(&current, false)
+            .iter()
+            .chain(stripped_vars(&vars(&[]), false).iter())
+        {
+            assert!(unset.contains(name), "{name}");
+        }
+        for name in CREDENTIAL_VARS {
+            assert!(unset.iter().any(|n| n == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn shell_rc_files_that_set_credentials_are_noticed() {
+        let rc = "# export AWS_PROFILE=old\nexport AWS_PROFILE=prod\nalias x='echo $AWS_ACCESS_KEY_ID'\nset -gx AWS_SESSION_TOKEN abc\nexport AWS_PROFILE_HINT=1\n";
+        assert_eq!(rc_sets_aws_vars(rc), ["AWS_SESSION_TOKEN", "AWS_PROFILE"]);
+        assert!(rc_sets_aws_vars("export PATH=$PATH:~/bin\n").is_empty());
     }
 
     #[test]
@@ -2199,12 +2546,19 @@ mod tests {
         let text = render_workflow(
             "4.1.0",
             &strings(&["npm", "test"]),
-            "https://127.0.0.1:9298",
-            Some("aws-emulator --telemetry off --port 9298"),
+            &CiEmulator::Upstream {
+                upstream: "https://127.0.0.1:9298".to_string(),
+                start: Some("aws-emulator --telemetry off --port 9298".to_string()),
+            },
         );
         assert!(text.contains("uses: hxddh/lenslet@lenslet-v4.1.0"));
         assert!(text.contains("command: 'npm test'"));
+        assert!(text.contains("upstream: 'https://127.0.0.1:9298'"));
         assert!(text.contains("emulator: 'aws-emulator --telemetry off --port 9298'"));
+        let moto = render_workflow("12.0.0", &strings(&["pytest"]), &CiEmulator::Moto);
+        assert!(moto.contains("          emulator: moto\n"), "{moto}");
+        assert!(!moto.contains("upstream:"), "{moto}");
+        assert!(!moto.contains('{'), "every placeholder is filled");
         assert!(!text.contains('{'), "every placeholder is filled");
     }
 

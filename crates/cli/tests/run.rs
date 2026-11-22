@@ -484,6 +484,17 @@ fn init_detects_moto_and_run_tracks_retries() {
                     Ok(read) => request.extend_from_slice(&buffer[..read]),
                 }
             }
+            if request.starts_with(b"GET /moto-api/") {
+                let page = "<title>Moto</title>";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nserver: Werkzeug/3.1.0 Python/3.12.0\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
+                        page.len()
+                    )
+                    .as_bytes(),
+                );
+                continue;
+            }
             let body = r#"{"__type":"com.amazonaws.sqs#InternalError","message":"boom"}"#;
             let response = format!(
                 "HTTP/1.1 500 Internal Server Error\r\nserver: Werkzeug/3.1.0 Python/3.12.0\r\ncontent-type: application/x-amz-json-1.0\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -716,7 +727,17 @@ fn env_iac_formats_and_context_simulation_work_end_to_end() {
     assert_eq!(sh_out.status.code(), Some(0));
     let sh_text = String::from_utf8_lossy(&sh_out.stdout);
     assert!(sh_text.contains("export AWS_ENDPOINT_URL=http://127.0.0.1:9299"));
-    assert!(sh_text.contains("unset AWS_PROFILE"));
+    let unset = sh_text
+        .lines()
+        .find(|line| line.starts_with("unset "))
+        .unwrap();
+    for name in [
+        "AWS_PROFILE",
+        "AWS_SESSION_TOKEN",
+        "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+    ] {
+        assert!(unset.split(' ').any(|word| word == name), "{unset}");
+    }
 
     let docker_out = env.lenslet(&["env", "--shell", "docker"]);
     assert_eq!(docker_out.status.code(), Some(0));
@@ -785,165 +806,217 @@ fn env_iac_formats_and_context_simulation_work_end_to_end() {
     );
 }
 
+/// Whether moto can be started here, as Lenslet looks for it.
+fn moto_installed() -> bool {
+    let on_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join("moto_server").is_file())
+    });
+    on_path
+        || Command::new("python3")
+            .args(["-c", "import moto.server"])
+            .output()
+            .is_ok_and(|out| out.status.success())
+}
+
+/// `lenslet` with a fresh HOME, no AWS variables, in `work`.
+fn lenslet_in(home: &Path, work: &Path, args: &[&str], path: Option<&Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lenslet"));
+    command
+        .args(args)
+        .current_dir(work)
+        .env("HOME", home)
+        .env_remove("AWS_ENDPOINT_URL")
+        .env_remove("AWS_SHARED_CREDENTIALS_FILE")
+        .env_remove("AWS_CONFIG_FILE");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    command.output().unwrap()
+}
+
+/// SQS calls a test suite makes; moto answers them for real.
+const SQS_SCRIPT: &str = "set -e\n\
+    for target in CreateQueue ListQueues; do\n\
+      code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \"$AWS_ENDPOINT_URL/\" \
+        -H \"x-amz-target: AmazonSQS.$target\" \
+        -H 'content-type: application/x-amz-json-1.0' \
+        -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261122/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=x' \
+        -d '{\"QueueName\":\"jobs\"}')\n\
+      test \"$code\" = 200 || { echo \"$target: HTTP $code\" >&2; exit 1; }\n\
+    done\n";
+
+/// No emulator and no moto: exit 2 with one message saying what to do; the
+/// removed `--sandbox` says it was removed, then the same.
 #[test]
-fn builtin_sandbox_zero_arg_init_shorthand_and_doctor_work_without_external_emulator() {
+fn no_emulator_and_no_moto_exits_2_with_what_to_do() {
+    let home = temp_dir();
+    let work = home.join("app");
+    std::fs::create_dir_all(&work).unwrap();
+    // An empty PATH: neither `moto_server` nor `python3` can be found.
+    let empty = home.join("empty-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let message = "lenslet: no local AWS emulator found. Start one (AWS Emulator, LocalStack, moto) \
+        or install moto (pip install 'moto[server]') and Lenslet will start it for you.";
+    let output = lenslet_in(&home, &work, &["run", "--", "true"], Some(&empty));
+    let text = stderr(&output);
+    if text.contains("lenslet: using ") {
+        eprintln!("note: an emulator is running on this machine; skipping the not-found check");
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert_eq!(text.trim_end(), message);
+
+    for alias in [
+        &["run", "--sandbox"][..],
+        &["run", "--upstream", "built-in"],
+    ] {
+        let mut args = alias.to_vec();
+        args.extend(["--", "true"]);
+        let output = lenslet_in(&home, &work, &args, Some(&empty));
+        let text = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{text}");
+        let flag = alias[1..].join(" ");
+        assert_eq!(
+            text.trim_end(),
+            format!("lenslet: {flag} was removed in 12.0; using moto instead\n{message}")
+        );
+    }
+    let output = lenslet_in(&home, &work, &["init", "--", "true"], Some(&empty));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).ends_with(&format!("{message}\n")));
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// With moto installed and no emulator running: `init` starts moto for the
+/// lock run and writes `emulator: moto` into CI; `--sandbox` is moto; a
+/// zero-option run starts moto and says so even with --quiet; reports say
+/// what answered; moto is gone after each run; `doctor --json` tells it.
+#[test]
+fn managed_moto_answers_init_runs_and_the_sandbox_alias() {
     if !has_curl() {
         eprintln!("skipping: curl is not installed");
         return;
     }
+    if !moto_installed() {
+        eprintln!(
+            "note: moto is not installed (pip install 'moto[server]'); skipping the managed moto test"
+        );
+        return;
+    }
     let home = temp_dir();
-    let work = home.join("zero-config-app");
+    let work = home.join("app");
     std::fs::create_dir_all(&work).unwrap();
+    let run = |args: &[&str]| lenslet_in(&home, &work, args, None);
 
-    // Create a realistic project with a Makefile (`make` or `sh` test script)
-    // and `package.json` so zero-arg `lenslet init` auto-detects the command.
-    let test_script = r#"#!/bin/sh
-set -eu
-test -n "$AWS_ENDPOINT_URL"
-
-# 1. S3 CreateBucket + PutObject + GetObject round-trip
-curl -fsS -X PUT "$AWS_ENDPOINT_URL/receipts-bucket" \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x' >/dev/null
-
-curl -fsS -X PUT "$AWS_ENDPOINT_URL/receipts-bucket/orders/ord-1.json" \
-  -H 'content-type: application/json' \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x' \
-  -d '{"order":"ord-1","paid":true}' >/dev/null
-
-got_s3=$(curl -fsS "$AWS_ENDPOINT_URL/receipts-bucket/orders/ord-1.json" \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x')
-test "$got_s3" = '{"order":"ord-1","paid":true}'
-
-# 2. DynamoDB CreateTable + PutItem + GetItem round-trip
-curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'x-amz-target: DynamoDB_20120810.CreateTable' \
-  -H 'content-type: application/x-amz-json-1.0' \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x' \
-  -d '{"TableName":"orders","KeySchema":[{"AttributeName":"id","KeyType":"HASH"}]}' >/dev/null
-
-curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'x-amz-target: DynamoDB_20120810.PutItem' \
-  -H 'content-type: application/x-amz-json-1.0' \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x' \
-  -d '{"TableName":"orders","Item":{"id":{"S":"ord-1"},"status":{"S":"paid"}}}' >/dev/null
-
-got_ddb=$(curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'x-amz-target: DynamoDB_20120810.GetItem' \
-  -H 'content-type: application/x-amz-json-1.0' \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x' \
-  -d '{"TableName":"orders","Key":{"id":{"S":"ord-1"}}}')
-echo "$got_ddb" | grep -q '"paid"'
-
-# 3. STS AssumeRole + role-attributed SQS CreateQueue & SendMessage
-sts_xml=$(curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'content-type: application/x-www-form-urlencoded' \
-  -H 'authorization: AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=x' \
-  -d 'Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2Ffulfilment-worker&RoleSessionName=s1')
-akid=$(printf '%s' "$sts_xml" | sed -n 's:.*<AccessKeyId>\([^<]*\)</AccessKeyId>.*:\1:p')
-test -n "$akid"
-
-curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'x-amz-target: AmazonSQS.CreateQueue' \
-  -H 'content-type: application/x-amz-json-1.0' \
-  -H "authorization: AWS4-HMAC-SHA256 Credential=$akid/20261120/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=x" \
-  -d '{"QueueName":"fulfilment"}' >/dev/null
-
-curl -fsS -X POST "$AWS_ENDPOINT_URL/" \
-  -H 'x-amz-target: AmazonSQS.SendMessage' \
-  -H 'content-type: application/x-amz-json-1.0' \
-  -H "authorization: AWS4-HMAC-SHA256 Credential=$akid/20261120/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=x" \
-  -d '{"QueueUrl":"http://127.0.0.1/000000000000/fulfilment","MessageBody":"ship-ord-1"}' >/dev/null
-"#;
-    let script_path = work.join("test_app.sh");
-    std::fs::write(&script_path, test_script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    // Put a fake `pytest` wrapper on a custom PATH dir so zero-arg `lenslet init`
-    // and shorthand `lenslet pytest` work deterministically on any machine.
-    let bin_dir = home.join("fake-bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let pytest_shim = bin_dir.join("pytest");
-    std::fs::write(
-        &pytest_shim,
-        format!("#!/bin/sh\nexec sh '{}'\n", script_path.display()),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&pytest_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    std::fs::write(work.join("pyproject.toml"), "[project]\nname = 'demo'\n").unwrap();
-
-    let path_env = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let run_lenslet = |args: &[&str]| -> Output {
-        Command::new(env!("CARGO_BIN_EXE_lenslet"))
-            .args(args)
-            .current_dir(&work)
-            .env("HOME", &home)
-            .env("PATH", &path_env)
-            .env_remove("AWS_ENDPOINT_URL")
-            .env_remove("AWS_SHARED_CREDENTIALS_FILE")
-            .env_remove("AWS_CONFIG_FILE")
-            .output()
-            .unwrap()
-    };
-
-    // A. Zero-arg `lenslet init` (with `--sandbox` so even if a developer port happens to be open on the host, it tests the sandbox)
-    let init_out = run_lenslet(&["init", "--sandbox"]);
-    assert_eq!(init_out.status.code(), Some(0), "{}", stderr(&init_out));
-    let wf = std::fs::read_to_string(work.join(".github/workflows/lenslet.yml")).unwrap();
-    assert!(wf.contains("command: 'pytest'"), "{wf}");
-    assert!(wf.contains("upstream: 'sandbox'"), "{wf}");
-
-    let lock_text = std::fs::read_to_string(work.join("lenslet.lock")).unwrap();
-    for (action, resource) in [
-        ("s3:CreateBucket", "arn:aws:s3:::receipts-bucket"),
-        ("s3:PutObject", "arn:aws:s3:::receipts-bucket/*"),
-        ("s3:GetObject", "arn:aws:s3:::receipts-bucket/*"),
-        ("dynamodb:CreateTable", "arn:aws:dynamodb:*:*:table/orders"),
-        ("dynamodb:PutItem", "arn:aws:dynamodb:*:*:table/orders"),
-        ("dynamodb:GetItem", "arn:aws:dynamodb:*:*:table/orders"),
-        ("sts:AssumeRole", "arn:aws:iam::*:role/fulfilment-worker"),
-        ("sqs:CreateQueue", "arn:aws:sqs:*:*:fulfilment"),
-        ("sqs:SendMessage", "arn:aws:sqs:*:*:fulfilment"),
-    ] {
-        let matched = lock_text.lines().any(|line| {
-            let mut cols = line.split_whitespace();
-            cols.next() == Some(action) && cols.next() == Some(resource)
-        });
-        assert!(matched, "missing `{action} {resource}` in:\n{lock_text}");
-    }
-
-    // Verify AssumeRole session role tracking worked against the sandbox!
-    let last_out = run_lenslet(&["last", "--json"]);
-    let last_report: serde_json::Value = serde_json::from_slice(&last_out.stdout).unwrap();
-    assert_eq!(last_report["upstream"], "sandbox://local");
+    let doctor = run(&["doctor", "--json"]);
+    assert_eq!(doctor.status.code(), Some(0), "{}", stderr(&doctor));
+    let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(doctor["managed"]["name"], "moto");
+    assert_eq!(doctor["managed"]["available"], true);
+    let command = doctor["managed"]["command"].as_array().unwrap();
     assert!(
-        last_report["roles"]["arn:aws:iam::*:role/fulfilment-worker"].is_array(),
-        "AssumeRole session attributed SQS calls:\n{last_report}"
+        command == &[serde_json::json!("moto_server")]
+            || command == &["python3", "-m", "moto.server"].map(serde_json::Value::from),
+        "{command:?}"
+    );
+    assert!(doctor.get("builtin_sandbox_ready").is_none());
+    let running = doctor["emulators"].as_array().unwrap();
+    if !running.is_empty() {
+        eprintln!("note: an emulator is running on this machine ({running:?}); skipping");
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+
+    // A. `lenslet init` with nothing running: Lenslet starts moto.
+    let output = run(&["init", "--", "sh", "-c", SQS_SCRIPT]);
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("no emulator running; Lenslet will start moto (pip package)"),
+        "{text}"
+    );
+    let workflow = std::fs::read_to_string(work.join(".github/workflows/lenslet.yml")).unwrap();
+    assert!(
+        workflow.contains("          emulator: moto\n"),
+        "{workflow}"
+    );
+    assert!(!workflow.contains("sandbox"), "{workflow}");
+    let lock = std::fs::read_to_string(work.join("lenslet.lock")).unwrap();
+    assert!(lock.contains("sqs:CreateQueue"), "{lock}");
+    let last = run(&["last", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&last.stdout).unwrap();
+    assert_eq!(report["emulator"], "moto (started by Lenslet)");
+    assert_eq!(report["errors"], 0, "{report}");
+    let upstream = report["upstream"].as_str().unwrap().to_string();
+    assert!(upstream.starts_with("http://127.0.0.1:"), "{upstream}");
+    let trace = std::fs::read_to_string(report["trace"].as_str().unwrap()).unwrap();
+    let header: serde_json::Value = serde_json::from_str(trace.lines().next().unwrap()).unwrap();
+    assert_eq!(header["emulator"], "moto (started by Lenslet)");
+    // moto's own output went to the run's log, and moto is gone.
+    let log = home
+        .join(".lenslet/runs")
+        .join(format!("{}.emulator.log", report["run"].as_str().unwrap()));
+    assert!(log.is_file(), "{}", log.display());
+    let address = upstream.trim_start_matches("http://");
+    assert!(
+        std::net::TcpStream::connect(address).is_err(),
+        "moto still listens on {address}"
     );
 
-    // B. Zero-ceremony CLI shorthand: `lenslet pytest` runs directly!
-    let short_out = run_lenslet(&["pytest"]);
-    assert_eq!(short_out.status.code(), Some(0), "{}", stderr(&short_out));
+    // B. Without --force an existing workflow is kept, and what would be
+    //    written is shown.
+    std::fs::write(work.join(".github/workflows/lenslet.yml"), "# mine\n").unwrap();
+    let output = run(&["init", "--emulator", "moto", "--", "sh", "-c", SQS_SCRIPT]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("with --force it would be replaced by:"));
+    assert!(stderr(&output).contains("lenslet:   |           emulator: moto"));
+    assert_eq!(
+        std::fs::read_to_string(work.join(".github/workflows/lenslet.yml")).unwrap(),
+        "# mine\n"
+    );
 
-    // C. `lenslet doctor --json` reports full readiness.
-    let doc_out = run_lenslet(&["doctor", "--json"]);
-    assert_eq!(doc_out.status.code(), Some(0), "{}", stderr(&doc_out));
-    let doc_json: serde_json::Value = serde_json::from_slice(&doc_out.stdout).unwrap();
-    assert_eq!(doc_json["builtin_sandbox_ready"], true);
-    assert_eq!(doc_json["detected_test_command"], "pytest");
-    assert_eq!(doc_json["ci_workflow"], true);
-    assert_eq!(doc_json["lock_permissions"], 9);
+    // C. The removed --sandbox is moto, and the Markdown report says so.
+    let markdown = home.join("report.md");
+    let output = run(&[
+        "run",
+        "--sandbox",
+        "--markdown",
+        markdown.to_str().unwrap(),
+        "--",
+        "sh",
+        "-c",
+        SQS_SCRIPT,
+    ]);
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.starts_with("lenslet: --sandbox was removed in 12.0; using moto instead\n"),
+        "{text}"
+    );
+    let md = std::fs::read_to_string(&markdown).unwrap();
+    assert!(
+        md.contains("2 AWS calls · 0 errors · 1 service · against moto (started by Lenslet)"),
+        "{md}"
+    );
+    let first = text
+        .lines()
+        .find(|line| line.starts_with("lenslet: 2 calls"))
+        .unwrap();
+    assert!(
+        first.ends_with(" · against moto (started by Lenslet)"),
+        "{first}"
+    );
 
+    // D. Nothing given: moto starts, and the one line about it shows even
+    //    with --quiet.
+    let output = run(&["run", "--quiet", "--", "sh", "-c", SQS_SCRIPT]);
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.starts_with("lenslet: no emulator running; started moto (pip package) on 127.0.0.1:"),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 1, "{text}");
     let _ = std::fs::remove_dir_all(&home);
 }
