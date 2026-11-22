@@ -573,17 +573,14 @@ impl LensletApp {
             }
         }));
 
-        let mut tasks = Vec::new();
-        if !demo {
-            tasks.push(Self::spawn_child_poller(cx));
-            let h = home();
-            cx.background_executor()
-                .spawn(async move {
-                    daemon::cleanup_stale_children(&h);
-                })
-                .detach();
-        }
-        tasks.push(Self::spawn_doctor_poller(cx));
+        // The demo can be left for real runs at any time, so these run always.
+        let tasks = vec![Self::spawn_child_poller(cx), Self::spawn_doctor_poller(cx)];
+        let h = home();
+        cx.background_executor()
+            .spawn(async move {
+                daemon::cleanup_stale_children(&h);
+            })
+            .detach();
 
         let proxy_port = prefs.proxy_port.unwrap_or(DEFAULT_PROXY_PORT);
         let detected_cmd = prefs.last_command.clone().filter(|s| !s.trim().is_empty());

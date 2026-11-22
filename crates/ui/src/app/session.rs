@@ -148,6 +148,7 @@ impl Session {
             let run = demo::demo_run();
             let calls = demo::demo_rows();
             session.run = Some(run);
+            session.console_log = Arc::from(demo::LOG);
             session.store.reset(calls);
             session.health = Health::Ready;
             session.recompute(cx);
@@ -180,12 +181,7 @@ impl Session {
         self.path = None;
         self.evicted = 0;
         self.skipped = 0;
-        self.console_log = Arc::from(
-            "$ pytest tests/test_checkout.py -q\n\
-             collected 4 items\n\
-             tests/test_checkout.py ...F                                              [100%]\n\n\
-             FAILED tests/test_checkout.py::test_place_order - ClientError: An error occurred (ResourceNotFoundException) when calling the GetItem operation: Requested resource not found\n",
-        );
+        self.console_log = Arc::from(demo::LOG);
         let run = demo::demo_run();
         let calls = demo::demo_rows();
         self.run = Some(run);
