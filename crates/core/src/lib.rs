@@ -1,17 +1,12 @@
-//! Lenslet's fact engine, shared by the `lenslet` CLI and the window.
-//!
-//! Everything here is a pure function of a run's records: the run-file
-//! schema, IAM access derivation, the lock, policy checks, failure
-//! explanations, findings and reports. The proxy computes each fact once and
-//! writes it down; readers parse the same types, so they always agree.
+//! Lenslet's facts about AWS calls, as pure functions of a call's request and
+//! response: which service and operation it is, the IAM access it needs (checked
+//! against a hand-written corpus of recorded SDK calls), why it failed, a short
+//! name for its target, and the IAM policy for a set of permissions.
 
 pub mod access;
 pub mod cbor;
-pub mod lock;
 pub mod policy;
 pub mod problem;
-pub mod runs;
-pub mod summary;
 pub mod target;
 pub mod trace;
 pub mod wire;
