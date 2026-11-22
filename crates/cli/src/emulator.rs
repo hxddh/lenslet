@@ -207,13 +207,9 @@ async fn check(upstream: Upstream, source: &'static str, home: &Path) -> Option<
 }
 
 /// The first running emulator: a loopback `AWS_ENDPOINT_URL`, AWS Emulator
-/// on 9298, LocalStack on 4566, moto on 5000. `listen` (the proxy's own
-/// port) is skipped.
-pub async fn discover(env_endpoint: Option<&str>, listen: u16, home: &Path) -> Option<Found> {
+/// on 9298, LocalStack on 4566, moto on 5000.
+pub async fn discover(env_endpoint: Option<&str>, home: &Path) -> Option<Found> {
     for (upstream, source) in candidates(env_endpoint) {
-        if listen != 0 && upstream.is_loopback() && upstream.port == listen {
-            continue;
-        }
         if let Some(found) = check(upstream, source, home).await {
             return Some(found);
         }

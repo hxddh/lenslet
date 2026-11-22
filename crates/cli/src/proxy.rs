@@ -1,26 +1,25 @@
-//! The Lenslet proxy: accept SDK calls over plain HTTP on loopback, preserve
-//! Host/SigV4, forward to AWS Emulator (HTTPS), and record one trace line per
-//! call.
+//! The Lenslet proxy: accept SDK calls over plain HTTP (HTTP/1.1 or `h2c`)
+//! on loopback, preserve Host/SigV4, forward to the local emulator, and
+//! record one run-file line per call when it finishes.
 //!
 //! Forwarding is streamed, never buffered: request and response bodies pass
-//! through unchanged, so SigV4 signatures stay valid and large uploads or
-//! downloads are not limited or slowed. Capture is bounded to
-//! [`capture::MAX_CAPTURE_BYTES`] per body: text bodies keep a prefix (marked
-//! `truncated` when longer), binary bodies keep only size and SHA-256.
+//! through a tee unchanged, so SigV4 signatures stay valid and large uploads
+//! or downloads are not limited or slowed. The tee keeps a bounded copy: of
+//! a request whose access is named in its body, up to [`MAX_INSPECT_BYTES`]
+//! (derivation reads the complete body), else up to
+//! [`trace::MAX_BODY_TEXT`], which is also all the run file keeps.
 //!
-//! The trace is a local development artifact and keeps the raw wire values:
-//! headers and text bodies are recorded exactly as they arrived, and the trace
-//! file is owner-only (0600) on Unix.
+//! The run file is a local development artifact and keeps the raw wire
+//! values: headers and text bodies exactly as they arrived, owner-only.
 
 use std::{
-    collections::BTreeMap,
     convert::Infallible,
     fs,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -43,219 +42,49 @@ use tokio::{
 };
 
 use crate::{
-    access,
+    access::{self, Access},
     capture::{self, Capture, Content, TeeBody},
-    lock::{Denial, Evaluation, Gate},
     problem,
-    trace::{self, BlockedPhase, Message, RunHeader, Trace, TraceSink},
+    trace::{self, Message, RunHeader, Trace, TraceSink},
     wire,
 };
 
 type Body = BoxBody<Bytes, std::io::Error>;
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
 
-/// Upper bound on reading a request body for access derivation (64 MiB, 4×
-/// DynamoDB's 16 MiB batch limit), independent of `--max-body`, so a small
-/// trace capture never hides a resource named late in the body. Only calls
-/// whose access is read from the body get this second look.
+/// The most of a request body read for access derivation (64 MiB, 4×
+/// DynamoDB's 16 MiB batch limit). Only calls whose access is named in the
+/// body get this much; a body past it is read as truncated, and what it
+/// names past the limit stands as `*`.
 const MAX_INSPECT_BYTES: usize = 64 * 1024 * 1024;
-
-/// A blocked call's unread request body is drained up to this much, for up
-/// to this long, so the client reads the `AccessDenied` instead of a reset.
-const DRAIN_BYTES: usize = 1024 * 1024;
-const DRAIN_TIME: Duration = Duration::from_millis(500);
 
 /// A client must send a request's headers within this long.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A call still running after this long gets a `pending` trace line.
-const PENDING_AFTER: Duration = Duration::from_secs(1);
-
-/// A comment line on an idle live event stream, this often.
-const KEEPALIVE: Duration = Duration::from_secs(15);
-
-/// Marks a call the window re-sends: the id of the recorded call it replays.
-/// Stripped before forwarding, and not recorded among the request headers.
-const REPLAY_HEADER: &str = "x-lenslet-replay-of";
-
-#[derive(Clone)]
 pub struct State {
     client: HttpsClient,
-    /// Default upstream base URL without a trailing slash, e.g. `https://127.0.0.1:9298`.
+    /// Upstream base URL without a trailing slash, e.g. `https://127.0.0.1:9298`.
     upstream: String,
-    /// Per-service local upstream overrides (`service` -> base URL), e.g. `s3` -> `http://127.0.0.1:9000`.
-    routes: BTreeMap<String, String>,
-    /// Bound proxy endpoint URL, e.g. `http://127.0.0.1:9297`.
-    endpoint: String,
     /// `--allow-docker`: which peers may send calls (see [`peer_allowed`]).
     allow_docker: bool,
-    pub max_body: usize,
-    pub enforce: bool,
-    pub blobs_dir: Option<PathBuf>,
-    pub trace: Arc<TraceSink>,
-    pub shutdown_req: Arc<tokio::sync::Notify>,
+    pub sink: Arc<TraceSink>,
+    /// Calls started and not yet recorded.
+    in_flight: AtomicUsize,
 }
 
-impl State {
-    fn upstream_for(&self, service: &str) -> &str {
-        let low = service.to_ascii_lowercase();
-        if let Some(target) = self.routes.get(&low) {
-            return target.as_str();
-        }
-        let canonical = match low.as_str() {
-            "streams.dynamodb" | "dynamodbstreams" => "dynamodb",
-            "email" | "sesv2" => "ses",
-            "monitoring" => "cloudwatch",
-            "events" => "eventbridge",
-            "states" => "stepfunctions",
-            other => other,
-        };
-        self.routes
-            .get(canonical)
-            .map(String::as_str)
-            .unwrap_or(&self.upstream)
+/// Counts a call in flight until dropped.
+struct InFlight(Arc<State>);
+
+impl InFlight {
+    fn new(state: Arc<State>) -> Self {
+        state.in_flight.fetch_add(1, Ordering::SeqCst);
+        InFlight(state)
     }
 }
 
-/// Everything needed to write one trace entry once the response body is done.
-struct Pending {
-    state: Arc<State>,
-    trace: Trace,
-    access_key_id: Option<String>,
-    started: Instant,
-    finished: Arc<AtomicBool>,
-    /// Operation advertised by the wire protocol; when `None`, the request body
-    /// may still supply one (AWS Query `Action=...`).
-    advertised_operation: Option<String>,
-    request_capture: Arc<Mutex<Capture>>,
-    request_content: Content,
-    /// The complete request body, read under `--enforce`, when the trace
-    /// capture (`--max-body`) holds less.
-    full_body: Option<trace::BodyTrace>,
-    /// A second, larger capture of a body-dependent request for derivation,
-    /// when `--max-body` is smaller than [`MAX_INSPECT_BYTES`].
-    derive_capture: Option<Arc<Mutex<Capture>>>,
-    /// The gate evaluation already made for this call (under `--enforce`).
-    evaluation: Option<Evaluation>,
-    response_capture: Arc<Mutex<Capture>>,
-    response_content: Content,
-}
-
-impl Pending {
-    fn finish(mut self) {
-        self.finished.store(true, Ordering::SeqCst);
-        self.trace.ms = self.started.elapsed().as_millis() as u64;
-        self.trace.request.body = snapshot(&self.request_capture, &self.request_content);
-        self.trace.request.trailers =
-            snapshot_trailers(&self.request_capture, &self.request_content);
-        self.trace.response.body = snapshot(&self.response_capture, &self.response_content);
-        self.trace.response.trailers =
-            snapshot_trailers(&self.response_capture, &self.response_content);
-        let operation_capture = self
-            .derive_capture
-            .as_deref()
-            .unwrap_or(&self.request_capture);
-        resolve_operation(
-            &mut self.trace,
-            self.advertised_operation.as_deref(),
-            operation_capture,
-            &self.request_content,
-        );
-        self.trace.problem = problem::from_response(
-            self.trace.status,
-            &self.trace.response.headers,
-            self.trace
-                .response
-                .body
-                .as_ref()
-                .and_then(|body| body.text.as_deref()),
-        );
-        let evaluation = match self.evaluation.take() {
-            Some(evaluation) => evaluation,
-            None => {
-                let mut full = self.full_body.take().or_else(|| {
-                    self.derive_capture
-                        .as_deref()
-                        .and_then(|capture| snapshot(capture, &self.request_content))
-                });
-                with_body(&mut self.trace, &mut full, |trace| {
-                    self.state.trace.evaluate(trace)
-                })
-            }
-        };
-        self.state
-            .trace
-            .record_with_key(self.trace, self.access_key_id.as_deref(), evaluation);
-    }
-}
-
-/// Run `f` on `trace` as if its request body were `body` (the complete body,
-/// when the trace keeps only a prefix), without copying the trace.
-fn with_body<R>(
-    trace: &mut Trace,
-    body: &mut Option<trace::BodyTrace>,
-    f: impl FnOnce(&Trace) -> R,
-) -> R {
-    if body.is_none() {
-        return f(trace);
-    }
-    std::mem::swap(&mut trace.request.body, body);
-    let result = f(trace);
-    std::mem::swap(&mut trace.request.body, body);
-    result
-}
-
-/// Fill in the operation from the request body when the wire protocol only
-/// advertises it there (AWS Query services send `Action=...` as a form field).
-fn resolve_operation(
-    trace: &mut Trace,
-    advertised: Option<&str>,
-    capture: &Mutex<Capture>,
-    content: &Content,
-) {
-    if advertised.is_some() {
-        return;
-    }
-    if let Some(action) = query_action(capture, content) {
-        trace.operation = action;
-    }
-}
-
-/// `Action=` from a captured form body, if the request is a query-protocol call.
-fn query_action(capture: &Mutex<Capture>, content: &Content) -> Option<String> {
-    let capture = capture.lock().ok()?;
-    let prefix = capture.decoded_prefix(content);
-    let form = content.content_type.as_deref() == Some("application/x-www-form-urlencoded")
-        || prefix.trim_ascii_start().starts_with(b"Action=");
-    if !form {
-        return None;
-    }
-    wire::form_action(&prefix)
-}
-
-fn snapshot(capture: &Mutex<Capture>, content: &Content) -> Option<trace::BodyTrace> {
-    capture
-        .lock()
-        .map(|capture| capture.body(content))
-        .ok()
-        .flatten()
-}
-
-fn snapshot_trailers(capture: &Mutex<Capture>, content: &Content) -> Vec<trace::HeaderTrace> {
-    capture
-        .lock()
-        .map(|capture| capture.trailers(content))
-        .unwrap_or_default()
-}
-
-fn http_version_label(version: hyper::Version) -> &'static str {
-    match version {
-        hyper::Version::HTTP_09 => "HTTP/0.9",
-        hyper::Version::HTTP_10 => "HTTP/1.0",
-        hyper::Version::HTTP_11 => "HTTP/1.1",
-        hyper::Version::HTTP_2 => "HTTP/2.0",
-        hyper::Version::HTTP_3 => "HTTP/3.0",
-        _ => "HTTP/1.1",
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -273,47 +102,31 @@ fn next_id() -> String {
 
 /// Proxy settings for `lenslet run`.
 pub struct Options {
-    /// Loopback port for SDK clients; `0` picks a free one.
-    pub listen: u16,
     pub upstream: Upstream,
-    /// Whether `--upstream` was explicitly passed on the command line.
+    /// Whether `--upstream` was given.
     pub upstream_given: bool,
     /// `--emulator moto`: Lenslet starts moto for this run and stops it after.
     pub managed: bool,
-    /// The removed option that asked for managed moto (`--sandbox`,
-    /// `--upstream sandbox`), to say so once.
-    pub removed_alias: Option<String>,
-    /// Per-service local upstream overrides (`--route s3=http://127.0.0.1:9000`).
-    pub routes: BTreeMap<String, Upstream>,
     /// Listen on all interfaces and also serve calls from Docker networks
     /// (see [`peer_allowed`]).
     pub allow_docker: bool,
     /// CA that signs the emulator's certificate; derived from the upstream
     /// port when not given (`~/.aws/emulator/PORT/ca.pem`).
     pub emulator_ca: Option<PathBuf>,
-    /// Fixed trace file; by default each session gets its own run file.
+    /// Fixed run file; by default each run gets its own in `~/.lenslet/runs`.
     pub trace: Option<PathBuf>,
-    /// Maximum body bytes captured per message (default 1 MiB).
-    pub max_body: usize,
-    /// Actively block calls whose IAM access is denied by the lock or policy.
-    pub enforce: bool,
     pub home: PathBuf,
 }
 
 impl Options {
-    pub fn new(home: &Path, listen: u16) -> Self {
+    pub fn new(home: &Path) -> Self {
         Options {
-            listen,
             upstream: Upstream::parse("9298").expect("default upstream"),
             upstream_given: false,
             managed: false,
-            removed_alias: None,
-            routes: BTreeMap::new(),
             allow_docker: false,
             emulator_ca: None,
             trace: None,
-            max_body: capture::MAX_CAPTURE_BYTES,
-            enforce: false,
             home: home.to_path_buf(),
         }
     }
@@ -321,14 +134,6 @@ impl Options {
     /// Consume one proxy option. Returns `Ok(false)` when `arg` is not one.
     pub fn accept(&mut self, arg: &str, value: &mut dyn FnMut() -> Result<String>) -> Result<bool> {
         match arg {
-            "--listen" => {
-                let raw = value()?;
-                self.listen = raw
-                    .parse::<u16>()
-                    .with_context(|| format!("--listen expects a port number, got `{raw}`"))?;
-            }
-            // The built-in sandbox was removed in 12.0: these ask for moto.
-            "--sandbox" => self.use_moto(Some("--sandbox".to_string()))?,
             "--emulator" => {
                 let raw = value()?;
                 if raw.trim() != "moto" {
@@ -336,83 +141,25 @@ impl Options {
                         "--emulator `{raw}`: Lenslet can start `moto`; for any other emulator, start it and pass --upstream"
                     );
                 }
-                self.use_moto(None)?;
+                if self.upstream_given {
+                    bail!("use --upstream or --emulator moto, not both");
+                }
+                self.managed = true;
             }
             "--upstream" => {
-                let raw = value()?;
-                if matches!(
-                    raw.trim(),
-                    "sandbox" | "built-in" | "sandbox://local" | "sandbox://built-in"
-                ) {
-                    self.use_moto(Some(format!("--upstream {}", raw.trim())))?;
-                } else {
-                    if self.managed {
-                        bail!("use --upstream or --emulator moto, not both");
-                    }
-                    self.upstream = Upstream::parse(&raw)?;
-                    self.upstream.ensure_local_boundary("--upstream")?;
-                    self.upstream_given = true;
+                if self.managed {
+                    bail!("use --upstream or --emulator moto, not both");
                 }
-            }
-            "--route" => {
-                let raw = value()?;
-                let Some((svcs, target)) = raw.split_once('=') else {
-                    bail!(
-                        "--route expects SERVICE=ADDRESS (e.g. `--route s3=http://127.0.0.1:9000`), got `{raw}`"
-                    );
-                };
-                let parsed = Upstream::parse(target.trim())?;
-                parsed.ensure_local_boundary("--route")?;
-                let mut added = 0usize;
-                for svc in svcs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    self.routes.insert(svc.to_ascii_lowercase(), parsed.clone());
-                    added += 1;
-                }
-                if added == 0 {
-                    bail!("--route `{raw}` must name at least one service before `=`");
-                }
+                self.upstream = Upstream::parse(&value()?)?;
+                self.upstream.ensure_local_boundary("--upstream")?;
+                self.upstream_given = true;
             }
             "--allow-docker" => self.allow_docker = true,
             "--emulator-ca" => self.emulator_ca = Some(PathBuf::from(value()?)),
             "--trace" => self.trace = Some(PathBuf::from(value()?)),
-            "--max-body" => self.max_body = capture::parse_size(&value()?)?,
-            "--enforce" => self.enforce = true,
             _ => return Ok(false),
         }
         Ok(true)
-    }
-
-    fn use_moto(&mut self, alias: Option<String>) -> Result<()> {
-        if self.upstream_given {
-            bail!("use --upstream or --emulator moto, not both");
-        }
-        self.managed = true;
-        if alias.is_some() {
-            self.removed_alias = alias;
-        }
-        Ok(())
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        self.upstream.ensure_local_boundary("--upstream")?;
-        if self.upstream.is_loopback() && self.upstream.port == self.listen && self.listen != 0 {
-            bail!(
-                "--listen {} and --upstream {} are the same port; the proxy would forward to itself",
-                self.listen,
-                self.upstream.port
-            );
-        }
-        for (svc, route) in &self.routes {
-            route.ensure_local_boundary("--route")?;
-            if route.is_loopback() && route.port == self.listen && self.listen != 0 {
-                bail!(
-                    "--listen {} and --route {svc}={} are the same port; the proxy would forward to itself",
-                    self.listen,
-                    route.port
-                );
-            }
-        }
-        Ok(())
     }
 
     /// The emulator's own directory: credentials, config and CA.
@@ -626,112 +373,9 @@ fn client(roots: RootCertStore) -> HttpsClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-/// A request body read ahead for inspection.
-struct Collected {
-    data: Bytes,
-    /// The body's trailers, when it ended with some.
-    trailers: Option<hyper::HeaderMap>,
-    /// The body ended: nothing is left unread.
-    complete: bool,
-}
-
-/// Read `body` until it ends or more than `limit` bytes have arrived, so a
-/// large or streaming upload never exhausts proxy memory. The rest stays in
-/// `body`, unread.
-async fn collect_bounded<B>(body: &mut B, limit: usize) -> Result<Collected, String>
-where
-    B: hyper::body::Body<Data = Bytes> + Unpin,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let cap_hint = body.size_hint().lower().min(limit as u64).min(64 * 1024) as usize;
-    let mut buf = Vec::with_capacity(cap_hint);
-    let mut trailers = None;
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|err| err.into().to_string())?;
-        match frame.into_data() {
-            Ok(chunk) => {
-                buf.extend_from_slice(&chunk);
-                if buf.len() > limit {
-                    return Ok(Collected {
-                        data: Bytes::from(buf),
-                        trailers: None,
-                        complete: false,
-                    });
-                }
-            }
-            Err(frame) => {
-                if let Ok(map) = frame.into_trailers() {
-                    trailers = Some(map);
-                }
-            }
-        }
-    }
-    Ok(Collected {
-        data: Bytes::from(buf),
-        trailers,
-        complete: true,
-    })
-}
-
-/// The bytes read ahead, then whatever of the body is still unread (or the
-/// trailers it ended with): forwards a request exactly as it arrived.
-struct ReadAhead<B> {
-    data: Option<Bytes>,
-    trailers: Option<hyper::HeaderMap>,
-    rest: Option<B>,
-}
-
-impl<B> hyper::body::Body for ReadAhead<B>
-where
-    B: hyper::body::Body<Data = Bytes> + Unpin,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
-        let this = self.get_mut();
-        if let Some(data) = this.data.take().filter(|data| !data.is_empty()) {
-            return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(data))));
-        }
-        if let Some(rest) = this.rest.as_mut() {
-            return std::pin::Pin::new(rest).poll_frame(cx);
-        }
-        std::task::Poll::Ready(
-            this.trailers
-                .take()
-                .map(|trailers| Ok(hyper::body::Frame::trailers(trailers))),
-        )
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.data.as_ref().is_none_or(Bytes::is_empty)
-            && self.trailers.is_none()
-            && self.rest.as_ref().is_none_or(|rest| rest.is_end_stream())
-    }
-
-    fn size_hint(&self) -> hyper::body::SizeHint {
-        let ahead = self.data.as_ref().map_or(0, Bytes::len) as u64;
-        match self.rest.as_ref() {
-            None => hyper::body::SizeHint::with_exact(ahead),
-            Some(rest) => {
-                let rest = rest.size_hint();
-                let mut hint = hyper::body::SizeHint::new();
-                hint.set_lower(ahead + rest.lower());
-                if let Some(upper) = rest.upper() {
-                    hint.set_upper(ahead + upper);
-                }
-                hint
-            }
-        }
-    }
-}
-
 /// Remove hop-by-hop headers (and any the `Connection` header names): they
 /// describe one connection, not the request or response, and are not
-/// forwarded. The trace still records them as sent.
+/// forwarded. The run file still records them as sent.
 fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
     let named: Vec<header::HeaderName> = headers
         .get_all(header::CONNECTION)
@@ -758,503 +402,202 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap) {
     }
 }
 
-#[cfg(test)]
+/// One proxied call while it is being handled: its trace entry so far and
+/// what is needed to finish it.
+struct Call {
+    trace: Trace,
+    started: Instant,
+    /// The operation the wire protocol advertised; when `None`, the request
+    /// body may still supply one (AWS Query `Action=...`).
+    advertised_operation: Option<String>,
+    request_capture: Arc<Mutex<Capture>>,
+    request_content: Content,
+    in_flight: InFlight,
+}
+
+impl Call {
+    /// The trace entry for a request that has just arrived, and the request
+    /// body wrapped to be captured as it is forwarded.
+    fn begin<B>(req: Request<B>, state: &Arc<State>) -> (Call, hyper::http::request::Parts, Body)
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let started = Instant::now();
+        let (parts, body) = req.into_parts();
+        let path = parts
+            .uri
+            .path_and_query()
+            .map(|path| path.as_str().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let host = parts
+            .headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .or_else(|| parts.uri.authority().map(|authority| authority.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let wire::Wire {
+            service,
+            region,
+            operation: advertised_operation,
+            invocation_id,
+            attempt,
+            max_attempts,
+            ..
+        } = wire::wire_info(&parts.headers, &path);
+        let attempt = attempt.filter(|n| *n > 1);
+        let operation = advertised_operation.clone().unwrap_or_else(|| {
+            wire::fallback_operation(&service, parts.method.as_str(), &path, &parts.headers)
+        });
+        let request_content = capture::content(&parts.headers);
+        // A call whose access is named in its body is read in full (up to
+        // the inspection limit) for derivation.
+        let limit = if access::needs_request_body(
+            &service,
+            advertised_operation.as_deref(),
+            &operation,
+            &path,
+        ) {
+            MAX_INSPECT_BYTES
+        } else {
+            trace::MAX_BODY_TEXT
+        };
+        let request_capture = Arc::new(Mutex::new(Capture::new(limit)));
+        let trace = Trace {
+            id: next_id(),
+            at: Utc::now().to_rfc3339(),
+            method: parts.method.to_string(),
+            path,
+            host,
+            service,
+            operation,
+            authorization: parts.headers.contains_key("authorization"),
+            region,
+            invocation_id,
+            attempt,
+            max_attempts: max_attempts.filter(|_| attempt.is_some()),
+            request: Message {
+                headers: trace::headers(&parts.headers),
+                content_type: request_content.content_type.clone(),
+                body: None,
+            },
+            ..Trace::default()
+        };
+        let body = TeeBody::new(body, request_capture.clone())
+            .map_err(|error| std::io::Error::other(error.into()))
+            .boxed();
+        let call = Call {
+            trace,
+            started,
+            advertised_operation,
+            request_capture,
+            request_content,
+            in_flight: InFlight::new(state.clone()),
+        };
+        (call, parts, body)
+    }
+
+    /// Record the call with what its complete request needs.
+    fn finish(mut self, response: Option<(&Mutex<Capture>, &Content)>) {
+        self.trace.ms = self.started.elapsed().as_millis() as u64;
+        if let Ok(capture) = self.request_capture.lock() {
+            if self.advertised_operation.is_none()
+                && let Some(action) = query_action(&capture, &self.request_content)
+            {
+                self.trace.operation = action;
+            }
+            self.trace.request.body = capture.body(&self.request_content);
+        }
+        if let Some((capture, content)) = response {
+            self.trace.response.body = capture.lock().ok().and_then(|c| c.body(content));
+            self.trace.problem = problem::from_response(
+                self.trace.status,
+                &self.trace.response.headers,
+                self.trace
+                    .response
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.text.as_deref()),
+            );
+        }
+        let derived = access::derive_call(&self.trace);
+        let state = self.in_flight.0.clone();
+        state.sink.record(self.trace, &derived);
+    }
+}
+
+/// `Action=` from a captured form body, if the request is a query-protocol call.
+fn query_action(capture: &Capture, content: &Content) -> Option<String> {
+    let prefix = capture.decoded_prefix(content);
+    let form = content.content_type.as_deref() == Some("application/x-www-form-urlencoded")
+        || prefix.trim_ascii_start().starts_with(b"Action=");
+    form.then(|| wire::form_action(&prefix)).flatten()
+}
+
 async fn handle<B>(req: Request<B>, state: Arc<State>) -> Result<Response<Body>, Infallible>
 where
     B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    handle_inner(req, state, MAX_INSPECT_BYTES, None, true).await
-}
-
-async fn handle_peer<B>(
-    req: Request<B>,
-    state: Arc<State>,
-    peer: SocketAddr,
-    peer_loopback: bool,
-) -> Result<Response<Body>, Infallible>
-where
-    B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    handle_inner(req, state, MAX_INSPECT_BYTES, Some(peer), peer_loopback).await
-}
-
-#[cfg(test)]
-async fn handle_with_inspect_limit<B>(
-    req: Request<B>,
-    state: Arc<State>,
-    inspect_limit: usize,
-) -> Result<Response<Body>, Infallible>
-where
-    B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    handle_inner(req, state, inspect_limit, None, true).await
-}
-
-async fn handle_inner<B>(
-    req: Request<B>,
-    state: Arc<State>,
-    inspect_limit: usize,
-    peer: Option<SocketAddr>,
-    peer_loopback: bool,
-) -> Result<Response<Body>, Infallible>
-where
-    B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
-    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    if let Some(response) = lenslet_endpoint(&req, &state, peer_loopback) {
-        return Ok(response);
-    }
-    let mut req = req;
-    let mut call = Call::begin(&mut req, state, peer);
-    let (mut parts, body) = req.into_parts();
-    let Some(forward_path) = prepare_forward(&mut parts.headers, &call) else {
+    let (mut call, mut parts, body) = Call::begin(req, &state);
+    let Some(forward_path) = prepare_forward(&mut parts.headers, &call.trace) else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             "invalid request path",
         ));
     };
-    let gated = match call.gate(body, inspect_limit).await {
-        Ok(gated) => gated,
-        Err(response) => return Ok(response),
-    };
-    let target_base = call.state.upstream_for(&call.service).to_string();
-    call.trace.upstream = Some(target_base.clone());
-    call.state.trace.start(&call.trace.id);
-    let finished = Arc::new(AtomicBool::new(false));
-    call.record_pending_after_a_while(finished.clone());
-    let upstream_uri = format!("{target_base}{forward_path}");
-    match forward(&call.state, parts, upstream_uri, gated.body).await {
-        Ok(exchange) => Ok(call.respond(exchange, gated.derivation, finished)),
-        Err(detail) => {
-            finished.store(true, Ordering::SeqCst);
-            Ok(call.upstream_failed(&target_base, detail, gated.derivation))
-        }
-    }
-}
-
-/// One proxied call while it is being handled: its trace entry so far and
-/// what is needed to finish it.
-struct Call {
-    state: Arc<State>,
-    trace: Trace,
-    started: Instant,
-    service: String,
-    access_key_id: Option<String>,
-    /// Operation advertised by the wire protocol (see [`Pending`]).
-    advertised_operation: Option<String>,
-    request_capture: Arc<Mutex<Capture>>,
-    request_content: Content,
-}
-
-/// What derivation and the gate learned from the request body before it was
-/// forwarded.
-#[derive(Default)]
-struct Derivation {
-    /// The complete request body, read under `--enforce` (see [`Pending`]).
-    full_body: Option<trace::BodyTrace>,
-    /// A larger capture for derivation (see [`Pending`]).
-    derive_capture: Option<Arc<Mutex<Capture>>>,
-    /// The gate evaluation already made (under `--enforce`).
-    evaluation: Option<Evaluation>,
-}
-
-/// The request body to forward, and what was learned on the way.
-struct Gated {
-    body: Body,
-    derivation: Derivation,
-}
-
-/// The upstream's answer: status, protocol, headers and the body still to
-/// stream.
-type Exchange = (StatusCode, String, hyper::HeaderMap, Body);
-
-impl Call {
-    /// The trace entry for a request that has just arrived.
-    fn begin<B>(req: &mut Request<B>, state: Arc<State>, peer: Option<SocketAddr>) -> Call {
-        let started = Instant::now();
-        let client_protocol = http_version_label(req.version()).to_string();
-        let replay_of = req
-            .headers_mut()
-            .remove(REPLAY_HEADER)
-            .and_then(|value| value.to_str().ok().map(str::to_string))
-            .filter(|id| !id.is_empty());
-        let method = req.method().clone();
-        let raw_path = req
-            .uri()
-            .path_and_query()
-            .map(|path| path.as_str().to_string())
-            .unwrap_or_else(|| "/".to_string());
-        let host = req
-            .headers()
-            .get("host")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .or_else(|| req.uri().authority().map(|authority| authority.as_str()))
-            .unwrap_or("")
-            .to_string();
-        let authorization = req.headers().contains_key("authorization");
-        let wire::Wire {
-            service,
-            region,
-            access_key_id,
-            operation: advertised_operation,
-            invocation_id,
-            attempt,
-            max_attempts,
-        } = wire::wire_info(req.headers(), &raw_path);
-        let retry_attempt = attempt.filter(|n| *n > 1);
-        let retry_max = max_attempts.filter(|_| retry_attempt.is_some());
-        // A protocol-derived operation, or the method/path fallback until (and
-        // unless) the request body supplies an AWS Query `Action=...`.
-        let operation = advertised_operation.clone().unwrap_or_else(|| {
-            wire::fallback_operation(&service, method.as_str(), &raw_path, req.headers())
-        });
-        let request_content = capture::content(req.headers());
-        let request_headers = trace::headers(req.headers());
-        let request_capture = Arc::new(Mutex::new(Capture::with_blobs(
-            state.max_body,
-            state.blobs_dir.clone(),
-        )));
-        let trace = Trace {
-            id: next_id(),
-            at: Utc::now().to_rfc3339(),
-            method: method.to_string(),
-            path: raw_path,
-            host,
-            service: service.clone(),
-            operation,
-            status: 0,
-            ms: 0,
-            authorization,
-            region,
-            invocation_id,
-            attempt: retry_attempt,
-            max_attempts: retry_max,
-            pending: false,
-            error: None,
-            problem: None,
-            access: Vec::new(),
-            implied: Vec::new(),
-            new: false,
-            blocked: false,
-            blocked_phase: None,
-            replay_of,
-            caller_role: None,
-            target: None,
-            protocol: Some(client_protocol),
-            upstream_protocol: None,
-            upstream: None,
-            client_addr: peer.map(|p| p.to_string()),
-            ttfb_ms: None,
-            access_key_id: access_key_id.clone(),
-            request: Message {
-                headers: request_headers,
-                trailers: Vec::new(),
-                content_type: request_content.content_type.clone(),
-                raw_content_type: request_content.raw_content_type.clone(),
+    let uri = format!("{}{forward_path}", state.upstream);
+    match forward(&state, parts, uri, body).await {
+        Ok((status, mut headers, response_body)) => {
+            let content = capture::content(&headers);
+            call.trace.status = status.as_u16();
+            call.trace.response = Message {
+                headers: trace::headers(&headers),
+                content_type: content.content_type.clone(),
                 body: None,
-            },
-            response: Message::default(),
-        };
-        Call {
-            state,
-            trace,
-            started,
-            service,
-            access_key_id,
-            advertised_operation,
-            request_capture,
-            request_content,
+            };
+            strip_hop_by_hop(&mut headers);
+            let capture = Arc::new(Mutex::new(Capture::new(trace::MAX_BODY_TEXT)));
+            let tee_capture = capture.clone();
+            // The call is recorded when the response body ends (or the
+            // client goes away), so `ms` covers the whole exchange.
+            let body = TeeBody::new(response_body, tee_capture)
+                .on_end(move || call.finish(Some((&capture, &content))))
+                .boxed();
+            let mut out = Response::new(body);
+            *out.status_mut() = status;
+            *out.headers_mut() = headers;
+            Ok(out)
         }
-    }
-
-    /// Record this call as blocked by the gate and answer with AWS's
-    /// `AccessDenied`.
-    fn block(self, evaluation: Evaluation, denied: &Denial, phase: BlockedPhase) -> Response<Body> {
-        let gate = self
-            .state
-            .trace
-            .gate()
-            .expect("a call is blocked only by a gate");
-        reject_blocked(
-            self.trace,
-            self.access_key_id.as_deref(),
-            evaluation,
-            denied,
-            gate,
-            &self.state,
-            self.started,
-            phase,
-        )
-    }
-
-    /// Wrap the request body for forwarding. Under `--enforce`, evaluate the
-    /// call first (reading ahead in the body when it names the resource) and
-    /// answer a denied call here: `Err` is that response.
-    async fn gate<B>(&mut self, mut body: B, inspect_limit: usize) -> Result<Gated, Response<Body>>
-    where
-        B: hyper::body::Body<Data = Bytes> + Send + Sync + Unpin + 'static,
-        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
-        // Does this call name its resource (or a role or key) in its body? Then
-        // derivation reads up to `inspect_limit` of it, whatever `--max-body` is.
-        let needs_body = access::needs_request_body(
-            &self.service,
-            self.advertised_operation.as_deref(),
-            &self.trace.operation,
-            &self.trace.path,
-        );
-        let enforcing = self.state.enforce && self.state.trace.gate().is_some();
-        let mut derivation = Derivation::default();
-        let body = if enforcing && needs_body {
-            let collected = collect_bounded(&mut body, inspect_limit)
-                .await
-                .map_err(|detail| error_response(StatusCode::BAD_REQUEST, &detail))?;
-            self.feed_request(&collected.data, collected.trailers.as_ref());
-            let inspect = Mutex::new(Capture::with_limit(inspect_limit));
-            if let Ok(mut capture) = inspect.lock() {
-                capture.feed(&collected.data);
-            }
-            resolve_operation(
-                &mut self.trace,
-                self.advertised_operation.as_deref(),
-                &inspect,
-                &self.request_content,
-            );
-            // A body longer than the inspection limit is read as truncated:
-            // what it names past the limit stands as `*`.
-            derivation.full_body = snapshot(&inspect, &self.request_content).map(|mut body| {
-                body.truncated |= !collected.complete;
-                body
-            });
-            let checked = with_body(&mut self.trace, &mut derivation.full_body, |trace| {
-                self.state.trace.evaluate(trace)
-            });
-            if let Some(denied) = checked.denied.first().cloned() {
-                self.state.trace.start(&self.trace.id);
-                return Err(self.take().block(checked, &denied, BlockedPhase::Request));
-            }
-            derivation.evaluation = Some(checked);
-            let rest =
-                (!collected.complete).then(|| TeeBody::new(body, self.request_capture.clone()));
-            ReadAhead {
-                data: Some(collected.data),
-                trailers: collected.trailers,
-                rest,
-            }
-            .map_err(|error| std::io::Error::other(error.into()))
-            .boxed()
-        } else if enforcing {
-            let checked = self.state.trace.evaluate(&self.trace);
-            if let Some(denied) = checked.denied.first().cloned() {
-                // Drain what the client is still sending, briefly, so it
-                // reads the `AccessDenied` instead of a reset.
-                if let Ok(Ok(drained)) =
-                    tokio::time::timeout(DRAIN_TIME, collect_bounded(&mut body, DRAIN_BYTES)).await
-                    && drained.complete
-                {
-                    self.feed_request(&drained.data, None);
-                }
-                self.state.trace.start(&self.trace.id);
-                return Err(self.take().block(checked, &denied, BlockedPhase::Request));
-            }
-            derivation.evaluation = Some(checked);
-            TeeBody::new(body, self.request_capture.clone())
-                .map_err(|error| std::io::Error::other(error.into()))
-                .boxed()
-        } else if needs_body && self.state.max_body < inspect_limit {
-            let capture = Arc::new(Mutex::new(Capture::with_limit(inspect_limit)));
-            derivation.derive_capture = Some(capture.clone());
-            TeeBody::new(TeeBody::new(body, self.request_capture.clone()), capture)
-                .map_err(|error| std::io::Error::other(error.into()))
-                .boxed()
-        } else {
-            TeeBody::new(body, self.request_capture.clone())
-                .map_err(|error| std::io::Error::other(error.into()))
-                .boxed()
-        };
-        Ok(Gated { body, derivation })
-    }
-
-    /// Feed bytes read ahead into the trace capture and refresh the trace's
-    /// request body from it.
-    fn feed_request(&mut self, data: &[u8], trailers: Option<&hyper::HeaderMap>) {
-        if let Ok(mut capture) = self.request_capture.lock() {
-            capture.feed(data);
-            if let Some(trailers) = trailers {
-                capture.feed_trailers(trailers);
-            }
+        Err(detail) => {
+            call.trace.status = StatusCode::BAD_GATEWAY.as_u16();
+            call.trace.problem = Some(problem::unreachable(&state.upstream, &detail));
+            call.trace.error = Some(detail);
+            call.finish(None);
+            Ok(error_response(StatusCode::BAD_GATEWAY, "upstream error"))
         }
-        self.trace.request.body = snapshot(&self.request_capture, &self.request_content);
-        self.trace.request.trailers =
-            snapshot_trailers(&self.request_capture, &self.request_content);
-    }
-
-    /// Move the call out of `&mut self` (to block it from inside `gate`).
-    fn take(&mut self) -> Call {
-        Call {
-            state: self.state.clone(),
-            trace: std::mem::take(&mut self.trace),
-            started: self.started,
-            service: std::mem::take(&mut self.service),
-            access_key_id: self.access_key_id.take(),
-            advertised_operation: self.advertised_operation.take(),
-            request_capture: self.request_capture.clone(),
-            request_content: self.request_content.clone(),
-        }
-    }
-
-    /// A slow call (long poll, large transfer, a hung emulator) shows up as
-    /// pending—with its full request headers and captured body—instead of
-    /// being invisible until it ends.
-    fn record_pending_after_a_while(&self, finished: Arc<AtomicBool>) {
-        let state = self.state.clone();
-        let capture = self.request_capture.clone();
-        let content = self.request_content.clone();
-        let advertised = self.advertised_operation.clone();
-        let mut pending = Trace {
-            pending: true,
-            ..self.trace.clone()
-        };
-        tokio::spawn(async move {
-            tokio::time::sleep(PENDING_AFTER).await;
-            if !finished.load(Ordering::SeqCst) {
-                pending.request.body = snapshot(&capture, &content);
-                resolve_operation(&mut pending, advertised.as_deref(), &capture, &content);
-                state.trace.record_pending(&pending);
-            }
-        });
-    }
-
-    /// Return the upstream's response to the client; the trace entry is
-    /// written when its body ends.
-    fn respond(
-        mut self,
-        exchange: Exchange,
-        mut derivation: Derivation,
-        finished: Arc<AtomicBool>,
-    ) -> Response<Body> {
-        let (status, resp_proto, mut headers, resp_body) = exchange;
-        let response_content = capture::content(&headers);
-        self.trace.status = status.as_u16();
-        self.trace.ttfb_ms = Some(self.started.elapsed().as_millis() as u64);
-        self.trace.upstream_protocol = Some(resp_proto);
-        self.trace.response = Message {
-            headers: trace::headers(&headers),
-            trailers: Vec::new(),
-            content_type: response_content.content_type.clone(),
-            raw_content_type: response_content.raw_content_type.clone(),
-            body: None,
-        };
-        strip_hop_by_hop(&mut headers);
-
-        // Only an S3 response reveals more access (the SSE-KMS key of the
-        // object read or written): check it before returning the payload.
-        // The emulator has run the call by now.
-        if self.state.enforce && self.state.trace.gate().is_some() && self.service == "s3" {
-            let checked = with_body(&mut self.trace, &mut derivation.full_body, |trace| {
-                self.state.trace.evaluate(trace)
-            });
-            if let Some(denied) = checked.denied.first().cloned() {
-                finished.store(true, Ordering::SeqCst);
-                drop(resp_body);
-                self.trace.request.body = snapshot(&self.request_capture, &self.request_content);
-                return self.block(checked, &denied, BlockedPhase::Response);
-            }
-            derivation.evaluation = Some(checked);
-        }
-
-        let response_capture = Arc::new(Mutex::new(Capture::with_blobs(
-            self.state.max_body,
-            self.state.blobs_dir.clone(),
-        )));
-        let pending = Pending {
-            state: self.state,
-            trace: self.trace,
-            access_key_id: self.access_key_id,
-            started: self.started,
-            finished,
-            advertised_operation: self.advertised_operation,
-            request_capture: self.request_capture,
-            request_content: self.request_content,
-            full_body: derivation.full_body,
-            derive_capture: derivation.derive_capture,
-            evaluation: derivation.evaluation,
-            response_capture: response_capture.clone(),
-            response_content,
-        };
-        // The trace entry is written when the response body ends (or the
-        // client goes away), so `ms` covers the whole exchange:
-        let body = TeeBody::new(resp_body, response_capture)
-            .on_end(move || pending.finish())
-            .boxed();
-        let mut out = Response::new(body);
-        *out.status_mut() = status;
-        *out.headers_mut() = headers;
-        out
-    }
-
-    /// Record a call the upstream never answered, and answer `502`.
-    fn upstream_failed(
-        mut self,
-        target_base: &str,
-        detail: String,
-        derivation: Derivation,
-    ) -> Response<Body> {
-        let trace = &mut self.trace;
-        trace.status = StatusCode::BAD_GATEWAY.as_u16();
-        trace.ms = self.started.elapsed().as_millis() as u64;
-        trace.problem = Some(problem::unreachable(target_base, &detail));
-        trace.error = Some(detail);
-        trace.request.body = snapshot(&self.request_capture, &self.request_content);
-        trace.request.trailers = snapshot_trailers(&self.request_capture, &self.request_content);
-        let operation_capture = derivation
-            .derive_capture
-            .as_deref()
-            .unwrap_or(&self.request_capture);
-        resolve_operation(
-            trace,
-            self.advertised_operation.as_deref(),
-            operation_capture,
-            &self.request_content,
-        );
-        let evaluation = derivation.evaluation.unwrap_or_else(|| {
-            let mut full = derivation
-                .derive_capture
-                .as_deref()
-                .and_then(|capture| snapshot(capture, &self.request_content));
-            with_body(trace, &mut full, |trace| self.state.trace.evaluate(trace))
-        });
-        self.state
-            .trace
-            .record_with_key(self.trace, self.access_key_id.as_deref(), evaluation);
-        error_response(StatusCode::BAD_GATEWAY, "upstream error")
     }
 }
 
 /// Make the request's headers ready to forward, and return the path to
 /// forward to (`None` for a path Lenslet cannot forward).
-fn prepare_forward(headers: &mut hyper::HeaderMap, call: &Call) -> Option<String> {
+fn prepare_forward(headers: &mut hyper::HeaderMap, trace: &Trace) -> Option<String> {
     strip_hop_by_hop(headers);
     // HTTP/2 `h2c` clients send `:authority` in the URI instead of a `Host`
     // header; populate `Host` so HTTP/1.1 emulators validate SigV4 signatures.
-    let host = &call.trace.host;
     if !headers.contains_key(header::HOST)
-        && !host.is_empty()
-        && let Ok(value) = header::HeaderValue::from_str(host)
+        && !trace.host.is_empty()
+        && let Ok(value) = header::HeaderValue::from_str(&trace.host)
     {
         headers.insert(header::HOST, value);
     }
-    let raw_path = &call.trace.path;
-    if raw_path.starts_with('/') {
-        Some(raw_path.clone())
-    } else if raw_path == "*" {
+    if trace.path.starts_with('/') {
+        Some(trace.path.clone())
+    } else if trace.path == "*" {
         Some("/".to_string())
     } else {
-        // Authority-form or bare paths lacking a leading `/`.
         None
     }
 }
@@ -1266,7 +609,7 @@ async fn forward(
     parts: hyper::http::request::Parts,
     uri: String,
     body: Body,
-) -> Result<Exchange, String> {
+) -> Result<(StatusCode, hyper::HeaderMap, Body), String> {
     let mut upstream = Request::builder()
         .method(parts.method)
         .uri(uri)
@@ -1279,160 +622,11 @@ async fn forward(
         .await
         .map(|response| {
             let status = response.status();
-            let proto = http_version_label(response.version()).to_string();
             let headers = response.headers().clone();
             let body = response.into_body().map_err(std::io::Error::other).boxed();
-            (status, proto, headers, body)
+            (status, headers, body)
         })
         .map_err(|e| error_chain(&e))
-}
-
-/// `GET /_lenslet/events`, `GET /_lenslet/health`, and
-/// `POST /_lenslet/shutdown`: Lenslet's own endpoints on the proxy address,
-/// for loopback peers only. They never go upstream and are never recorded.
-fn lenslet_endpoint<B>(
-    req: &Request<B>,
-    state: &Arc<State>,
-    peer_loopback: bool,
-) -> Option<Response<Body>> {
-    // The event stream carries every header and body (credentials
-    // included): Lenslet's own endpoints answer this machine only, also
-    // under `--allow-docker`.
-    if req.uri().path().starts_with("/_lenslet/") && !peer_loopback {
-        return Some(error_response(
-            StatusCode::FORBIDDEN,
-            "Lenslet's own endpoints answer loopback peers only",
-        ));
-    }
-    if req.method() == hyper::Method::POST && req.uri().path() == "/_lenslet/shutdown" {
-        state.shutdown_req.notify_one();
-        let mut response = Response::new(
-            Full::new(Bytes::from_static(br#"{"stopping":true}"#))
-                .map_err(|never| match never {})
-                .boxed(),
-        );
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-        return Some(response);
-    }
-    if req.method() != hyper::Method::GET {
-        return None;
-    }
-    match req.uri().path() {
-        "/_lenslet/health" => {
-            let (calls, errors, blocked) = state.trace.live_counts();
-            let body = serde_json::json!({
-                "run": state.trace.run(),
-                "pid": std::process::id(),
-                "endpoint": state.endpoint,
-                "upstream": state.upstream,
-                "routes": state.routes,
-                "enforce": state.enforce,
-                "calls": calls,
-                "errors": errors,
-                "blocked": blocked,
-            })
-            .to_string();
-            let mut response = Response::new(
-                Full::new(Bytes::from(body))
-                    .map_err(|never| match never {})
-                    .boxed(),
-            );
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("application/json"),
-            );
-            Some(response)
-        }
-        "/_lenslet/events" => {
-            let (sender, receiver) = tokio::sync::mpsc::channel(64);
-            tokio::spawn(stream_events(state.trace.clone(), sender));
-            let mut response = Response::new(ChannelBody(receiver).boxed());
-            let headers = response.headers_mut();
-            headers.insert(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("text/event-stream"),
-            );
-            headers.insert(
-                header::CACHE_CONTROL,
-                header::HeaderValue::from_static("no-cache"),
-            );
-            Some(response)
-        }
-        _ => None,
-    }
-}
-
-/// Server-sent events for one client: every line of the run file in order,
-/// from the first, then each new one as it is written, as `data: <line>`;
-/// the stream ends after the `end` line. The file is the one source of
-/// truth, so the backlog and the live tail can neither miss nor repeat a
-/// line: the sink signals after each write and the stream reads on from
-/// where it was.
-async fn stream_events(sink: Arc<TraceSink>, sender: tokio::sync::mpsc::Sender<Bytes>) {
-    use tokio::io::AsyncReadExt as _;
-    let mut written = sink.subscribe();
-    let Ok(mut file) = tokio::fs::File::open(sink.path()).await else {
-        return;
-    };
-    let mut partial: Vec<u8> = Vec::new();
-    loop {
-        // Mark the signal seen before reading: a write after this point
-        // wakes the wait below.
-        written.borrow_and_update();
-        if file.read_to_end(&mut partial).await.is_err() {
-            return;
-        }
-        let mut start = 0;
-        while let Some(newline) = partial[start..].iter().position(|byte| *byte == b'\n') {
-            let line = &partial[start..start + newline];
-            start += newline + 1;
-            let mut event = Vec::with_capacity(line.len() + 8);
-            event.extend_from_slice(b"data: ");
-            event.extend_from_slice(line);
-            event.extend_from_slice(b"\n\n");
-            if sender.send(Bytes::from(event)).await.is_err() {
-                return;
-            }
-            if line.starts_with(br#"{"type":"end""#) {
-                return;
-            }
-        }
-        partial.drain(..start);
-        tokio::select! {
-            changed = written.changed() => {
-                if changed.is_err() {
-                    // The sink is gone: nothing more will be written.
-                    return;
-                }
-            }
-            () = tokio::time::sleep(KEEPALIVE) => {
-                if sender.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
-                    return;
-                }
-            }
-        }
-    }
-}
-
-/// A response body fed by a channel, one data frame per message.
-struct ChannelBody(tokio::sync::mpsc::Receiver<Bytes>);
-
-impl hyper::body::Body for ChannelBody {
-    type Data = Bytes;
-    type Error = std::io::Error;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
-        self.get_mut()
-            .0
-            .poll_recv(cx)
-            .map(|next| next.map(|data| Ok(hyper::body::Frame::data(data))))
-    }
 }
 
 /// `client error (Connect): tcp connect error: Connection refused` instead of
@@ -1449,91 +643,6 @@ fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     text
-}
-
-/// Record a blocked call in the trace and return a protocol-accurate AWS
-/// `AccessDenied` / `AccessDeniedException` response.
-#[allow(clippy::too_many_arguments)]
-fn reject_blocked(
-    mut trace: Trace,
-    access_key_id: Option<&str>,
-    evaluation: Evaluation,
-    denied: &Denial,
-    gate: &Gate,
-    state: &State,
-    started: Instant,
-    phase: BlockedPhase,
-) -> Response<Body> {
-    let wire = problem::blocked(
-        &trace.service,
-        &trace.request.headers,
-        trace.request.content_type.as_deref(),
-        denied,
-        &gate.label,
-        &trace.id,
-    );
-    let mut resp_headers = hyper::HeaderMap::new();
-    resp_headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(wire.content_type),
-    );
-    for (name, value) in &wire.headers {
-        if let (Ok(hname), Ok(hval)) = (
-            header::HeaderName::from_bytes(name.as_bytes()),
-            header::HeaderValue::from_str(value),
-        ) {
-            resp_headers.insert(hname, hval);
-        }
-    }
-    let body_bytes = wire.body.as_bytes();
-    let sha256 = {
-        use sha2::{Digest, Sha256};
-        capture::hex(&Sha256::digest(body_bytes))
-    };
-    trace.status = wire.status;
-    trace.ms = started.elapsed().as_millis() as u64;
-    trace.blocked = true;
-    trace.blocked_phase = Some(phase);
-    trace.problem = Some(wire.problem);
-    trace.response = Message {
-        headers: trace::headers(&resp_headers),
-        content_type: Some(
-            wire.content_type
-                .split(';')
-                .next()
-                .unwrap_or(wire.content_type)
-                .to_string(),
-        ),
-        raw_content_type: wire
-            .content_type
-            .contains(';')
-            .then(|| wire.content_type.to_string()),
-        trailers: Vec::new(),
-        body: Some(trace::BodyTrace {
-            text: Some(wire.body.clone()),
-            hex: None,
-            raw_b64: None,
-            blob: None,
-            encoding: None,
-            bytes: body_bytes.len() as u64,
-            decoded_bytes: None,
-            truncated: false,
-            binary: false,
-            sha256,
-        }),
-    };
-    state
-        .trace
-        .record_with_key(trace, access_key_id, evaluation);
-
-    let mut response = Response::new(
-        Full::new(Bytes::from(wire.body))
-            .map_err(|never| match never {})
-            .boxed(),
-    );
-    *response.status_mut() = StatusCode::from_u16(wire.status).unwrap_or(StatusCode::FORBIDDEN);
-    *response.headers_mut() = resp_headers;
-    response
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
@@ -1559,25 +668,24 @@ pub struct Server {
 }
 
 impl Server {
-    /// Validate everything, bind loopback (IPv4 + best-effort IPv6 so
-    /// `localhost` works on either stack), write the run header, and start
-    /// serving in the background.
+    /// Validate everything, bind a free loopback port (IPv4 + best-effort
+    /// IPv6 so `localhost` works on either stack), write the run header, and
+    /// start serving in the background. `locked` is the lock's lines, when
+    /// there is a lock.
     pub async fn start(
         options: &Options,
         trace_path: PathBuf,
         mut header: RunHeader,
-        gate: Option<Gate>,
+        locked: Option<std::collections::BTreeSet<Access>>,
     ) -> Result<Server> {
-        options.validate()?;
+        options.upstream.ensure_local_boundary("--upstream")?;
         // rustls needs a crypto provider before any TLS config is built.
         rustls::crypto::ring::default_provider()
             .install_default()
             .ok();
-        // Read and validate everything before creating any files.
         let roots = if options.upstream.tls {
             emulator_roots(&options.emulator_ca())?
         } else {
-            // Plain-HTTP upstreams need no TLS CA.
             RootCertStore::empty()
         };
         let bind_v4 = if options.allow_docker {
@@ -1585,38 +693,28 @@ impl Server {
         } else {
             IpAddr::from([127, 0, 0, 1])
         };
-        let listener = TcpListener::bind((bind_v4, options.listen))
+        let listener = TcpListener::bind((bind_v4, 0))
             .await
-            .with_context(|| format!("bind {bind_v4}:{}", options.listen))?;
-        let local = listener.local_addr().context("read the bound address")?;
-        // Always advertise `127.0.0.1:PORT` for host processes; Docker containers
-        // reach `0.0.0.0:PORT` via `host.docker.internal` or `172.17.0.1`.
-        let addr = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), local.port());
-        let v6_listener = TcpListener::bind((IpAddr::V6(Ipv6Addr::LOCALHOST), addr.port()))
+            .with_context(|| format!("bind {bind_v4}"))?;
+        let port = listener
+            .local_addr()
+            .context("read the bound address")?
+            .port();
+        // Host processes use `127.0.0.1:PORT`; Docker containers reach
+        // `0.0.0.0:PORT` via `host.docker.internal` or `172.17.0.1`.
+        let addr = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port);
+        let v6_listener = TcpListener::bind((IpAddr::V6(Ipv6Addr::LOCALHOST), port))
             .await
             .ok();
-        let endpoint = format!("http://{addr}");
-        let upstream_base = options.upstream.base.clone();
-        header.endpoint = endpoint.clone();
-        header.upstream = upstream_base.clone();
-        let routes: BTreeMap<String, String> = options
-            .routes
-            .iter()
-            .map(|(svc, up)| (svc.clone(), up.base.clone()))
-            .collect();
-        let blobs_dir = (options.max_body > 0).then(|| lenslet_core::runs::blobs_dir(&trace_path));
-        let trace = Arc::new(TraceSink::new(trace_path, &header, gate)?);
+        header.endpoint = format!("http://{addr}");
+        header.upstream = options.upstream.base.clone();
+        let sink = Arc::new(TraceSink::new(trace_path, &header, locked)?);
         let state = Arc::new(State {
             client: client(roots),
-            upstream: upstream_base,
-            routes,
-            endpoint,
+            upstream: options.upstream.base.clone(),
             allow_docker: options.allow_docker,
-            max_body: options.max_body,
-            enforce: options.enforce,
-            blobs_dir,
-            trace,
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
+            sink,
+            in_flight: AtomicUsize::new(0),
         });
         let shutdown = watch::Sender::new(false);
         let tasks = std::iter::once(listener)
@@ -1636,18 +734,12 @@ impl Server {
         format!("http://{}", self.addr)
     }
 
-    /// Notified when a loopback peer calls `POST /_lenslet/shutdown`.
-    pub fn shutdown_requested(&self) -> Arc<tokio::sync::Notify> {
-        self.state.shutdown_req.clone()
-    }
-
     /// Give in-flight calls up to `grace` to finish, then stop accepting
-    /// connections and close idle ones. Requests already being served go on
-    /// (a call that finishes after the run is sealed is not recorded; a live
-    /// event stream ends after the `end` line).
+    /// connections and close idle ones. A call that finishes after the run
+    /// is sealed is not recorded.
     pub async fn stop(&self, grace: Duration) {
         let deadline = Instant::now() + grace;
-        while self.state.trace.unfinished() > 0 && Instant::now() < deadline {
+        while self.state.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         self.shutdown.send_replace(true);
@@ -1679,13 +771,7 @@ async fn serve(listener: TcpListener, state: Arc<State>, mut shutdown: watch::Re
                         drop(stream);
                         continue;
                     }
-                    connections.spawn(serve_connection(
-                        stream,
-                        peer,
-                        is_loopback_ip(peer.ip()),
-                        state.clone(),
-                        shutdown.clone(),
-                    ));
+                    connections.spawn(serve_connection(stream, state.clone(), shutdown.clone()));
                 }
             }
             () = stopped(&mut shutdown) => break,
@@ -1703,12 +789,10 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
 
 async fn serve_connection(
     stream: TcpStream,
-    peer: SocketAddr,
-    peer_loopback: bool,
     state: Arc<State>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let service = service_fn(move |req| handle_peer(req, state.clone(), peer, peer_loopback));
+    let service = service_fn(move |req| handle(req, state.clone()));
     let mut builder = conn_auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
@@ -1735,17 +819,11 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::Access;
-    use crate::capture::MAX_CAPTURE_BYTES;
-    use http_body_util::BodyExt;
     use hyper::{HeaderMap, body::Incoming};
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
     fn options(arguments: &[&str]) -> Result<Options> {
-        let mut options = Options::new(Path::new("/home/tester"), 9297);
+        let mut options = Options::new(Path::new("/home/tester"));
         let mut it = arguments.iter().map(|argument| argument.to_string());
         while let Some(arg) = it.next() {
             let mut value = || it.next().context("needs a value");
@@ -1753,49 +831,106 @@ mod tests {
                 bail!("unknown {arg}");
             }
         }
-        options.validate()?;
         Ok(options)
     }
 
     #[test]
-    fn validates_ports_and_upstream_addresses() {
-        let parsed = options(&["--listen", "9300", "--upstream", "9400"]).unwrap();
-        assert_eq!(parsed.listen, 9300);
+    fn validates_upstream_addresses_and_emulator_choices() {
+        let parsed = options(&["--upstream", "9400"]).unwrap();
         assert_eq!(parsed.upstream.base, "https://127.0.0.1:9400");
         assert_eq!(
             parsed.emulator_ca(),
             PathBuf::from("/home/tester/.aws/emulator/9400/ca.pem"),
             "the emulator CA follows the upstream port"
         );
-        assert!(options(&["--listen", "not-a-port"]).is_err());
-        assert!(options(&["--listen", "9297", "--upstream", "9297"]).is_err());
         assert!(options(&["--upstream", "0"]).is_err());
         assert!(options(&["--upstream", "ftp://127.0.0.1:21"]).is_err());
         assert!(options(&["--upstream", "https://127.0.0.1"]).is_err());
-        assert!(options(&["--listen"]).is_err());
-
         let plain = options(&["--upstream", "http://127.0.0.1:8080"]).unwrap();
-        assert_eq!(plain.upstream.base, "http://127.0.0.1:8080");
-        assert_eq!(plain.upstream.port, 8080);
         assert!(!plain.upstream.tls);
+        assert!(options(&["--emulator", "moto"]).unwrap().managed);
+        assert!(options(&["--emulator", "localstack"]).is_err());
+        assert!(options(&["--emulator", "moto", "--upstream", "4566"]).is_err());
+        assert!(options(&["--upstream", "4566", "--emulator", "moto"]).is_err());
+        for removed in [
+            "--sandbox",
+            "--listen",
+            "--route",
+            "--max-body",
+            "--enforce",
+        ] {
+            assert!(options(&[removed, "x"]).is_err(), "{removed}");
+        }
+        for removed in ["sandbox", "built-in"] {
+            assert!(options(&["--upstream", removed]).is_err(), "{removed}");
+        }
+    }
+
+    #[test]
+    fn the_local_boundary_resolves_names_and_rejects_public_and_aws_hosts() {
+        for ok in [
+            "http://localhost:4566",
+            "http://127.0.0.1:4566",
+            "http://[::1]:4566",
+            "http://172.17.0.1:4566",
+            "http://10.1.2.3:4566",
+        ] {
+            assert!(options(&["--upstream", ok]).is_ok(), "{ok}");
+        }
+        for aws in [
+            "https://s3.amazonaws.com:443",
+            "https://s3.amazonaws.com.:443",
+            "https://sts.cn-north-1.amazonaws.com.cn:443",
+            "https://bedrock.us-east-1.api.aws:443",
+        ] {
+            let error = options(&["--upstream", aws]).err().unwrap().to_string();
+            assert!(error.contains("real AWS"), "{aws}: {error}");
+        }
+        for public in [
+            "http://8.8.8.8:80",
+            "http://[2606:4700::1111]:80",
+            "http://0.0.0.0:80",
+        ] {
+            let error = options(&["--upstream", public]).err().unwrap().to_string();
+            assert!(
+                error.contains("not loopback or a private network"),
+                "{public}: {error}"
+            );
+        }
+        assert!(options(&["--upstream", "http://lenslet-no-such-host.invalid:80"]).is_err());
+    }
+
+    #[test]
+    fn allow_docker_serves_loopback_and_docker_networks_only() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        for loopback in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            assert!(peer_allowed(ip(loopback), false), "{loopback}");
+        }
+        for docker in ["172.17.0.2", "172.31.255.254", "192.168.65.3"] {
+            assert!(!peer_allowed(ip(docker), false), "{docker}");
+            assert!(peer_allowed(ip(docker), true), "{docker}");
+        }
+        for lan in [
+            "192.168.1.20",
+            "10.0.0.7",
+            "172.32.0.1",
+            "8.8.8.8",
+            "fd00::1",
+        ] {
+            assert!(!peer_allowed(ip(lan), true), "{lan}");
+        }
     }
 
     struct TempDir(PathBuf);
 
     impl TempDir {
         fn new(tag: &str) -> Self {
-            use std::sync::atomic::AtomicUsize;
             static SEQ: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "lenslet-proxy-{tag}-{}-{}-{}",
+            TempDir(std::env::temp_dir().join(format!(
+                "lenslet-proxy-{tag}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
                 SEQ.fetch_add(1, Ordering::Relaxed),
-            ));
-            TempDir(path)
+            )))
         }
 
         fn trace(&self) -> PathBuf {
@@ -1810,7 +945,8 @@ mod tests {
     }
 
     /// A plain-HTTP upstream that records what it received and answers with
-    /// JSON, or with 100 KiB of text when the path ends in `/big`.
+    /// JSON, a 404 for paths ending in `/missing`, or more than 1 MiB of
+    /// text for `/big`.
     async fn spawn_upstream() -> (u16, mpsc::Receiver<(HeaderMap, Bytes)>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1827,51 +963,39 @@ mod tests {
                         async move {
                             let (parts, body) = req.into_parts();
                             let path = parts.uri.path().to_string();
-                            let big = path.ends_with("/big");
-                            if path.ends_with("/slow") {
-                                tokio::time::sleep(Duration::from_millis(1400)).await;
-                            }
                             let received = body
                                 .collect()
                                 .await
                                 .map(|collected| collected.to_bytes())
                                 .unwrap_or_default();
                             let _ = tx.send((parts.headers, received)).await;
-                            if path.ends_with("/missing") {
-                                return Ok::<_, Infallible>(
-                                    Response::builder()
-                                        .status(StatusCode::NOT_FOUND)
-                                        .header("content-type", "application/xml")
-                                        .body(Full::new(Bytes::from_static(
-                                            b"<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>",
-                                        )))
-                                        .unwrap(),
-                                );
-                            }
-                            let (content_type, body) = if big {
-                                ("text/plain", "x".repeat(MAX_CAPTURE_BYTES + 36 * 1024))
+                            let (status, content_type, body) = if path.ends_with("/missing") {
+                                (
+                                    StatusCode::NOT_FOUND,
+                                    "application/xml",
+                                    "<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>".to_string(),
+                                )
+                            } else if path.ends_with("/big") {
+                                (
+                                    StatusCode::OK,
+                                    "text/plain",
+                                    "x".repeat(trace::MAX_BODY_TEXT + 10),
+                                )
                             } else {
                                 (
+                                    StatusCode::OK,
                                     "application/json",
-                                    r#"{"ok":true,"Secret":"s3cr3t-value"}"#.to_string(),
+                                    r#"{"ok":true}"#.to_string(),
                                 )
                             };
-                            let mut response = Response::builder()
-                                .status(StatusCode::OK)
-                                .header("content-type", content_type)
-                                .header("x-request-id", "upstream-1")
-                                .header("connection", "keep-alive")
-                                .header("keep-alive", "timeout=5");
-                            if path.ends_with("/kms") {
-                                response = response
-                                    .header("x-amz-server-side-encryption", "aws:kms")
-                                    .header(
-                                        "x-amz-server-side-encryption-aws-kms-key-id",
-                                        "arn:aws:kms:us-east-1:000000000000:key/vault",
-                                    );
-                            }
                             Ok::<_, Infallible>(
-                                response.body(Full::new(Bytes::from(body))).unwrap(),
+                                Response::builder()
+                                    .status(status)
+                                    .header("content-type", content_type)
+                                    .header("connection", "keep-alive")
+                                    .header("keep-alive", "timeout=5")
+                                    .body(Full::new(Bytes::from(body)))
+                                    .unwrap(),
                             )
                         }
                     });
@@ -1884,62 +1008,12 @@ mod tests {
         (port, rx)
     }
 
-    fn state(upstream: &str, trace: PathBuf) -> Arc<State> {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: upstream.to_string(),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: MAX_CAPTURE_BYTES,
-            enforce: false,
-            blobs_dir: None,
-            trace: Arc::new(TraceSink::new(trace, &RunHeader::default(), None).unwrap()),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        })
-    }
-
-    fn sdk_request(method: &str, uri: &str, body: &'static [u8]) -> Request<Full<Bytes>> {
-        Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
-            )
-            .header("x-amz-security-token", "SESSIONTOKEN123")
-            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from_static(body)))
+    async fn server(upstream: u16, temp: &TempDir) -> Server {
+        let mut options = Options::new(&temp.0);
+        options.upstream = Upstream::parse(&format!("http://127.0.0.1:{upstream}")).unwrap();
+        Server::start(&options, temp.trace(), RunHeader::default(), None)
+            .await
             .unwrap()
-    }
-
-    /// An AWS Query protocol request: form body, no `x-amz-target`, no `x-id`.
-    fn query_request(
-        uri: &str,
-        service: &str,
-        target: Option<&str>,
-        body: &'static [u8],
-    ) -> Request<Full<Bytes>> {
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                format!(
-                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261115/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=deadbeef"
-                ),
-            )
-            .header("content-type", "application/x-www-form-urlencoded");
-        if let Some(target) = target {
-            builder = builder.header("x-amz-target", target);
-        }
-        builder.body(Full::new(Bytes::from_static(body))).unwrap()
     }
 
     fn traces(path: &Path) -> Vec<Trace> {
@@ -1953,1502 +1027,244 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn proxies_bodies_intact_and_traces_raw_copies() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("bodies");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-
-        let request_body = br#"{"password":"hunter2","name":"lenslet"}"#;
-        let request = sdk_request(
-            "PUT",
-            "/bucket/key?x-id=PutObject&X-Amz-Signature=deadbeef",
-            request_body,
-        );
-        let response = handle(request, state.clone()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // The entry is written after the response body completes, not at headers.
-        assert!(
-            traces(&trace_path).is_empty(),
-            "trace must wait for the response body"
-        );
-
-        let response_body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            response_body.as_ref(),
-            br#"{"ok":true,"Secret":"s3cr3t-value"}"#,
-            "response forwarding is byte exact"
-        );
-
-        let (headers, forwarded) = upstream.recv().await.expect("upstream received the call");
-        assert_eq!(
-            forwarded.as_ref(),
-            request_body,
-            "request body is byte exact"
-        );
-        assert_eq!(
-            headers.get("authorization").unwrap(),
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef",
-            "SigV4 headers are forwarded verbatim"
-        );
-        assert_eq!(headers.get("host").unwrap(), "127.0.0.1:9297");
-        assert_eq!(
-            headers.get("x-amz-content-sha256").unwrap(),
-            "UNSIGNED-PAYLOAD"
-        );
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 1);
-        let trace = &written[0];
-
-        assert_eq!(trace.method, "PUT");
-        assert_eq!(
-            trace.path,
-            "/bucket/key?x-id=PutObject&X-Amz-Signature=deadbeef"
-        );
-        assert_eq!(trace.host, "127.0.0.1:9297");
-        assert_eq!(trace.service, "s3");
-        assert_eq!(trace.operation, "PutObject");
-        assert_eq!(trace.status, 200);
-        assert!(trace.authorization);
-        assert!(!trace.id.is_empty());
-        assert!(trace.at.contains('T'));
-        assert!(trace.error.is_none());
-
-        assert_eq!(
-            trace.request.content_type.as_deref(),
-            Some("application/json")
-        );
-        let request_body_trace = trace.request.body.as_ref().expect("request body captured");
-        assert!(!request_body_trace.binary);
-        assert!(!request_body_trace.truncated);
-        assert_eq!(request_body_trace.bytes, request_body.len() as u64);
-        assert_eq!(request_body_trace.sha256, sha256_hex(request_body));
-        let request_text = request_body_trace.text.as_deref().unwrap();
-        assert_eq!(request_text, std::str::from_utf8(request_body).unwrap());
-
-        assert_eq!(
-            trace.response.content_type.as_deref(),
-            Some("application/json")
-        );
-        let response_body_trace = trace
-            .response
-            .body
-            .as_ref()
-            .expect("response body captured");
-        assert!(!response_body_trace.binary);
-        assert_eq!(
-            response_body_trace.text.as_deref(),
-            Some(std::str::from_utf8(response_body.as_ref()).unwrap())
-        );
-        assert_eq!(
-            response_body_trace.sha256,
-            sha256_hex(response_body.as_ref())
-        );
-
-        let auth = trace
-            .request
-            .headers
-            .iter()
-            .find(|header| header.name == "authorization")
-            .expect("authorization is traced by name");
-        assert_eq!(
-            auth.value,
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=deadbeef"
-        );
-        let token = trace
-            .request
-            .headers
-            .iter()
-            .find(|header| header.name == "x-amz-security-token")
-            .unwrap();
-        assert_eq!(token.value, "SESSIONTOKEN123");
-        let host = trace
-            .request
-            .headers
-            .iter()
-            .find(|header| header.name == "host")
-            .unwrap();
-        assert_eq!(host.value, "127.0.0.1:9297");
-
-        // The trace file keeps the raw exchange, one line per call.
-        let serialized = fs::read_to_string(&trace_path).unwrap();
-        for raw in [
-            "hunter2",
-            "SESSIONTOKEN123",
-            "AKIDEXAMPLE",
-            "s3cr3t-value",
-            "X-Amz-Signature=deadbeef",
-        ] {
-            assert!(serialized.contains(raw), "{raw} missing from the trace");
-        }
-        assert_eq!(
-            serialized.lines().count(),
-            2,
-            "the run header, then one line per call"
-        );
-
-        // A >1 MiB response keeps forwarding everything and captures a prefix.
-        let big_len = MAX_CAPTURE_BYTES + 36 * 1024;
-        let request = sdk_request("GET", "/bucket/big", b"");
-        let response = handle(request, state.clone()).await.unwrap();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.len(), big_len, "large responses are not truncated");
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 2);
-        let big = written[1].response.body.as_ref().expect("big body traced");
-        assert!(big.truncated, "capture is bounded");
-        assert!(!big.binary);
-        assert_eq!(big.bytes, big_len as u64);
-        let text = big.text.as_deref().unwrap();
-        assert_eq!(text.len(), MAX_CAPTURE_BYTES);
-        assert!(text.bytes().all(|byte| byte == b'x'));
-        assert_eq!(big.sha256, sha256_hex(&vec![b'x'; big_len]));
-    }
-
-    #[tokio::test]
-    async fn records_upstream_failure_as_a_502_trace() {
-        // Grab a port and release it so nothing is listening there.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let temp = TempDir::new("failure");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-        let request = sdk_request("POST", "/?x-id=SendMessage", b"{}");
-        let response = handle(request, state).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"upstream error");
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0].status, 502);
-        assert!(written[0].error.is_some());
-        assert!(written[0].response.body.is_none());
-        assert_eq!(written[0].operation, "SendMessage");
-        let problem = written[0].problem.as_ref().expect("502 explains itself");
-        assert_eq!(problem.code, "EmulatorUnreachable");
-        assert!(problem.hint.as_deref().unwrap().contains(&port.to_string()));
-        assert!(
-            written[0].error.as_deref().unwrap().contains("onnect"),
-            "the error keeps its cause: {:?}",
-            written[0].error
-        );
-    }
-
-    #[tokio::test]
-    async fn body_hook_runs_once_per_call() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("once");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-
-        for _ in 0..3 {
-            let response = handle(sdk_request("GET", "/bucket/key", b""), state.clone())
-                .await
-                .unwrap();
-            let _ = response.into_body().collect().await.unwrap();
-        }
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 3, "exactly one entry per call");
-        let ids: std::collections::HashSet<&str> =
-            written.iter().map(|trace| trace.id.as_str()).collect();
-        assert_eq!(ids.len(), 3, "ids are unique per call");
-    }
-
-    #[tokio::test]
-    async fn resolves_query_protocol_action_from_the_request_body() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("action");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-
-        let body = b"Action=DescribeInstances&Version=2016-11-15";
-        let response = handle(query_request("/", "ec2", None, body), state.clone())
-            .await
-            .unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0].service, "ec2");
-        assert_eq!(
-            written[0].operation, "DescribeInstances",
-            "the Action from the streamed form body names the operation"
-        );
-        assert_eq!(
-            written[0].request.body.as_ref().unwrap().text.as_deref(),
-            Some(std::str::from_utf8(body).unwrap())
-        );
-    }
-
-    #[tokio::test]
-    async fn x_amz_target_and_x_id_take_precedence_over_the_body_action() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("precedence");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-        let body = b"Action=DescribeInstances&Version=2016-11-15";
-
-        for (uri, service, target) in [
-            ("/", "dynamodb", Some("DynamoDB_20120810.PutItem")),
-            ("/?x-id=SendMessage", "sqs", None),
-        ] {
-            let response = handle(query_request(uri, service, target, body), state.clone())
-                .await
-                .unwrap();
-            let _ = response.into_body().collect().await.unwrap();
-        }
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 2);
-        assert_eq!(written[0].service, "dynamodb");
-        assert_eq!(written[0].operation, "PutItem");
-        assert_eq!(written[1].service, "sqs");
-        assert_eq!(written[1].operation, "SendMessage");
-    }
-
-    #[tokio::test]
-    async fn falls_back_to_the_method_when_nothing_is_advertised() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("fallback");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-
-        let response = handle(
-            query_request("/", "cloudformation", None, b"Version=2010-05-15"),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0].service, "cloudformation");
-        assert_eq!(written[0].operation, "POST");
-    }
-
-    #[tokio::test]
-    async fn failed_calls_carry_their_aws_error() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("problem");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-        let response = handle(
-            sdk_request("GET", "/bucket/missing?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let _ = response.into_body().collect().await.unwrap();
-
-        let written = traces(&trace_path);
-        let problem = written[0].problem.as_ref().unwrap();
-        assert_eq!(problem.code, "NoSuchKey");
-        assert_eq!(
-            problem.message.as_deref(),
-            Some("The specified key does not exist.")
-        );
-        assert_eq!(written[0].region.as_deref(), Some("us-east-1"));
-        let summary = state.trace.summary();
-        assert_eq!((summary.calls, summary.errors), (1, 1));
-    }
-
-    #[tokio::test]
-    async fn slow_calls_are_visible_while_pending() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("pending");
-        let trace_path = temp.trace();
-        let state = state(&format!("http://127.0.0.1:{port}"), trace_path.clone());
-        let call = tokio::spawn(handle(
-            sdk_request("POST", "/q/slow", br#"{"WaitTimeSeconds":20}"#),
-            state.clone(),
-        ));
-
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 1, "a pending line appears after a second");
-        assert!(written[0].pending);
-        assert_eq!(written[0].status, 0);
-        assert!(
-            !written[0].request.headers.is_empty(),
-            "pending trace keeps full request headers for live debugging"
-        );
-        assert_eq!(
-            written[0]
-                .request
-                .body
-                .as_ref()
-                .and_then(|b| b.text.as_deref()),
-            Some(r#"{"WaitTimeSeconds":20}"#),
-            "pending trace keeps captured request body"
-        );
-        assert_eq!(state.trace.summary().unfinished, 1);
-
-        let response = call.await.unwrap().unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-        let written = traces(&trace_path);
-        assert_eq!(written.len(), 2);
-        assert!(!written[1].pending);
-        assert_eq!(
-            written[1].id, written[0].id,
-            "the final line replaces the pending one"
-        );
-        assert_eq!(written[1].status, 200);
-        assert_eq!(state.trace.summary().unfinished, 0);
-
-        // Fast calls never write a pending line.
-        let response = handle(sdk_request("GET", "/q/fast", b""), state.clone())
-            .await
-            .unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert_eq!(traces(&trace_path).len(), 3);
-    }
-
-    #[tokio::test]
-    async fn server_writes_a_run_header_then_calls() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("server");
-        fs::create_dir_all(&temp.0).unwrap();
-        let mut options = Options::new(&temp.0, 0);
-        options.upstream = Upstream::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let header = RunHeader {
-            run: "r".into(),
-            command: vec!["npm".into(), "test".into()],
-            ..RunHeader::default()
-        };
-        let server = Server::start(&options, temp.trace(), header, None)
-            .await
-            .unwrap();
-        assert!(server.endpoint().starts_with("http://127.0.0.1:"));
-
-        let plain: Client<HttpConnector, Full<Bytes>> =
-            Client::builder(TokioExecutor::new()).build_http();
-        let request = Request::builder()
-            .uri(format!("{}/bucket/key?x-id=GetObject", server.endpoint()))
+    fn request(method: &str, uri: &str, service: &str) -> hyper::http::request::Builder {
+        Request::builder()
+            .method(method)
+            .uri(uri)
             .header(
                 "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/s3/aws4_request, Signature=x",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261115/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=deadbeef"
+                ),
             )
+    }
+
+    async fn send(
+        sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+        req: Request<Full<Bytes>>,
+    ) -> (StatusCode, Bytes) {
+        let response = sender.send_request(req).await.unwrap();
+        let status = response.status();
+        (
+            status,
+            response.into_body().collect().await.unwrap().to_bytes(),
+        )
+    }
+
+    #[tokio::test]
+    async fn forwards_byte_exact_and_records_one_line_per_finished_call() {
+        let (port, mut upstream) = spawn_upstream().await;
+        let temp = TempDir::new("forward");
+        let server = server(port, &temp).await;
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+
+        let body = br#"{"password":"hunter2"}"#.to_vec();
+        let req = request("PUT", "/bucket/key?x-id=PutObject", "s3")
+            .header("host", "127.0.0.1:9297")
+            .header("content-type", "application/json")
+            .header("connection", "keep-alive")
+            .body(Full::new(Bytes::from(body.clone())))
+            .unwrap();
+        let (status, answer) = send(&mut sender, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&answer[..], br#"{"ok":true}"#);
+        let (headers, forwarded) = upstream.recv().await.unwrap();
+        assert_eq!(forwarded, body, "request body is byte exact");
+        assert!(
+            headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("deadbeef")
+        );
+        assert!(
+            headers.get("connection").is_none(),
+            "hop-by-hop headers are not forwarded"
+        );
+
+        let req = request("GET", "/bucket/big", "s3")
+            .header("host", "127.0.0.1:9297")
             .body(Full::new(Bytes::new()))
             .unwrap();
-        let response = plain.request(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = response.into_body().collect().await.unwrap();
-
-        // A bare TCP probe (as the window does) is not a call.
-        drop(TcpStream::connect(server.addr).await.unwrap());
-
-        let state = server.state.clone();
-        server.stop(Duration::from_secs(1)).await;
-        assert_eq!(state.trace.summary().calls, 1);
-        let lines: Vec<serde_json::Value> = fs::read_to_string(temp.trace())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(lines[0]["type"], "run");
-        assert_eq!(lines[0]["endpoint"], state_endpoint(&lines[0]));
-        assert_eq!(lines[1]["type"], "call");
-        assert_eq!(lines[1]["access"][0]["action"], "s3:GetObject");
-        assert_eq!(lines[1]["access"][0]["resource"], "arn:aws:s3:::bucket/*");
-    }
-
-    fn state_endpoint(header: &serde_json::Value) -> String {
-        let endpoint = header["endpoint"].as_str().unwrap();
-        assert!(endpoint.starts_with("http://127.0.0.1:"));
-        endpoint.to_string()
-    }
-
-    #[tokio::test]
-    async fn calls_outside_the_lock_are_marked_new() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("lock");
-        let locked: BTreeSet<Access> = [Access {
-            action: "s3:GetObject".into(),
-            resource: "arn:aws:s3:::bucket/*".into(),
-        }]
-        .into();
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: MAX_CAPTURE_BYTES,
-            enforce: false,
-            blobs_dir: None,
-            trace: Arc::new(
-                TraceSink::new(
-                    temp.trace(),
-                    &RunHeader::default(),
-                    Some(Gate::from_lock("lenslet.lock", locked)),
-                )
-                .unwrap(),
-            ),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-        for request in [
-            sdk_request("GET", "/bucket/key?x-id=GetObject", b""),
-            sdk_request("DELETE", "/bucket/key?x-id=DeleteObject", b""),
-        ] {
-            let response = handle(request, state.clone()).await.unwrap();
-            let _ = response.into_body().collect().await.unwrap();
-        }
-        let written = traces(&temp.trace());
-        assert!(!written[0].new);
-        assert!(written[1].new);
-        assert_eq!(written[1].access[0].action, "s3:DeleteObject");
-    }
-
-    #[tokio::test]
-    async fn enforce_blocks_unlocked_calls_before_they_reach_the_emulator() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("enforce");
-        let locked: BTreeSet<Access> = [
-            Access::new("s3:GetObject", "arn:aws:s3:::bucket/*"),
-            Access::new("dynamodb:GetItem", "arn:aws:dynamodb:*:*:table/orders"),
-        ]
-        .into();
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: MAX_CAPTURE_BYTES,
-            enforce: true,
-            blobs_dir: None,
-            trace: Arc::new(
-                TraceSink::new(
-                    temp.trace(),
-                    &RunHeader::default(),
-                    Some(Gate::from_lock("lenslet.lock", locked)),
-                )
-                .unwrap(),
-            ),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-
-        // Allowed S3 call reaches upstream normally.
-        let ok = handle(
-            sdk_request("GET", "/bucket/key?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(ok.status(), StatusCode::OK);
-        let _ = ok.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_ok());
-
-        // Unlocked S3 DeleteObject is blocked with XML AccessDenied (403) and never hits upstream.
-        let s3_denied = handle(
-            sdk_request("DELETE", "/bucket/key?x-id=DeleteObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(s3_denied.status(), StatusCode::FORBIDDEN);
-        let s3_body = s3_denied.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            std::str::from_utf8(&s3_body)
-                .unwrap()
-                .contains("<Code>AccessDenied</Code>")
-        );
-        assert!(
-            upstream.try_recv().is_err(),
-            "blocked S3 call never reached upstream"
-        );
-
-        // Unlocked DynamoDB PutItem (table in JSON body) is blocked with JSON AccessDeniedException (400).
-        let ddb_req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x",
-            )
-            .header("x-amz-target", "DynamoDB_20120810.PutItem")
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from_static(br#"{"TableName":"orders","Item":{}}"#)))
-            .unwrap();
-        let ddb_denied = handle(ddb_req, state.clone()).await.unwrap();
-        assert_eq!(ddb_denied.status(), StatusCode::BAD_REQUEST);
+        let (_, big) = send(&mut sender, req).await;
         assert_eq!(
-            ddb_denied.headers().get("x-amzn-errortype").unwrap(),
-            "AccessDeniedException"
+            big.len(),
+            trace::MAX_BODY_TEXT + 10,
+            "large responses are not cut"
         );
-        let ddb_body = ddb_denied.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            std::str::from_utf8(&ddb_body)
-                .unwrap()
-                .contains("AccessDeniedException")
-        );
-        assert!(
-            upstream.try_recv().is_err(),
-            "blocked DynamoDB call never reached upstream"
-        );
+        let req = request("GET", "/bucket/missing", "s3")
+            .header("host", "127.0.0.1:9297")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let (status, _) = send(&mut sender, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
+        server.stop(Duration::from_secs(1)).await;
         let written = traces(&temp.trace());
         assert_eq!(written.len(), 3);
-        assert!(!written[0].blocked);
-        assert!(written[1].blocked);
-        assert!(written[2].blocked);
-        assert_eq!(state.trace.summary().blocked, 2);
-    }
-
-    #[tokio::test]
-    async fn policy_gate_enforces_s3_prefix_allow_and_explicit_deny_on_concrete_keys() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("policy-s3-prefix");
-        let policy = Gate::from_policy_str(
-            r#"{
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Action": ["s3:GetObject", "s3:DeleteObject"],
-                        "Resource": "arn:aws:s3:::bucket/public/*"
-                    },
-                    {
-                        "Effect": "Deny",
-                        "Action": ["s3:GetObject", "s3:DeleteObject"],
-                        "Resource": "arn:aws:s3:::bucket/public/secret/*"
-                    }
-                ]
-            }"#,
-            "policy.json",
-        )
-        .unwrap();
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: MAX_CAPTURE_BYTES,
-            enforce: true,
-            blobs_dir: None,
-            trace: Arc::new(
-                TraceSink::new(temp.trace(), &RunHeader::default(), Some(policy.clone())).unwrap(),
-            ),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-
-        // 1. Concrete key inside allowed prefix (`public/readme.txt`) succeeds and is NOT marked new.
-        let ok = handle(
-            sdk_request("GET", "/bucket/public/readme.txt?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(ok.status(), StatusCode::OK);
-        let _ = ok.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_ok());
-
-        // 2. Concrete key matching explicit Deny (`public/secret/keys.txt`) is blocked.
-        let denied_sub = handle(
-            sdk_request("GET", "/bucket/public/secret/keys.txt?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(denied_sub.status(), StatusCode::FORBIDDEN);
-        let _ = denied_sub.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_err());
-
-        // 3. Multi-object DeleteObjects naming a denied `<Key>` in XML is blocked.
-        let del_xml = br#"<Delete><Object><Key>public/readme.txt</Key></Object><Object><Key>public/secret/keys.txt</Key></Object></Delete>"#;
-        let del_req = sdk_request("POST", "/bucket?delete", del_xml);
-        let denied_del = handle(del_req, state.clone()).await.unwrap();
-        assert_eq!(denied_del.status(), StatusCode::FORBIDDEN);
-        let _ = denied_del.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_err());
-
-        // 4. Consecutive slashes (`/bucket/public/secret//keys.txt`) preserve empty key segments
-        //    so an explicit Deny on `public/secret/*` still blocks it.
-        let denied_double_slash = handle(
-            sdk_request("GET", "/bucket/public/secret//keys.txt?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(denied_double_slash.status(), StatusCode::FORBIDDEN);
-        let _ = denied_double_slash.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_err());
-
-        let written = traces(&temp.trace());
-        assert_eq!(written.len(), 4);
-        assert!(!written[0].new, "allowed prefix call is not marked new");
-        assert!(!written[0].access[0].new);
-        assert!(written[1].blocked && written[1].new);
-        assert!(written[2].blocked && written[2].new);
-        assert!(written[3].blocked && written[3].new);
-
-        let mut report = crate::summary::Report::default();
-        report.set_access_with_gate(&state.trace.summary(), Some(&policy));
+        let put = &written[0];
         assert_eq!(
-            report.access_added,
-            vec![
-                Access::new(
-                    "s3:DeleteObject",
-                    "arn:aws:s3:::bucket/public/secret/keys.txt"
-                ),
-                Access::new(
-                    "s3:GetObject",
-                    "arn:aws:s3:::bucket/public/secret//keys.txt"
-                ),
-                Access::new("s3:GetObject", "arn:aws:s3:::bucket/public/secret/keys.txt"),
-            ]
+            (put.service.as_str(), put.operation.as_str()),
+            ("s3", "PutObject")
         );
-    }
-
-    #[tokio::test]
-    async fn enforce_inspects_complete_request_body_beyond_max_body_limit() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("enforce-max-body");
-        let locked: BTreeSet<Access> = [Access::new(
-            "dynamodb:BatchWriteItem",
-            "arn:aws:dynamodb:*:*:table/orders",
-        )]
-        .into();
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        // Tiny 64-byte capture limit: `"orders"` fits in the prefix, while
-        // `"secret_orders"` appears past byte 140.
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: 64,
-            enforce: true,
-            blobs_dir: None,
-            trace: Arc::new(
-                TraceSink::new(
-                    temp.trace(),
-                    &RunHeader::default(),
-                    Some(Gate::from_lock("lenslet.lock", locked)),
-                )
-                .unwrap(),
-            ),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-
-        let payload = br#"{"RequestItems":{"orders":[{"PutRequest":{"Item":{"id":{"S":"order-padding-0000000000000000000000000000"}}}}],"secret_orders":[{"PutRequest":{"Item":{"id":{"S":"2"}}}}]}}"#;
-        assert!(payload.len() > 140);
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x",
-            )
-            .header("x-amz-target", "DynamoDB_20120810.BatchWriteItem")
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from_static(payload)))
-            .unwrap();
-
-        let resp = handle(req, state.clone()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let _ = resp.into_body().collect().await.unwrap();
-        assert!(
-            upstream.try_recv().is_err(),
-            "trailing unauthorized table past --max-body must be blocked before reaching upstream"
-        );
-
-        let written = traces(&temp.trace());
-        assert_eq!(written.len(), 1);
-        assert!(written[0].blocked);
-        assert!(
-            written[0].request.body.as_ref().unwrap().truncated,
-            "trace file still honors --max-body"
-        );
-        assert_eq!(written[0].access.len(), 2);
-        assert!(!written[0].access[0].new); // orders
-        assert!(written[0].access[1].new); // secret_orders
-    }
-
-    #[tokio::test]
-    async fn enforce_bounds_request_collection_and_fails_closed_when_exceeded() {
-        use std::pin::Pin;
-        use std::sync::atomic::AtomicUsize;
-        use std::task::{Context, Poll};
-
-        struct InfiniteStream {
-            polled_frames: Arc<AtomicUsize>,
-        }
-        impl hyper::body::Body for InfiniteStream {
-            type Data = Bytes;
-            type Error = std::io::Error;
-            fn poll_frame(
-                self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-                self.polled_frames.fetch_add(1, Ordering::SeqCst);
-                Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from_static(
-                    br#"{"RequestItems":{"orders":[{"PutRequest":{"Item":{"id":{"S":"chunk"}}}}]}}"#,
-                )))))
-            }
-        }
-
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("enforce-bounded");
-        // The lock grants the table the body names, not the `*` its unread
-        // tail stands for.
-        let admin = Gate::from_lock(
-            "lenslet.lock",
-            [Access::new(
-                "dynamodb:BatchWriteItem",
-                "arn:aws:dynamodb:*:*:table/orders",
-            )]
-            .into(),
-        );
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: 64,
-            enforce: true,
-            blobs_dir: None,
-            trace: Arc::new(
-                TraceSink::new(temp.trace(), &RunHeader::default(), Some(admin)).unwrap(),
-            ),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-
-        let polled = Arc::new(AtomicUsize::new(0));
-        let req = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x",
-            )
-            .header("x-amz-target", "DynamoDB_20120810.BatchWriteItem")
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(InfiniteStream {
-                polled_frames: polled.clone(),
-            })
-            .unwrap();
-
-        // With a 128-byte inspect limit, an infinite streaming body stops after 2
-        // frames (74 * 2 = 148 > 128) and fails closed immediately instead of hanging/OOMing.
-        let resp = handle_with_inspect_limit(req, state.clone(), 128)
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(polled.load(Ordering::SeqCst), 2);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            std::str::from_utf8(&body)
-                .unwrap()
-                .contains("AccessDeniedException")
-        );
-        assert!(upstream.try_recv().is_err());
-    }
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    }
-
-    fn lock_state(upstream: u16, trace: PathBuf, locked: &[Access], enforce: bool) -> Arc<State> {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let gate = Gate::from_lock("lenslet.lock", locked.iter().cloned().collect());
-        Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{upstream}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: MAX_CAPTURE_BYTES,
-            enforce,
-            blobs_dir: None,
-            trace: Arc::new(TraceSink::new(trace, &RunHeader::default(), Some(gate)).unwrap()),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        })
-    }
-
-    #[tokio::test]
-    async fn hop_by_hop_headers_are_recorded_but_not_forwarded() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("hop");
-        let state = state(&format!("http://127.0.0.1:{port}"), temp.trace());
-        let mut request = sdk_request("GET", "/bucket/key?x-id=GetObject", b"");
-        for (name, value) in [
-            ("connection", "keep-alive, x-per-hop"),
-            ("x-per-hop", "1"),
-            ("keep-alive", "timeout=5"),
-            ("te", "trailers"),
-            ("proxy-authorization", "Basic eA=="),
-            ("upgrade", "h2c"),
-        ] {
-            request.headers_mut().insert(
-                header::HeaderName::from_static(name),
-                header::HeaderValue::from_static(value),
-            );
-        }
-        let response = handle(request, state.clone()).await.unwrap();
-        for name in ["connection", "keep-alive"] {
-            assert!(
-                !response.headers().contains_key(name),
-                "{name} is not passed back to the client"
-            );
-        }
-        let _ = response.into_body().collect().await.unwrap();
-        let (forwarded, _) = upstream.recv().await.unwrap();
-        for name in [
-            "connection",
-            "x-per-hop",
-            "keep-alive",
-            "te",
-            "proxy-authorization",
-            "upgrade",
-        ] {
-            assert!(!forwarded.contains_key(name), "{name} is not forwarded");
-        }
-        assert!(forwarded.contains_key("authorization"));
-        let written = traces(&temp.trace());
-        let sent: Vec<&str> = written[0]
-            .request
-            .headers
-            .iter()
-            .map(|header| header.name.as_str())
-            .collect();
-        assert!(
-            sent.contains(&"x-per-hop") && sent.contains(&"te"),
-            "{sent:?}"
-        );
-        let received: Vec<&str> = written[0]
-            .response
-            .headers
-            .iter()
-            .map(|header| header.name.as_str())
-            .collect();
-        assert!(received.contains(&"keep-alive"), "{received:?}");
-    }
-
-    #[tokio::test]
-    async fn a_replayed_call_is_recorded_with_what_it_replays() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("replay");
-        let state = state(&format!("http://127.0.0.1:{port}"), temp.trace());
-        let mut request = sdk_request("GET", "/bucket/key?x-id=GetObject", b"");
-        request
-            .headers_mut()
-            .insert(REPLAY_HEADER, header::HeaderValue::from_static("18f-2"));
-        let response = handle(request, state.clone()).await.unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-        let (forwarded, _) = upstream.recv().await.unwrap();
-        assert!(
-            !forwarded.contains_key(REPLAY_HEADER),
-            "stripped before forwarding"
-        );
-        let written = traces(&temp.trace());
-        assert_eq!(written[0].replay_of.as_deref(), Some("18f-2"));
-        assert!(
-            !written[0]
-                .request
-                .headers
-                .iter()
-                .any(|header| header.name == REPLAY_HEADER),
-            "the marker is not one of the call's headers"
-        );
-        assert_eq!(written[0].access[0].action, "s3:GetObject");
-    }
-
-    #[tokio::test]
-    async fn a_blocked_call_drains_its_body_and_records_the_request_phase() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("drain");
-        let state = lock_state(port, temp.trace(), &[], true);
-        let response = handle(
-            sdk_request("PUT", "/bucket/key?x-id=PutObject", b"payload"),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(upstream.try_recv().is_err());
-        let written = traces(&temp.trace());
-        assert!(written[0].blocked);
-        assert_eq!(written[0].blocked_phase, Some(BlockedPhase::Request));
         assert_eq!(
-            written[0]
-                .request
-                .body
-                .as_ref()
-                .and_then(|body| body.text.as_deref()),
-            Some("payload"),
-            "the body was read before answering"
+            put.request.body.as_ref().unwrap().text.as_deref(),
+            Some(r#"{"password":"hunter2"}"#)
         );
-    }
-
-    #[tokio::test]
-    async fn a_key_only_the_response_reveals_blocks_after_the_emulator_ran() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let temp = TempDir::new("kms");
-        let state = lock_state(
-            port,
-            temp.trace(),
-            &[Access::new("s3:GetObject", "arn:aws:s3:::vault/*")],
-            true,
-        );
-        let response = handle(
-            sdk_request("GET", "/vault/kms?x-id=GetObject", b""),
-            state.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let _ = response.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_ok(), "the emulator saw the call");
-        let written = traces(&temp.trace());
-        assert!(written[0].blocked);
-        assert_eq!(written[0].blocked_phase, Some(BlockedPhase::Response));
-        assert_eq!(written[0].implied[0].action, "kms:Decrypt");
-        assert!(written[0].implied[0].new);
-        assert!(!written[0].access[0].new);
-    }
-
-    /// Send one raw HTTP/1.1 request and read until the server closes.
-    async fn raw_get(addr: SocketAddr, path: &str) -> String {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        let mut reply = Vec::new();
-        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut reply))
-            .await
-            .expect("the stream ends")
-            .unwrap();
-        String::from_utf8_lossy(&reply).into_owned()
-    }
-
-    #[tokio::test]
-    async fn live_events_replay_the_file_then_follow_it_until_the_end() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("events");
-        fs::create_dir_all(&temp.0).unwrap();
-        let mut options = Options::new(&temp.0, 0);
-        options.upstream = Upstream::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let header = RunHeader {
-            run: "20261119-120000-1".into(),
-            ..RunHeader::default()
-        };
-        let server = Server::start(&options, temp.trace(), header, None)
-            .await
-            .unwrap();
-        let addr = server.addr;
-
-        // Health answers on the proxy address, outside the trace.
-        let mut health = TcpStream::connect(addr).await.unwrap();
-        health
-            .write_all(
-                format!(
-                    "GET /_lenslet/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut reply = String::new();
-        health.read_to_string(&mut reply).await.unwrap();
-        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        let json: serde_json::Value =
-            serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(json["run"], "20261119-120000-1");
-        assert_eq!(json["pid"], std::process::id());
-
-        let plain: Client<HttpConnector, Full<Bytes>> =
-            Client::builder(TokioExecutor::new()).build_http();
-        let call = |path: &str| {
-            Request::builder()
-                .uri(format!("http://{addr}{path}"))
-                .header(
-                    "authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/s3/aws4_request, Signature=x",
-                )
-                .body(Full::new(Bytes::new()))
-                .unwrap()
-        };
-        let response = plain
-            .request(call("/bucket/one?x-id=GetObject"))
-            .await
-            .unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-
-        // A subscriber that joins mid-run gets the backlog, then the rest.
-        let events = tokio::spawn(raw_get(addr, "/_lenslet/events"));
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let response = plain
-            .request(call("/bucket/two?x-id=GetObject"))
-            .await
-            .unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-        // A slow call still running when the run ends is not recorded.
-        let slow = tokio::spawn(plain.request(call("/bucket/slow?x-id=GetObject")));
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let state = server.state.clone();
-        server.stop(Duration::from_millis(50)).await;
-        let (summary, _) = state.trace.seal();
-        assert_eq!((summary.calls, summary.unfinished), (2, 1));
-        state.trace.end(&crate::summary::Report {
-            unfinished: summary.unfinished,
-            ..Default::default()
-        });
-        server.join(Duration::from_secs(5)).await;
-        let _ = slow.await;
-
-        let stream = events.await.unwrap();
-        assert!(stream.starts_with("HTTP/1.1 200"), "{stream}");
         assert!(
-            stream.contains("content-type: text/event-stream"),
-            "{stream}"
+            put.request.headers.iter().any(|h| h.name == "connection"),
+            "recorded as sent"
         );
-        let file = fs::read_to_string(temp.trace()).unwrap();
-        let lines: Vec<&str> = file.lines().collect();
-        let kinds: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                serde_json::from_str::<serde_json::Value>(line).unwrap()["type"]
-                    .as_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(kinds, ["run", "call", "call", "end"], "nothing after `end`");
-        // Each line, exactly once and in order, as one event.
-        let mut at = 0;
-        for line in &lines {
-            let event = format!("data: {line}\n\n");
-            let found = stream[at..].find(&event).expect("every line is an event");
-            at += found + event.len();
-        }
-        assert_eq!(stream.matches("data: ").count(), lines.len());
-        assert!(
-            !stream.contains("/_lenslet/"),
-            "Lenslet's own requests are not calls"
-        );
+        assert_eq!(put.access[0].action, "s3:PutObject");
+        assert_eq!(put.concrete[0].resource, "arn:aws:s3:::bucket/key");
+        let big = written[1].response.body.as_ref().unwrap();
+        assert!(big.truncated);
+        assert_eq!(big.text.as_deref().unwrap().len(), trace::MAX_BODY_TEXT);
+        assert_eq!(big.bytes, (trace::MAX_BODY_TEXT + 10) as u64);
+        let missing = written[2].problem.as_ref().unwrap();
+        assert_eq!(missing.code, "NoSuchKey");
+        server.join(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]
-    async fn derivation_reads_past_max_body_with_or_without_a_gate() {
+    async fn derivation_reads_the_complete_body_and_cbor() {
         let (port, _upstream) = spawn_upstream().await;
         let temp = TempDir::new("derive");
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let state = Arc::new(State {
-            client: client(RootCertStore::empty()),
-            upstream: format!("http://127.0.0.1:{port}"),
-            allow_docker: false,
-            routes: BTreeMap::new(),
-            endpoint: String::new(),
-            max_body: 64,
-            enforce: false,
-            blobs_dir: None,
-            trace: Arc::new(TraceSink::new(temp.trace(), &RunHeader::default(), None).unwrap()),
-            shutdown_req: Arc::new(tokio::sync::Notify::new()),
-        });
-        let payload = br#"{"RequestItems":{"orders":[{"PutRequest":{"Item":{"id":{"S":"order-padding-0000000000000000000000000000"}}}}],"secret_orders":[{"PutRequest":{"Item":{"id":{"S":"2"}}}}]}}"#;
-        let request = Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("host", "127.0.0.1:9297")
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=x",
-            )
-            .header("x-amz-target", "DynamoDB_20120810.BatchWriteItem")
-            .header("content-type", "application/x-amz-json-1.0")
-            .body(Full::new(Bytes::from_static(payload)))
-            .unwrap();
-        let response = handle(request, state.clone()).await.unwrap();
-        let _ = response.into_body().collect().await.unwrap();
-        let written = traces(&temp.trace());
-        assert!(written[0].request.body.as_ref().unwrap().truncated);
-        let resources: Vec<&str> = written[0]
-            .access
-            .iter()
-            .map(|item| item.resource.as_str())
-            .collect();
-        // The same footprint `--update` and `--check` see: no `*` for a tail
-        // the trace capture cut off.
-        assert_eq!(
-            resources,
-            [
-                "arn:aws:dynamodb:*:*:table/orders",
-                "arn:aws:dynamodb:*:*:table/secret_orders"
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_body_is_enforced_against_the_wildcard_lock_line() {
-        let (port, mut upstream) = spawn_upstream().await;
-        let cbor = |state: &Arc<State>| {
-            let request = Request::builder()
-                .method("POST")
-                .uri("/")
-                .header("host", "127.0.0.1:9297")
-                .header(
-                    "authorization",
-                    "AWS4-HMAC-SHA256 Credential=AKID/20261115/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=x",
-                )
-                .header("x-amz-target", "AmazonSQS.SendMessage")
-                .header("content-type", "application/cbor")
-                .body(Full::new(Bytes::from_static(&[0xa2, 0x00, 0xff, 0x13, 0x88])))
-                .unwrap();
-            handle(request, state.clone())
-        };
-
-        let temp = TempDir::new("unverified-blocked");
-        let state = lock_state(
-            port,
-            temp.trace(),
-            &[Access::new("sqs:SendMessage", "arn:aws:sqs:*:*:jobs")],
-            true,
-        );
-        let response = cbor(&state).await.unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            String::from_utf8_lossy(&body).contains("could not be read from the request body"),
-            "{}",
-            String::from_utf8_lossy(&body)
-        );
-        assert!(upstream.try_recv().is_err());
-        let written = traces(&temp.trace());
-        assert_eq!(written[0].access.len(), 1);
-        assert_eq!(written[0].access[0].resource, "*");
-        assert!(written[0].access[0].unverified && written[0].access[0].new);
-
-        // Accepting the `*` line (what `--update` writes) lets it through.
-        let temp = TempDir::new("unverified-allowed");
-        let state = lock_state(
-            port,
-            temp.trace(),
-            &[Access::new("sqs:SendMessage", "*")],
-            true,
-        );
-        let response = cbor(&state).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let _ = response.into_body().collect().await.unwrap();
-        assert!(upstream.try_recv().is_ok());
-        let written = traces(&temp.trace());
-        assert!(!written[0].new && written[0].access[0].unverified);
-    }
-
-    #[tokio::test]
-    async fn routes_services_to_multiple_local_emulators_and_serves_http2_h2c() {
-        // Strict local boundary rejects real AWS endpoints and public IPs.
-        assert!(options(&["--upstream", "https://s3.amazonaws.com:443"]).is_err());
-        assert!(options(&["--route", "s3=http://8.8.8.8:9000"]).is_err());
-        assert!(options(&["--route", "s3=http://127.0.0.1:9000"]).is_ok());
-
-        let (default_port, mut default_rx) = spawn_upstream().await;
-        let (minio_port, mut minio_rx) = spawn_upstream().await;
-        let temp = TempDir::new("routes-h2c");
-        fs::create_dir_all(&temp.0).unwrap();
-        let mut opts = Options::new(&temp.0, 0);
-        opts.upstream = Upstream::parse(&format!("http://127.0.0.1:{default_port}")).unwrap();
-        opts.routes.insert(
-            "s3".into(),
-            Upstream::parse(&format!("http://127.0.0.1:{minio_port}")).unwrap(),
-        );
-        let server = Server::start(&opts, temp.trace(), RunHeader::default(), None)
-            .await
-            .unwrap();
-        let addr = server.addr;
-
-        // Connect an explicit HTTP/2 `h2c` client to the Lenslet proxy.
-        let tcp = TcpStream::connect(addr).await.unwrap();
-        let (mut h2_sender, h2_conn) =
+        let server = server(port, &temp).await;
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let (mut sender, conn) =
             hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
                 .await
                 .unwrap();
-        tokio::spawn(async move {
-            let _ = h2_conn.await;
-        });
+        tokio::spawn(conn);
 
-        let s3_req = Request::builder()
-            .method("PUT")
-            .uri(format!("http://{addr}/assets/logo.svg?x-id=PutObject"))
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=x",
+        // A batch whose second table is named past the stored 1 MiB.
+        let pad = "x".repeat(trace::MAX_BODY_TEXT + 100);
+        let batch = format!(
+            r#"{{"RequestItems":{{"aaa":[{{"PutRequest":{{"Item":{{"p":{{"S":"{pad}"}}}}}}}}],"zzz":[{{"DeleteRequest":{{"Key":{{"k":{{"S":"1"}}}}}}}}]}}}}"#
+        );
+        let req = request(
+            "POST",
+            format!("http://{}/", server.addr).as_str(),
+            "dynamodb",
+        )
+        .header("x-amz-target", "DynamoDB_20120810.BatchWriteItem")
+        .header("content-type", "application/x-amz-json-1.0")
+        .body(Full::new(Bytes::from(batch)))
+        .unwrap();
+        let response = sender.send_request(req).await.unwrap();
+        response.into_body().collect().await.unwrap();
+
+        // Smithy RPCv2 CBOR: {"TableName": "orders"}.
+        let mut frame = vec![0xa1, 0x69];
+        frame.extend_from_slice(b"TableName");
+        frame.push(0x66);
+        frame.extend_from_slice(b"orders");
+        let req = request(
+            "POST",
+            format!(
+                "http://{}/service/DynamoDB_20120810/operation/GetItem",
+                server.addr
             )
-            .body(Full::new(Bytes::from_static(b"<svg/>")))
+            .as_str(),
+            "dynamodb",
+        )
+        .header("smithy-protocol", "rpc-v2-cbor")
+        .header("content-type", "application/cbor")
+        .body(Full::new(Bytes::from(frame)))
+        .unwrap();
+        let response = sender.send_request(req).await.unwrap();
+        response.into_body().collect().await.unwrap();
+
+        server.stop(Duration::from_secs(1)).await;
+        let written = traces(&temp.trace());
+        assert_eq!(written.len(), 2);
+        let tables: Vec<&str> = written[0]
+            .access
+            .iter()
+            .map(|a| a.resource.as_str())
+            .collect();
+        assert_eq!(
+            tables,
+            [
+                "arn:aws:dynamodb:*:*:table/aaa",
+                "arn:aws:dynamodb:*:*:table/zzz"
+            ]
+        );
+        assert!(written[0].request.body.as_ref().unwrap().truncated);
+        assert_eq!(written[1].operation, "GetItem");
+        assert_eq!(
+            written[1].concrete,
+            [Access::new(
+                "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:*:table/orders"
+            )]
+        );
+        server.join(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn records_an_unreachable_upstream_as_a_502() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let temp = TempDir::new("unreachable");
+        let server = server(port, &temp).await;
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
             .unwrap();
-        let resp = h2_sender.send_request(s3_req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let _ = resp.into_body().collect().await.unwrap();
-        assert!(
-            minio_rx.try_recv().is_ok(),
-            "S3 call routed to MinIO upstream over HTTP/2 h2c"
-        );
-        assert!(
-            default_rx.try_recv().is_err(),
-            "default upstream did not receive S3 call"
-        );
-
-        let sqs_req = Request::builder()
-            .method("POST")
-            .uri(format!("http://{addr}/"))
-            .header(
-                "authorization",
-                "AWS4-HMAC-SHA256 Credential=AKID/20261120/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=x",
-            )
+        tokio::spawn(conn);
+        let req = request("POST", "/", "sqs")
+            .header("host", "127.0.0.1:9297")
             .header("x-amz-target", "AmazonSQS.SendMessage")
             .header("content-type", "application/x-amz-json-1.0")
             .body(Full::new(Bytes::from_static(
-                br#"{"QueueUrl":"http://127.0.0.1:9297/000000000000/jobs","MessageBody":"ok"}"#,
+                br#"{"QueueUrl":"http://q/1/jobs"}"#,
             )))
             .unwrap();
-        let resp2 = h2_sender.send_request(sqs_req).await.unwrap();
-        assert_eq!(resp2.status(), StatusCode::OK);
-        let _ = resp2.into_body().collect().await.unwrap();
-        assert!(
-            default_rx.try_recv().is_ok(),
-            "SQS call routed to default upstream"
-        );
-
-        server.stop(Duration::from_millis(200)).await;
-        server.join(Duration::from_secs(2)).await;
-
+        let (status, body) = send(&mut sender, req).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(&body[..], b"upstream error");
+        server.stop(Duration::from_secs(1)).await;
         let written = traces(&temp.trace());
-        assert_eq!(written.len(), 2);
-        assert_eq!(written[0].target.as_deref(), Some("s3://assets/logo.svg"));
-        assert_eq!(written[1].target.as_deref(), Some("queue/jobs"));
-    }
-
-    #[test]
-    fn the_local_boundary_resolves_names_and_rejects_public_and_aws_hosts() {
-        // Loopback names and literals, private container networks.
-        for ok in [
-            "http://localhost:4566",
-            "http://localhost.:4566",
-            "http://127.0.0.1:4566",
-            "http://[::1]:4566",
-            "http://172.17.0.1:4566",
-            "http://192.168.65.2:4566",
-            "http://10.1.2.3:4566",
-        ] {
-            assert!(options(&["--upstream", ok]).is_ok(), "{ok}");
-            assert!(options(&["--route", &format!("s3={ok}")]).is_ok(), "{ok}");
-        }
-        // Real AWS, with or without the trailing dot of a fully qualified name.
-        for aws in [
-            "https://s3.amazonaws.com:443",
-            "https://s3.amazonaws.com.:443",
-            "https://sqs.us-east-1.amazonaws.com:443",
-            "https://sts.cn-north-1.amazonaws.com.cn:443",
-            "https://bedrock.us-east-1.api.aws:443",
-        ] {
-            let error = options(&["--upstream", aws]).err().unwrap().to_string();
-            assert!(error.contains("real AWS"), "{aws}: {error}");
-            assert!(
-                options(&["--route", &format!("s3={aws}")]).is_err(),
-                "{aws}"
-            );
-        }
-        // Public addresses (literals, so the test needs no network).
-        for public in [
-            "http://8.8.8.8:80",
-            "http://[2606:4700::1111]:80",
-            "http://0.0.0.0:80",
-        ] {
-            let error = options(&["--upstream", public]).err().unwrap().to_string();
-            assert!(
-                error.contains("not loopback or a private network"),
-                "{public}: {error}"
-            );
-            assert!(
-                options(&["--route", &format!("s3={public}")]).is_err(),
-                "{public}"
-            );
-        }
-        // A name that does not resolve is refused, not trusted.
-        assert!(options(&["--upstream", "http://lenslet-no-such-host.invalid:80"]).is_err());
-    }
-
-    #[test]
-    fn removed_sandbox_options_mean_managed_moto() {
-        for args in [
-            &["--sandbox"][..],
-            &["--upstream", "sandbox"],
-            &["--upstream", "built-in"],
-            &["--emulator", "moto"],
-        ] {
-            let parsed = options(args).unwrap();
-            assert!(parsed.managed, "{args:?}");
-            assert!(!parsed.upstream_given, "{args:?}");
-            let alias = parsed.removed_alias.as_deref();
-            match args[0] {
-                "--emulator" => assert_eq!(alias, None),
-                _ => assert_eq!(alias, Some(args.join(" ").as_str())),
-            }
-        }
-        assert!(options(&["--emulator", "localstack"]).is_err());
-        assert!(options(&["--emulator", "moto", "--upstream", "4566"]).is_err());
-        assert!(options(&["--upstream", "4566", "--sandbox"]).is_err());
-    }
-
-    #[test]
-    fn allow_docker_serves_loopback_and_docker_networks_only() {
-        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
-        for loopback in ["127.0.0.1", "127.8.9.10", "::1", "::ffff:127.0.0.1"] {
-            assert!(peer_allowed(ip(loopback), false), "{loopback}");
-            assert!(peer_allowed(ip(loopback), true), "{loopback}");
-        }
-        for docker in [
-            "172.17.0.2",
-            "172.16.0.1",
-            "172.31.255.254",
-            "192.168.65.3",
-            "::ffff:172.18.0.5",
-        ] {
-            assert!(!peer_allowed(ip(docker), false), "{docker}");
-            assert!(peer_allowed(ip(docker), true), "{docker}");
-        }
-        for lan in [
-            "192.168.1.20",
-            "192.168.64.1",
-            "10.0.0.7",
-            "172.32.0.1",
-            "169.254.1.1",
-            "8.8.8.8",
-            "fe80::1",
-            "fd00::1",
-        ] {
-            assert!(!peer_allowed(ip(lan), false), "{lan}");
-            assert!(!peer_allowed(ip(lan), true), "{lan}");
-        }
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].status, 502);
+        assert_eq!(written[0].operation, "SendMessage");
+        assert_eq!(
+            written[0].problem.as_ref().unwrap().code,
+            "EmulatorUnreachable"
+        );
+        assert!(written[0].error.as_deref().unwrap().contains("onnect"));
+        server.join(Duration::from_secs(1)).await;
     }
 
     #[tokio::test]
-    async fn lenslet_endpoints_answer_loopback_peers_only() {
-        let temp = TempDir::new("loopback-only");
-        let state = state("http://127.0.0.1:9", temp.trace());
-        let docker: SocketAddr = "172.17.0.2:40000".parse().unwrap();
-        for (method, path) in [
-            ("GET", "/_lenslet/events"),
-            ("GET", "/_lenslet/health"),
-            ("POST", "/_lenslet/shutdown"),
-        ] {
-            let request = Request::builder()
-                .method(method)
+    async fn lenslet_paths_are_forwarded_like_any_other() {
+        let (port, mut upstream) = spawn_upstream().await;
+        let temp = TempDir::new("no-endpoints");
+        let server = server(port, &temp).await;
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        for path in ["/_lenslet/events", "/_lenslet/health"] {
+            let req = Request::builder()
                 .uri(path)
+                .header("host", "127.0.0.1")
                 .body(Full::new(Bytes::new()))
                 .unwrap();
-            let response = handle_peer(request, state.clone(), docker, false)
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            let (status, _) = send(&mut sender, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(upstream.recv().await.is_some(), "{path} went upstream");
         }
-        let request = Request::builder()
-            .uri("/_lenslet/health")
-            .body(Full::new(Bytes::new()))
-            .unwrap();
-        let loopback: SocketAddr = "127.0.0.1:40000".parse().unwrap();
-        let response = handle_peer(request, state.clone(), loopback, true)
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(traces(&temp.trace()).is_empty(), "never recorded");
-    }
-
-    /// The live event stream works for an HTTP/2 prior-knowledge (h2c)
-    /// client too.
-    #[tokio::test]
-    async fn live_events_stream_over_h2c() {
-        let (port, _upstream) = spawn_upstream().await;
-        let temp = TempDir::new("events-h2c");
-        fs::create_dir_all(&temp.0).unwrap();
-        let mut options = Options::new(&temp.0, 0);
-        options.upstream = Upstream::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let header = RunHeader {
-            run: "20261122-120000-1".into(),
-            ..RunHeader::default()
-        };
-        let server = Server::start(&options, temp.trace(), header, None)
-            .await
-            .unwrap();
-        let addr = server.addr;
-        let h2: Client<HttpConnector, Full<Bytes>> = Client::builder(TokioExecutor::new())
-            .http2_only(true)
-            .build_http();
-        let response = h2
-            .request(
-                Request::builder()
-                    .uri(format!("http://{addr}/_lenslet/events"))
-                    .body(Full::new(Bytes::new()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.version(), hyper::Version::HTTP_2);
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "text/event-stream"
-        );
-        let mut body = response.into_body();
-        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
-            .await
-            .expect("the backlog arrives")
-            .unwrap()
-            .unwrap();
-        let first = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
-        assert!(first.starts_with("data: {\"type\":\"run\""), "{first}");
-        assert!(first.contains("20261122-120000-1"), "{first}");
-
-        let state = server.state.clone();
-        server.stop(Duration::from_millis(50)).await;
-        let _ = state.trace.seal();
-        state.trace.end(&crate::summary::Report::default());
-        let rest = tokio::time::timeout(Duration::from_secs(5), body.collect())
-            .await
-            .expect("the stream ends after `end`")
-            .unwrap()
-            .to_bytes();
-        assert!(String::from_utf8_lossy(&rest).contains("data: {\"type\":\"end\""));
-        server.join(Duration::from_secs(2)).await;
+        server.stop(Duration::from_secs(1)).await;
+        server.join(Duration::from_secs(1)).await;
     }
 }
