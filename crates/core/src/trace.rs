@@ -29,6 +29,10 @@ pub struct RunHeader {
     /// What SDKs point at, e.g. `http://127.0.0.1:43761`.
     pub endpoint: String,
     pub upstream: String,
+    /// What answered the calls: `moto (started by Lenslet)`, `moto`,
+    /// `localstack`, `aws-emulator`, or the upstream URL for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator: Option<String>,
     pub started: String,
     /// The lock file this run is compared with, if one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -273,6 +273,7 @@ fn prune(dir: &Path, keep: usize) {
         .collect();
     for run in &candidates {
         let _ = fs::remove_file(log_path_for(run));
+        let _ = fs::remove_file(run.with_extension("emulator.log"));
         let _ = fs::remove_file(run);
     }
     if !candidates.is_empty() {

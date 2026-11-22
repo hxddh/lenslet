@@ -561,6 +561,9 @@ pub struct Report {
     pub trace: String,
     pub endpoint: String,
     pub upstream: String,
+    /// What answered the calls (see the run header's `emulator`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator: Option<String>,
 }
 
 impl Report {
@@ -665,11 +668,12 @@ impl Report {
             String::new()
         };
         out.push_str(&format!(
-            "lenslet: {}{retries} · {}{blocked_summary}{} · {}\n",
+            "lenslet: {}{retries} · {}{blocked_summary}{} · {}{}\n",
             plural(self.calls, "call"),
             plural(self.errors, "error"),
             services,
             seconds(self.duration_ms),
+            self.against(),
         ));
         if self.findings.is_empty() {
             // A report written before findings existed.
@@ -884,6 +888,16 @@ impl Report {
         })
     }
 
+    /// ` · against moto (started by Lenslet)`: what answered the calls, for
+    /// the first line of the terminal and Markdown reports. Empty for a
+    /// report written before Lenslet recorded it.
+    fn against(&self) -> String {
+        self.emulator
+            .as_deref()
+            .map(|emulator| format!(" · against {emulator}"))
+            .unwrap_or_default()
+    }
+
     /// The report as GitHub-flavored Markdown: what a PR comment or a CI job
     /// summary shows. Findings lead, then access changes, each with the calls
     /// behind it.
@@ -906,11 +920,12 @@ impl Report {
             String::new()
         };
         out.push_str(&format!(
-            "{}{} · {}{blocked_md} · {}\n\n",
+            "{}{} · {}{blocked_md} · {}{}\n\n",
             plural(self.calls, "AWS call"),
             retries_label(self.retries),
             plural(self.errors, "error"),
-            plural(self.services.len(), "service")
+            plural(self.services.len(), "service"),
+            self.against(),
         ));
         self.markdown_findings(&mut out);
 
@@ -1556,6 +1571,37 @@ mod tests {
         let mut report = report(&summary);
         report.set_access_with_gate(&summary, None);
         assert!(report.render("t").contains("--update"));
+    }
+
+    #[test]
+    fn reports_say_what_answered_the_calls() {
+        let mut summary = Summary::default();
+        summary.observe(&trace("a", "sqs", 200, None));
+        let mut report = report(&summary);
+        report.emulator = Some("moto (started by Lenslet)".into());
+        let terminal = report.render("~/.lenslet/runs/r2.jsonl");
+        let first = terminal.lines().next().unwrap();
+        assert!(
+            first.ends_with(" · against moto (started by Lenslet)"),
+            "{first}"
+        );
+        let md = report.markdown();
+        let stats = md.lines().find(|line| line.contains("AWS call")).unwrap();
+        assert_eq!(
+            stats,
+            "1 AWS call · 0 errors · 1 service · against moto (started by Lenslet)"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["emulator"], "moto (started by Lenslet)");
+        // Reports written before 12.0 have no `emulator` and say nothing.
+        report.emulator = None;
+        assert!(!report.markdown().contains("against"));
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("emulator")
+                .is_none()
+        );
     }
 
     #[test]
