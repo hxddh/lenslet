@@ -1,4 +1,4 @@
-# Lenslet run files (format 3)
+# Lenslet run files (format 4)
 
 Each `lenslet run` writes one JSONL file: `~/.lenslet/runs/YYYYMMDD-HHMMSS-PID.jsonl`,
 or `--trace PATH` (an existing file there is replaced). Every line is an
@@ -6,84 +6,78 @@ object with a `type`:
 
 ```text
 {"type":"run", ...}      first line: what the run is
-{"type":"call", ...}     one per proxied call (a slow call may also get an earlier pending line)
+{"type":"call", ...}     one per proxied call, written when the call finishes
 {"type":"end", ...}      last line, once the run ends: the report
 ```
 
+Next to it, `<run>.log` holds the test command's combined stdout and stderr
+(owner-only), and `<run>.emulator.log` moto's output when Lenslet started moto.
+
 Lenslet computes every fact once, when it writes the line: the error, the
-IAM action, whether the access is new. The window and `--json` only read
-those facts, so they always agree. Readers ignore unknown fields. Format 3 is
-not compatible with earlier files.
+IAM access, whether it is in the lock. The window, `--json` and `lenslet
+check` only read those facts, so they always agree. A reader follows a live
+run by reading the file as it grows (each line is written whole, with one
+write).
+
+Readers refuse any other format: the `run` header and the `end` report carry
+`version: 4`, and a file with another version fails with `run file <path> is
+format N; this Lenslet reads format 4 — re-run your tests`. Readers ignore
+unknown fields.
 
 ## `run`
 
 | field | meaning |
 | --- | --- |
-| `version` | `3` |
+| `version` | `4` |
 | `run` | the file stem, e.g. `20261115-095354-9655` |
-| `command` | argv of the program; empty for a bare proxy session |
-| `cwd` | where `lenslet run` was started (the default lock is `cwd/lenslet.lock`) |
-| `pid` | Lenslet's process id (to tell a live run from a crashed one) |
+| `command` | argv of the test command |
+| `cwd` | where `lenslet run` was started (the default lock is `cwd/lenslet.lock`; `lenslet check` defaults to the newest finished run of the current directory) |
+| `pid` | the `lenslet run` process. It is a live run while the file has no `end` line and this process is alive. To stop a run, send `SIGTERM` (or `SIGINT`) to its process group: Lenslet stops the test command's process group, writes the `end` report and stops the moto it started |
 | `endpoint` | what SDKs point at, e.g. `http://127.0.0.1:37505` |
 | `upstream` | the emulator's URL, e.g. `https://127.0.0.1:9298` |
-| `emulator` | what answered the calls: `moto (started by Lenslet)` when Lenslet started moto for the run (`--emulator moto`, or no emulator was running), `moto`, `localstack` or `aws-emulator` when one was found running (recognized by its protocol), or the upstream URL for anything else. Absent in files written before 12.0 |
+| `emulator` | what answered the calls: `moto (started by Lenslet)` when Lenslet started moto for the run (`--emulator moto`, or no emulator was running), `moto`, `localstack` or `aws-emulator` when one was found running (recognized by its protocol), or the upstream URL for anything else |
 | `started` | RFC3339 |
-| `lock` | the lock path (relative to `cwd` when inside it) when the run is compared with one |
-| `policy` | the IAM policy JSON path when `--policy` is used |
-| `enforce` | `true` when `--enforce` actively blocks unlocked calls |
-| `routes` | `{service: URL}` per-service upstream overrides (`--route`, or auto-routing), when any |
-| `allow_docker` | `true` when `--allow-docker` let container bridge connections reach the proxy |
-| `max_body` | the body capture limit in bytes, when `--max-body` was given |
-| `log` | the captured stdout/stderr file of the command (`--log`), when kept |
+| `lock` | the lock path (relative to `cwd` when inside it) the run is compared with, or `null` when there is no lock |
+| `log` | the path of `<run>.log`, the test command's combined stdout and stderr |
+| `allow_docker` | `true` when `--allow-docker` let container bridge connections reach the proxy (omitted when false) |
 
 ## `call`
 
 | field | meaning |
 | --- | --- |
-| `id` | unique call id; a later line with the same id replaces an earlier one |
+| `id` | unique call id |
 | `at` | RFC3339 request-arrival time |
 | `method`, `path`, `host` | as sent; `path` includes the query |
 | `service` | SigV4 scope service (header or presigned URL); `s3` for SigV2; else `aws` |
-| `region` | SigV4 scope region |
+| `operation` | from `x-amz-target`, `x-id`, the Query `Action=`, the Smithy RPCv2 path, the S3/Lambda/Bedrock/API Gateway REST shape, or the HTTP method |
+| `status`, `ms` | HTTP status and full exchange time (after the response body ended) |
+| `authorization` | an Authorization header was present |
+| `region` | SigV4 scope region (omitted when unsigned) |
 | `invocation_id` | SDK `amz-sdk-invocation-id`, shared across retries of one call |
 | `attempt`, `max_attempts` | retry attempt (`> 1`) and configured max from `amz-sdk-request` |
-| `operation` | from `x-amz-target`, `x-id`, the Query `Action=`, the S3/Lambda/Bedrock/API Gateway REST shape, or the HTTP method |
-| `status`, `ms` | HTTP status (`0` while pending) and full exchange time |
-| `authorization` | an Authorization header was present |
-| `pending` | `true` on a line for a call still running after 1 s (carries full request headers and captured body) |
-| `error` | proxy-side failure, e.g. the emulator was unreachable |
-| `problem` | `{code, message?, hint?}` for status ≥ 400 or a proxy failure |
-| `access` | `[{action, resource, new?, unverified?}]` this call needs: usually one; one per table/parameter for batches; each item's action for a DynamoDB transaction; the source read for an S3 copy |
+| `error` | proxy-side failure, e.g. the emulator was unreachable (status `502`) |
+| `problem` | `{code, message?, hint?}` for status ≥ 400 or a proxy failure; `hint` is the likely cause, including cross-call causes (a resource deleted earlier in the run, created in another region) |
+| `access` | `[{action, resource, new?, unverified?}]` this call needs, as the lock records it: usually one; one per table/parameter for batches; each item's action for a DynamoDB transaction; the source read for an S3 copy. `new`: not in the lock (only when there is one) |
 | `implied` | `[{action, resource, new?, unverified?}]` needed elsewhere (SSE-KMS key, passed role) |
-| `new` | at least one permission on this call is not in the lock/policy |
-| `blocked` | `true` when `--enforce` denied the call at the proxy with an AWS `AccessDenied` reply |
-| `blocked_phase` | `request` (the call never reached the emulator) or `response` (the emulator had already run it; only its response revealed the denied permission, e.g. the SSE-KMS key of an S3 object) |
-| `replay_of` | the id of the recorded call this one re-sends (`x-lenslet-replay-of`) |
-| `caller_role` | normalized IAM role ARN (`arn:aws:iam::*:role/...`) when the call used temporary session credentials from an earlier `sts:AssumeRole*` call in the run |
-| `target` | human-readable semantic target summary (e.g. `table/orders · orderId="ord-42"`, `s3://bucket/key`, `queue/jobs`, `alias/app` for a KMS key named by alias) |
-| `protocol` | the client's HTTP version (`HTTP/1.1`, `HTTP/2.0`) |
-| `upstream_protocol` | the HTTP version of the upstream's response |
-| `upstream` | the upstream URL that handled this call (it differs from the header's when a route applies) |
-| `client_addr` | the calling socket's address, e.g. `127.0.0.1:54321` |
-| `ttfb_ms` | time to the upstream's first response byte, in milliseconds |
-| `access_key_id` | the SigV4 access key id the request was signed with (header or presigned URL) |
-| `request`, `response` | `{headers, trailers?, content_type?, raw_content_type?, body?}`: `trailers` are HTTP/2 or `aws-chunked` trailing headers; `raw_content_type` is the full `Content-Type` when it had parameters |
+| `concrete` | `[{action, resource}]`: the exact permissions, own then implied, derived when the call finished from its complete request body (exact S3 keys, the signing region, un-normalized names). What `lenslet check --policy` evaluates; it never re-derives from the stored body |
+| `request`, `response` | `{headers, content_type?, body?}` |
 
-`body` is `{text?, hex?, raw_b64?, blob?, encoding?, bytes, decoded_bytes?, truncated, binary, sha256}`. Headers,
-query strings and bodies are preserved verbatim with **zero redaction**. `text`
-holds up to 1 MiB by default (`--max-body` to change) of decoded text (`identity`,
-`aws-chunked`, `application/vnd.amazon.eventstream`, `gzip`, `deflate`, `zstd`,
-and Smithy RPCv2 / AWS CBOR decoded into JSON for reading; wire bytes are
-forwarded untouched). Binary payloads record `hex` (first 4096 bytes) alongside
-`bytes` and `sha256` over the whole wire body. `decoded_bytes` is the decoded
-size when it differs from the wire `bytes`. Exact wire bytes are kept too:
-inline as `raw_b64` for binary or encoded bodies up to 32 KiB, and as `blob`,
-the name of a content-addressed file `<sha256>.bin` in a `blobs/` directory
-next to the run file, for larger or truncated ones (up to 64 MiB). Blobs no
-run file names are deleted when old runs are pruned, never while a run is
-active.
+A call has `new` access when any of its `access` or `implied` entries has
+`new: true`.
+
+`body` is `{text?, encoding?, bytes, truncated, binary, sha256}`. Headers,
+query strings and bodies are preserved verbatim with **zero redaction**.
+`text` holds at most 1 MiB of the body as text: `aws-chunked` is unframed,
+`gzip` decompressed, and Smithy RPCv2 CBOR decoded into JSON; `encoding`
+names what was decoded. Other encodings, and binary payloads, keep only
+`bytes` and `sha256` (`binary: true`). `bytes` and `sha256` always cover the
+whole wire body; `truncated` means `text` is a prefix. Wire bytes are
+forwarded untouched.
 
 ### Access derivation
+
+Derivation reads the complete request body (up to 64 MiB) of a call whose
+resource is named in its body, whatever the run file keeps.
 
 - **Action**: `{iam prefix}:{operation}`, plus exceptions. The SigV4 names
   `monitoring`, `email` and `bedrock-runtime` become `cloudwatch`, `ses` and
@@ -119,8 +113,7 @@ active.
     qualified ARN, or `?Qualifier=prod`) needs the qualified ARN
     `function:fn:prod`; a grant on `function:fn` does not cover it.
   - KMS: a key named by alias (`alias/app` or an alias ARN) is authorized on
-    the key, which the request does not name: `arn:aws:kms:*:*:key/*` (the
-    alias stays in `target`). `CreateAlias` / `DeleteAlias` / `UpdateAlias`
+    the key, which the request does not name: `arn:aws:kms:*:*:key/*`. `CreateAlias` / `DeleteAlias` / `UpdateAlias`
     need the alias and the key(s).
   - Bedrock: invoking through an inference profile (`us.`, `eu.`, `apac.`,
     `global.` ids or profile ARNs) needs the action on the profile and on the
@@ -135,7 +128,7 @@ active.
 - **Normalization**: UUIDs, runs of six or more digits, and hex segments of six
   or more characters become `*`, so generated test names do not churn the lock.
 - **Unreadable bodies**: when the body that names the resource cannot be read
-  (binary such as CBOR, or longer than the 64 MiB inspection limit), the
+  (binary, an encoding other than gzip, or longer than 64 MiB), the
   action stands on resource `*` with `unverified: true`. That line is stable
   and can be accepted into the lock; a policy grants it only with
   `Resource: "*"`, and any `Deny` on the action applies to it.
@@ -156,110 +149,115 @@ active.
 
 ## `end`
 
-The report: the same object `lenslet run --json` and `lenslet last --json`
-print. `lenslet run --markdown PATH` renders it for PR comments and job
-summaries.
+The report: the same object `lenslet run --json PATH` writes.
+`lenslet run --markdown PATH` renders it for PR comments and job summaries.
 
 | field | meaning |
 | --- | --- |
-| `run`, `command`, `exit_code`, `ended`, `duration_ms` | the run; `exit_code` is the program's (`null` for a proxy session) |
-| `calls`, `retries`, `errors`, `blocked`, `unfinished`, `services`, `unmapped` | counts (`retries`, `blocked` and `unmapped` omitted when empty) |
-| `failures` | `[{id, service, operation, status, code, message?, hint?, attempt?, max_attempts?, blocked?}]` |
-| `access` | `[{action, resource, calls, errors, implied?, new?, via?, services?, unverified?}]`, sorted; `via` names the first three calls that needed it, e.g. `DYNAMODB DeleteItem`; `services` lists the SigV4 service of every call that needed it (never cut short) |
-| `roles` | `{ "<role arn>": [access entries...] }` per-role permission breakdown when `sts:AssumeRole*` session credentials were used (omitted when empty) |
-| `lock`, `policy` | the lock file or IAM policy JSON compared/enforced with, or `null` |
-| `access_added` | used by this run, not in the lock/policy |
-| `access_unused` | in the lock, not used by this run |
-| `regressions` | `{previous_run, previous_exit_code, previous_calls, previous_duration_ms, new_failures, fixed, new_access?}` compared with the previous run of the same command in the same directory, or `null` |
-| `findings` | `[{kind, severity, title, detail?, calls}]`, most severe first, then in call order (omitted when empty); see below |
-| `trace`, `endpoint`, `upstream` | where to look |
-| `emulator` | what answered the calls, as in the `run` header. The terminal report's first line and the Markdown report's counts line end with ` · against <emulator>`, e.g. `3 AWS calls · 0 errors · 1 service · against moto (started by Lenslet)` |
+| `version` | `4` |
+| `run`, `command`, `exit_code`, `ended`, `duration_ms` | the run; `exit_code` is the test command's (`128 + N` when signal N ended it, e.g. `143` after `SIGTERM`) |
+| `calls`, `errors` | recorded calls, and those with a `problem` |
+| `services` | `{service: calls}` |
+| `unmapped` | `{service: calls}` with no recognizable operation (not in `access`) |
+| `access` | `[{action, resource, calls, errors, implied?, via?, unverified?, new?, unused?}]`: every permission the run used, sorted, then the lock lines it did not use (`unused: true`, `calls: 0`). `new`: used, not in the lock. `via` names the first three calls that needed it, e.g. `DYNAMODB DeleteItem` |
+| `findings` | what is worth a look, failures first, each kind in call order; see below |
+| `regressions` | `{previous_run, previous_exit_code, new_failures, fixed}` compared with the previous finished run of the same command in the same directory (failure kinds `{service, operation, code}`), or `null` |
+| `lock` | the lock file compared with, or `null` |
+| `emulator` | what answered the calls, as in the `run` header |
+| `trace` | the run file |
+| `log` | `<run>.log`, the test command's output |
 
 ### Findings
 
-| kind | severity | one finding per |
+Each finding has `kind`, `title`, `detail?` and `calls` (the ids of the calls
+it is about, in call order).
+
+| kind | one finding per | more fields |
 | --- | --- | --- |
-| `failure` | `error` | distinct (service, operation, error code) that failed, with every call; an attempt a later retry recovered from is a `retries` finding instead |
-| `access` | `warning` | permission not in the lock/policy |
-| `n_plus_one` | `warning` | 5+ calls of one operation on one resource, each starting ≤100 ms after the previous ended, with different requests; names the batch API where one exists |
-| `leaked` | `info` | resource a successful call created that no later call deleted (S3 objects are not tracked) |
-| `retries` | `warning` if the invocation finally failed, else `info` | SDK invocation (`invocation_id`) with more than one attempt |
+| `failure` | distinct (service, operation, error code) that failed, with every call that failed that way. A failed SDK attempt that a later attempt of the same invocation recovered from is not a failure | `service`, `operation`, `status` and `message?` (of the latest such call), `code`, `hint?` (the first likely cause among them) |
+| `access` | permission not in the lock | `action`, `resource`, `implied?`, `unverified?` |
 
-## Live events
+## `lenslet check`
 
-While a run is going, the proxy also answers requests of its own on the
-run's `endpoint`, for loopback clients only (`403` for anyone else, also
-under `--allow-docker`). They never reach the emulator and are never
-recorded.
+`lenslet check --policy PATH [RUN] [--json] [--markdown PATH]` evaluates the
+`concrete` access of every call of a finished run against an IAM identity
+policy. `RUN` is a run file path, a run id or a unique prefix of one, or
+`latest`; the default is the newest finished run whose `cwd` is the current
+directory (an error when there is none).
 
-- `GET /_lenslet/health` → `200 {"run": "<run id>", "pid": <pid>, "endpoint": "...", "upstream": "...", "routes": {...}, "enforce": <bool>, "calls": <n>, "errors": <n>, "blocked": <n>}`.
-- `GET /_lenslet/events` → `200`, `content-type: text/event-stream`: every
-  line already in the run file, in order (the `run` header first), then each
-  new line as it is written, each as one event `data: <the exact JSONL
-  line>\n\n`. No line is skipped or repeated. An idle stream gets a
-  `: keepalive\n\n` comment every 15 s. The stream ends after the `end` line.
-  HTTP/1.1 and HTTP/2 prior-knowledge (h2c) clients both work.
-- `POST /_lenslet/shutdown` → `200 {"stopping":true}`: ends the run as if
-  the command had been stopped.
+The policy supports `Allow` and `Deny`, `Action` / `NotAction`, `Resource` /
+`NotResource` and IAM wildcards, and fails closed: an `Allow` must cover
+every resource a partly unknown ARN (`*`) could stand for, a `Deny` applies
+when it may match one. The account is never known locally, so any account
+in the policy matches; an `Allow` pinned to a region covers that region
+only, not an unknown (`*`) one. A statement with a `Condition` (or a
+`${...}` policy variable) is **not evaluated**: it never allows anything; a
+denial it may decide is reported with `conditional: true` and the statement.
+A statement that restricts `Principal` is refused.
 
-A request with `x-lenslet-replay-of: <call id>` is proxied and recorded like
-any call, with `replay_of` set; the header is removed before forwarding and
-is not recorded among the request headers.
+`--json` prints `{run, policy, calls, denied: [{call, service, operation,
+action, resource, implied?, unverified?, allowed, reason, by?,
+conditional?}]}`; `reason` is `explicit_deny` (with `by`, the statement's
+`Sid` or `Statement[i]`) or `no_allow`. Exit 3 when anything is denied, 2 on
+errors, else 0.
+
+## `lenslet policy`
+
+`lenslet policy [--lock PATH | --run RUN]` prints an IAM policy JSON document
+for the lock (without `# test` lines) or a finished run's access: one
+statement per resource, actions sorted. ARN fields AWS leaves empty (S3,
+Route 53, IAM, API Gateway, Bedrock foundation models) stay empty.
+
+## `lenslet doctor --json`
+
+```json
+{
+  "version": "13.0.0",
+  "cli": "/usr/local/bin/lenslet",
+  "emulators": [{"name": "localstack", "url": "http://127.0.0.1:4566"}],
+  "managed": {"name": "moto", "available": true, "command": ["moto_server"]},
+  "test_command": "pytest",
+  "lock": "/work/app/lenslet.lock",
+  "ci_workflow": true
+}
+```
+
+`emulators` are the ones running now, recognized by their protocol (a
+loopback `AWS_ENDPOINT_URL`, AWS Emulator on 9298, LocalStack on 4566, moto
+on 5000). `managed` is the moto Lenslet starts when none is running
+(`command: null` when it is not installed). `test_command` is the project's
+test command as `lenslet init` detects it, or `null`. `lock` is
+`./lenslet.lock` when it exists, else `null`.
 
 ## The emulator log
 
 When Lenslet starts moto for a run, moto's own output goes to
-`~/.lenslet/runs/<run>.emulator.log` (owner-only), not the terminal; it is
-removed with its run. moto runs in its own process group on a free loopback
-port and is stopped (`SIGTERM`, then `SIGKILL` after 2 s) when the run ends,
-also on Ctrl-C or an error.
-
-## `lenslet policy`
-
-`lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE] [--region REG] [--account ACC]`
-prints an IAM policy for the lock (without `# test` lines) or a finished run's
-access: IAM JSON (default), or a Terraform `data "aws_iam_policy_document"
-"lenslet"` data source. One statement per resource, actions sorted. `--lock`
-and `--run` compile the same access to the same statements. ARN fields AWS
-leaves empty stay empty; `*` regions and accounts become `--region` /
-`--account`, or in Terraform `data.aws_region.current.region` and
-`data.aws_caller_identity.current.account_id` (a Bedrock foundation model
-keeps region `*`). `--format cfn`, `sam` and `cdk` were removed in 12.0
-(exit 2).
-
-## `lenslet check`
-
-`lenslet check [--policy PATH | --lock PATH] [RUN] [--json] [--markdown PATH]`
-derives each recorded call's access again from its recorded request and
-evaluates it against the policy or lock (default `./lenslet.lock`; `RUN` as
-for `lenslet diff`, default the newest finished run). A request body the run
-file kept only in part (`--max-body`) is read as truncated. `--json` prints
-`{run, gate, policy, calls, denied: [{id, service, operation, action,
-resource, implied?, unverified?, allowed, by?, reason}]}`; `reason` is
-`explicit_deny` (with `by`, the statement's `Sid` or `Statement[i]`) or
-`no_allow`. Exit 3 when anything is denied, 2 on usage errors, else 0.
+`~/.lenslet/runs/<run>.emulator.log` (owner-only), not the terminal. moto
+runs in its own process group on a free loopback port and is stopped
+(`SIGTERM`, then `SIGKILL` after 2 s) when the run ends, also on Ctrl-C,
+`SIGTERM` or an error.
 
 ## `lenslet.lock`
 
 ```text
 # AWS access observed by `lenslet run`: action, resource.
-dynamodb:GetItem   arn:aws:dynamodb:*:*:table/orders
-kms:Decrypt        arn:aws:kms:*:*:key/*  # implied
+dynamodb:CreateTable  arn:aws:dynamodb:*:*:table/orders  # test
+dynamodb:GetItem      arn:aws:dynamodb:*:*:table/orders
+kms:Decrypt           arn:aws:kms:*:*:key/*
 ```
 
-The file has one `action  resource` pair per line, sorted. Text after `#` is a
-comment. A comment containing the word `test` marks a line that only the tests
-need: `--check` still counts it, but `lenslet policy` leaves it out. A lock
-grants exactly its lines: a `*` in a line (a generated name) is not a pattern
-over other names. `lenslet run --update` writes the file, only when the
-command succeeded; the window can add lines and toggle `test` marks. Every
-write is atomic (a temporary file renamed over the lock, permissions kept)
-and canonical: it keeps the `test` marks and the full-line comments at the
-top of the file; other comments are not kept. `--lock PATH` uses another file.
+The file has one `action  resource` pair per line, sorted. Text after `#` is
+a comment. A comment containing the word `test` marks a line that only the
+tests need: `--check` still counts it, but `lenslet policy` leaves it out. A
+lock grants exactly its lines: a `*` in a line (a generated name) is not a
+pattern over other names. `lenslet run --update` writes the file, only when
+the command succeeded; the window can add lines, remove them and toggle
+`test` marks. Every write is atomic (a temporary file renamed over the lock,
+permissions kept) and canonical: it keeps the `test` marks and the full-line
+comments at the top of the file; other comments are not kept. `--lock PATH`
+uses another file.
 
 ## Retention
 
-Lenslet keeps the newest 20 finished runs, while always preserving active runs,
-runs pinned in `~/.lenslet/runs/pinned.json`, and up to 2 recent runs per
-secondary project workspace so one busy repository does not evict another's
-baseline.
+Lenslet keeps the newest 20 finished runs on the machine (with their logs);
+a run that is still going is never deleted.

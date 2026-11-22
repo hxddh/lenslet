@@ -1417,7 +1417,7 @@ impl CheckReport {
             return out;
         }
         out.push_str(&format!(
-            "**{} denied** across {}. Grant them in `{}`, or change the code that needs them.\n\n| Call | Permission | Resource | Why |\n|---|---|---|---|\n",
+            "**{} denied** across {}. Grant what is intended in `{}`, or change the code that needs it.\n\n| Call | Permission | Resource | Why |\n|---|---|---|---|\n",
             plural(self.grouped().len(), "permission"),
             plural(self.calls, "call"),
             self.policy

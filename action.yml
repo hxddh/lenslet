@@ -1,5 +1,5 @@
 name: Lenslet
-description: Run your tests against a local AWS emulator and report, in the PR, the AWS access they need.
+description: Run your tests against a local AWS emulator and show, in the PR, the AWS access they need and why their AWS calls failed.
 author: hxddh
 branding:
   icon: eye
@@ -10,7 +10,7 @@ inputs:
     description: The test command, e.g. `npm test`. Runs under bash in working-directory.
     required: true
   upstream:
-    description: The emulator, as a port (HTTPS on 127.0.0.1), an http(s) URL, `auto` (an emulator already running in the job, found by its protocol, else moto when it is installed), or `moto` (the action installs moto and Lenslet starts and stops it). `sandbox` and `built-in` were removed in 12.0 and mean `moto`.
+    description: The emulator, as `auto` (an emulator already running in the job, found by its protocol, else moto when it is installed), `moto` (the action installs moto and Lenslet starts and stops it), a port (HTTPS on 127.0.0.1) or an http(s) URL.
     default: 'auto'
   emulator:
     description: '`moto` (same as `upstream: moto`), or a command that starts the emulator in the background; the action then waits for `upstream` to accept connections.'
@@ -19,25 +19,19 @@ inputs:
     description: Where to run the command and look for the lock file.
     default: '.'
   lock:
-    description: Lock file path (relative to working-directory). Default lenslet.lock.
+    description: Lock file path (relative to working-directory). Default lenslet.lock. The run fails (exit 3) when it uses access the lock does not list; while there is no lock file yet, it only reports.
     default: ''
-  check:
-    description: Fail when the run uses access that is not in the lock. Skipped (with a notice) while there is no lock file yet.
-    default: 'true'
-  strict:
-    description: With check, also fail when the lock lists access the run did not use.
-    default: 'false'
-  enforce:
-    description: Block calls outside the lock (or policy) live at the proxy with realistic AWS AccessDenied responses.
-    default: 'false'
   policy:
-    description: Check or enforce against an IAM policy JSON document instead of lenslet.lock.
+    description: An IAM policy JSON document (relative to working-directory). After the run, `lenslet check --policy` checks the run's access against it and fails (exit 3) when the policy denies any of it.
     default: ''
+  strict:
+    description: Also fail when the lock lists access the run did not use.
+    default: 'false'
   comment:
     description: On pull requests, post the report as one comment and keep it updated. Needs `pull-requests write` permission.
     default: 'true'
   version:
-    description: Lenslet version to install. Default is the version this action is pinned to (for example `lenslet-v4.0.0` installs 4.0.0).
+    description: Lenslet version to install, e.g. `13.0.0`. Default is the version this action is pinned to (`hxddh/lenslet@lenslet-v13.0.0` installs 13.0.0).
     default: ''
   binary:
     description: Use this lenslet binary instead of installing one (for builds from source).
@@ -45,13 +39,13 @@ inputs:
 
 outputs:
   exit-code:
-    description: lenslet's exit code (the command's own code when it failed, 3 when access changed).
+    description: The outcome. The command's own code when it failed; 3 when the run used access not in the lock (or, with strict, left lock lines unused) or the policy denied some of it; 2 when Lenslet could not run; else 0.
     value: ${{ steps.run.outputs.exit-code }}
   report:
-    description: Path to the JSON report of this invocation.
+    description: Path to the JSON report of the run.
     value: ${{ steps.run.outputs.report }}
   markdown:
-    description: Path to the Markdown report of this invocation.
+    description: Path to the Markdown report (the run, then the policy check when `policy` is set).
     value: ${{ steps.run.outputs.markdown }}
 
 runs:
@@ -88,13 +82,9 @@ runs:
       run: |
         set -euo pipefail
         managed=false
-        case "$UPSTREAM" in
-          moto) managed=true ;;
-          sandbox|built-in)
-            managed=true
-            echo "::notice::upstream: $UPSTREAM was removed in Lenslet 12.0; using moto (started by Lenslet) instead" ;;
-        esac
-        [ "$EMULATOR" = "moto" ] && managed=true
+        if [ "$UPSTREAM" = "moto" ] || [ "$EMULATOR" = "moto" ]; then
+          managed=true
+        fi
         echo "managed=$managed" >> "$GITHUB_OUTPUT"
 
     - name: Install moto
@@ -155,9 +145,7 @@ runs:
         MANAGED: ${{ steps.mode.outputs.managed }}
         LOCK: ${{ inputs.lock }}
         POLICY: ${{ inputs.policy }}
-        CHECK: ${{ inputs.check }}
         STRICT: ${{ inputs.strict }}
-        ENFORCE: ${{ inputs.enforce }}
       run: |
         # GitHub runs this with `bash -e`: a failing lenslet must not end the
         # step before the summary and outputs are written.
@@ -168,60 +156,69 @@ runs:
         report="$dir/report.json"
         markdown="$dir/report.md"
         if [ "$MANAGED" = "true" ]; then
-          args=(run --emulator moto --json "$report" --markdown "$markdown")
+          args=(run --emulator moto)
         elif [ "$UPSTREAM" = "auto" ]; then
           if [ -n "$EMULATOR" ]; then
-            args=(run --upstream 9298 --json "$report" --markdown "$markdown")
+            args=(run --upstream 9298)
           else
-            args=(run --json "$report" --markdown "$markdown")
+            args=(run)
           fi
         else
-          args=(run --upstream "$UPSTREAM" --json "$report" --markdown "$markdown")
+          args=(run --upstream "$UPSTREAM")
         fi
+        args+=(--json "$report" --markdown "$markdown")
         lock="${LOCK:-lenslet.lock}"
-        if [ -n "$POLICY" ]; then
-          args+=(--policy "$POLICY")
-          [ "$CHECK" = "true" ] && args+=(--check)
-          [ "$ENFORCE" = "true" ] && args+=(--enforce)
+        args+=(--lock "$lock")
+        if [ -f "$lock" ]; then
+          args+=(--check)
+          [ "$STRICT" = "true" ] && args+=(--strict)
         else
-          args+=(--lock "$lock")
-          if [ -f "$lock" ]; then
-            if [ "$CHECK" = "true" ]; then
-              args+=(--check)
-              [ "$STRICT" = "true" ] && args+=(--strict)
-            fi
-            [ "$ENFORCE" = "true" ] && args+=(--enforce)
-          elif [ "$CHECK" = "true" ] || [ "$ENFORCE" = "true" ]; then
-            echo "::notice::No $lock yet: reporting only. Create it with \`lenslet run --update -- $COMMAND\` and commit it."
-          fi
+          echo "::notice::No $lock yet: reporting only. Create it with \`lenslet run --update -- $COMMAND\` and commit it."
         fi
         "$LENSLET_BIN" "${args[@]}" -- bash -c "$COMMAND"
         code=$?
+        if [ "$code" = "3" ] && command -v jq >/dev/null 2>&1 && [ -f "$report" ]; then
+          while IFS=$'\t' read -r action resource; do
+            [ -n "$action" ] || continue
+            echo "::error file=$lock,title=New AWS permission::+ $action on $resource (if intended, accept it with \`lenslet run --update\` and commit $lock)"
+          done < <(jq -r '.access[] | select(.new == true) | [.action, .resource] | @tsv' "$report")
+          if [ "$STRICT" = "true" ]; then
+            while IFS=$'\t' read -r action resource; do
+              [ -n "$action" ] || continue
+              line=$(awk -v a="$action" -v r="$resource" '$1 == a && $2 == r { print NR; exit }' "$lock")
+              echo "::error file=$lock${line:+,line=$line},title=Unused AWS permission::- $action on $resource was not exercised by this run"
+            done < <(jq -r '.access[] | select(.unused == true) | [.action, .resource] | @tsv' "$report")
+          fi
+          echo "::error::AWS access changed: see the job summary. If it is intended, run \`lenslet run --update\` and commit $lock."
+        fi
+        # The policy check: the run's own access, against the policy.
+        if [ -n "$POLICY" ] && [ -f "$report" ]; then
+          trace=$(command -v jq >/dev/null 2>&1 && jq -r '.trace' "$report" || true)
+          check_json="$dir/check.json"
+          check_md="$dir/check.md"
+          "$LENSLET_BIN" check --policy "$POLICY" ${trace:+"$trace"} --json --markdown "$check_md" > "$check_json"
+          check=$?
+          [ -f "$check_md" ] && { echo; cat "$check_md"; } >> "$markdown"
+          if [ "$check" = "3" ]; then
+            if command -v jq >/dev/null 2>&1; then
+              while IFS=$'\t' read -r action resource why; do
+                [ -n "$action" ] || continue
+                echo "::error file=$POLICY,title=Denied by the IAM policy::$action on $resource ($why)"
+              done < <(jq -r '.denied[] | [.action, .resource, (if .conditional then "statement \(.by) is conditional: not evaluated" elif .reason == "explicit_deny" then "denied by statement \(.by)" else "no statement allows it" end)] | @tsv' "$check_json" | sort -u)
+            fi
+            echo "::error::$POLICY does not allow all the access this run used: see the job summary. Grant it in $POLICY, or change the code that needs it."
+          elif [ "$check" != "0" ]; then
+            echo "::error::lenslet check --policy $POLICY could not run (exit $check)"
+          fi
+          if [ "$code" = "0" ] && [ "$check" != "0" ]; then
+            code=$check
+          fi
+        fi
         [ -f "$markdown" ] && cat "$markdown" >> "$GITHUB_STEP_SUMMARY"
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         if [ -f "$report" ]; then
           echo "report=$report" >> "$GITHUB_OUTPUT"
           echo "markdown=$markdown" >> "$GITHUB_OUTPUT"
-        fi
-        if [ "$code" = "3" ]; then
-          if command -v jq >/dev/null 2>&1 && [ -f "$report" ]; then
-            while IFS=$'\t' read -r action resource; do
-              [ -n "$action" ] || continue
-              echo "::error file=$lock,title=New AWS permission::+ $action on $resource (accept with \`lenslet run --update\`)"
-            done < <(jq -r '.access_added[]? | [.action, .resource] | @tsv' "$report")
-            if [ "$STRICT" = "true" ] && [ -f "$lock" ]; then
-              while IFS=$'\t' read -r action resource; do
-                [ -n "$action" ] || continue
-                line=$(awk -v a="$action" -v r="$resource" '$1 == a && $2 == r { print NR; exit }' "$lock")
-                if [ -n "$line" ]; then
-                  echo "::error file=$lock,line=$line,title=Unused AWS permission::- $action on $resource was not exercised by this run"
-                else
-                  echo "::error file=$lock,title=Unused AWS permission::- $action on $resource was not exercised by this run"
-                fi
-              done < <(jq -r '.access_unused[]? | [.action, .resource] | @tsv' "$report")
-            fi
-          fi
-          echo "::error::AWS access changed: see the job summary. Accept it with \`lenslet run --update\` and commit $lock."
         fi
         exit 0
 
