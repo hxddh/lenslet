@@ -1,0 +1,762 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "sqs.CreateQueue",
+   "access": [
+    [
+     "sqs:CreateQueue",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.CreateQueue",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "CreateQueue",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.CreateQueue"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.CreateQueue"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueName\": \"corpus-jobs\"}",
+      "bytes": 28,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.GetQueueUrl",
+   "access": [
+    [
+     "sqs:GetQueueUrl",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.GetQueueUrl",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "GetQueueUrl",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.GetQueueUrl"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.GetQueueUrl"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueName\": \"corpus-jobs\"}",
+      "bytes": 28,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.SendMessage",
+   "access": [
+    [
+     "sqs:SendMessage",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.SendMessage",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "SendMessage",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.SendMessage"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.SendMessage"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"MessageBody\": \"m\"}",
+      "bytes": 82,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.SendMessageBatch",
+   "note": "batch APIs are authorized as the single action",
+   "access": [
+    [
+     "sqs:SendMessage",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.SendMessageBatch",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "SendMessageBatch",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.SendMessageBatch"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.SendMessageBatch"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"Entries\": [{\"Id\": \"1\", \"MessageBody\": \"a\"}, {\"Id\": \"2\", \"MessageBody\": \"b\"}]}",
+      "bytes": 141,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.ReceiveMessage",
+   "access": [
+    [
+     "sqs:ReceiveMessage",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.ReceiveMessage",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "ReceiveMessage",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.ReceiveMessage"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.ReceiveMessage"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"MaxNumberOfMessages\": 2}",
+      "bytes": 88,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.ChangeMessageVisibility",
+   "access": [
+    [
+     "sqs:ChangeMessageVisibility",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.ChangeMessageVisibility",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "ChangeMessageVisibility",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.ChangeMessageVisibility"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.ChangeMessageVisibility"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"ReceiptHandle\": \"fhikbbgawuvxtvnvnwjauzjxxmcchfmbtvsrntkuwqxxmrtqwrfcadjggksbnaefgfmgmaqpvjfditblsbwatouyzdypgyblujqgealkgztxbmljqkfrxrrlsqszryfgnxmgecgxqnennysdhiwjsnvsguwgmvmirglmpfiegfvpjphwjcgfiqeak\", \"VisibilityTimeout\": 5}",
+      "bytes": 292,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.DeleteMessage",
+   "access": [
+    [
+     "sqs:DeleteMessage",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.DeleteMessage",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "DeleteMessage",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.DeleteMessage"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.DeleteMessage"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"ReceiptHandle\": \"fhikbbgawuvxtvnvnwjauzjxxmcchfmbtvsrntkuwqxxmrtqwrfcadjggksbnaefgfmgmaqpvjfditblsbwatouyzdypgyblujqgealkgztxbmljqkfrxrrlsqszryfgnxmgecgxqnennysdhiwjsnvsguwgmvmirglmpfiegfvpjphwjcgfiqeak\"}",
+      "bytes": 268,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.DeleteMessageBatch",
+   "access": [
+    [
+     "sqs:DeleteMessage",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.DeleteMessageBatch",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "DeleteMessageBatch",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.DeleteMessageBatch"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.DeleteMessageBatch"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"Entries\": [{\"Id\": \"1\", \"ReceiptHandle\": \"aqwcyxhtjhxtzuiluechkhoolraibfshhmzouftglfpyfofkkqefksorwlzitwuujgtwvpwvhwqpuykuhkriejxbhxwxtzoadmtnattehhxzgyhytpfsboglhynfheldqdubfdfnexauekqjgmsipbqdscafkpsrjmqbetyebjzmpuasquorgmeaa\"}]}",
+      "bytes": 294,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.GetQueueAttributes",
+   "access": [
+    [
+     "sqs:GetQueueAttributes",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.GetQueueAttributes",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "GetQueueAttributes",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.GetQueueAttributes"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.GetQueueAttributes"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"AttributeNames\": [\"All\"]}",
+      "bytes": 89,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.SetQueueAttributes.kms",
+   "note": "implied: what producers of the encrypted queue will need",
+   "access": [
+    [
+     "sqs:SetQueueAttributes",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "call": {
+    "id": "sqs.SetQueueAttributes.kms",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "SetQueueAttributes",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.SetQueueAttributes"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.SetQueueAttributes.kms"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"Attributes\": {\"KmsMasterKeyId\": \"alias/corpus\"}}",
+      "bytes": 112,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.ListQueues",
+   "access": [
+    [
+     "sqs:ListQueues",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.ListQueues",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "ListQueues",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.ListQueues"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.ListQueues"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.TagQueue",
+   "access": [
+    [
+     "sqs:TagQueue",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.TagQueue",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "TagQueue",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.TagQueue"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.TagQueue"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\", \"Tags\": {\"team\": \"corpus\"}}",
+      "bytes": 90,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.ListQueueTags",
+   "access": [
+    [
+     "sqs:ListQueueTags",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.ListQueueTags",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "ListQueueTags",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.ListQueueTags"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.ListQueueTags"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\"}",
+      "bytes": 62,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.PurgeQueue",
+   "access": [
+    [
+     "sqs:PurgeQueue",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.PurgeQueue",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "PurgeQueue",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.PurgeQueue"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.PurgeQueue"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\"}",
+      "bytes": 62,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sqs.DeleteQueue",
+   "access": [
+    [
+     "sqs:DeleteQueue",
+     "arn:aws:sqs:*:*:corpus-jobs"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sqs.DeleteQueue",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sqs",
+    "operation": "DeleteQueue",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSQS.DeleteQueue"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sqs.DeleteQueue"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"QueueUrl\": \"http://127.0.0.1:4566/123456789012/corpus-jobs\"}",
+      "bytes": 62,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

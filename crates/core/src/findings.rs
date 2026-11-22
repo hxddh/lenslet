@@ -316,6 +316,28 @@ fn batch_api(service: &str, operation: &str) -> Option<Option<&'static str>> {
     }))
 }
 
+/// What the batch API needs from IAM when it is not the permission the
+/// single call already has, so a recommendation never changes access
+/// silently. `None` when the batch is authorized as the single action
+/// (SQS, SNS, S3 `DeleteObjects`).
+fn batch_permission(service: &str, operation: &str) -> Option<&'static str> {
+    Some(match (service, operation) {
+        ("dynamodb", "GetItem") => "it needs `dynamodb:BatchGetItem` instead of `dynamodb:GetItem`",
+        ("dynamodb", "PutItem" | "DeleteItem") => {
+            "it needs `dynamodb:BatchWriteItem` instead of the single-item action"
+        }
+        ("ssm", "GetParameter") => "it needs `ssm:GetParameters` instead of `ssm:GetParameter`",
+        ("secretsmanager", "GetSecretValue") => {
+            "it also needs `secretsmanager:BatchGetSecretValue` on `*`"
+        }
+        ("kinesis", "PutRecord") => "it needs `kinesis:PutRecords` instead of `kinesis:PutRecord`",
+        ("firehose", "PutRecord") => {
+            "it needs `firehose:PutRecordBatch` instead of `firehose:PutRecord`"
+        }
+        _ => return None,
+    })
+}
+
 struct Burst<'a> {
     first: usize,
     ids: Vec<String>,
@@ -389,7 +411,10 @@ fn n_plus_one(calls: &[&Trace], found: &mut Found) {
             format!(" on {}", short_resource(resource))
         };
         let advice = match batch_api(service, operation).flatten() {
-            Some(batch) => format!("`{batch}` does this in fewer round trips."),
+            Some(batch) => match batch_permission(service, operation) {
+                Some(needs) => format!("`{batch}` does this in fewer round trips ({needs})."),
+                None => format!("`{batch}` does this in fewer round trips."),
+            },
             None => "each call waited for the previous one.".to_string(),
         };
         found.push((
@@ -752,7 +777,7 @@ mod tests {
         assert_eq!(
             burst.detail.as_deref(),
             Some(
-                "6 calls on table/orders, one after another in 23 ms: `BatchGetItem` does this in fewer round trips."
+                "6 calls on table/orders, one after another in 23 ms: `BatchGetItem` does this in fewer round trips (it needs `dynamodb:BatchGetItem` instead of `dynamodb:GetItem`)."
             )
         );
 

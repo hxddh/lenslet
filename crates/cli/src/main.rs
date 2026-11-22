@@ -67,7 +67,7 @@ Usage:
       Re-check a recorded run (default: the newest finished one) against a
       policy or lock without re-running it: each denied permission and the
       statement that denied it. Exit {changed} if anything is denied.
-  lenslet policy [--lock PATH | --run RUN] [--format iam|terraform|cfn|sam|cdk] [--role ROLE]
+  lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE]
       Compile least-privilege IAM JSON, Terraform HCL, CloudFormation, SAM, or CDK
       TypeScript from lenslet.lock or a recorded run.
   lenslet env [--shell sh|fish|pwsh|dotenv|docker] [--listen PORT]
@@ -1696,10 +1696,12 @@ fn env_cmd(args: Vec<String>) -> Result<i32> {
     Ok(0)
 }
 
-const POLICY_USAGE: &str = "usage: lenslet policy [--lock PATH | --run RUN] [--format iam|terraform|cfn|sam|cdk] [--role ROLE] [--region REG] [--account ACC]";
+const POLICY_USAGE: &str = "usage: lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE] [--region REG] [--account ACC]";
 
-/// `lenslet policy`: compile least-privilege IAM JSON or IaC (Terraform, CloudFormation,
-/// SAM, CDK) from `lenslet.lock` or a recorded run.
+/// `lenslet policy`: an IAM policy (IAM JSON, or a Terraform
+/// `aws_iam_policy_document`) from `lenslet.lock` or a recorded run. Both
+/// sources compile through the same path, so the same access gives the same
+/// statements.
 fn policy(args: Vec<String>) -> Result<i32> {
     let mut lock_path: Option<PathBuf> = None;
     let mut run_spec: Option<String> = None;
@@ -1715,11 +1717,7 @@ fn policy(args: Vec<String>) -> Result<i32> {
             "--run" => run_spec = Some(it.next().context(POLICY_USAGE)?),
             "--format" | "-f" => {
                 let raw = it.next().context(POLICY_USAGE)?;
-                format = iac::PolicyFormat::parse(&raw).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown --format `{raw}`; expected iam, terraform, cfn, sam, or cdk"
-                    )
-                })?;
+                format = iac::PolicyFormat::parse(&raw).map_err(anyhow::Error::msg)?;
             }
             "--role" => role_filter = Some(it.next().context(POLICY_USAGE)?),
             "--region" => region = Some(it.next().context(POLICY_USAGE)?),
@@ -1770,15 +1768,8 @@ fn policy(args: Vec<String>) -> Result<i32> {
         } else {
             &report.access
         };
-        let inputs: Vec<iac::PolicyInput> = entries
-            .iter()
-            .map(|e| iac::PolicyInput {
-                access: access::Access::new(e.action.clone(), e.resource.clone()),
-                implied: e.used.implied,
-                via: e.used.via.clone(),
-            })
-            .collect();
-        println!("{}", iac::compile(&inputs, &opts));
+        let inputs = iac::inputs_from_entries(entries);
+        print!("{}", iac::compile(&inputs, &opts));
         eprintln!(
             "lenslet: compiled {} ({} permissions from run {}). Review before attaching it to a role.",
             format.label(),
@@ -1802,16 +1793,8 @@ fn policy(args: Vec<String>) -> Result<i32> {
             path.display()
         );
     };
-    let inputs: Vec<iac::PolicyInput> = locked
-        .access
-        .difference(&locked.test)
-        .map(|acc| iac::PolicyInput {
-            access: acc.clone(),
-            implied: locked.implied.contains(acc),
-            via: Vec::new(),
-        })
-        .collect();
-    println!("{}", iac::compile(&inputs, &opts));
+    let inputs = iac::inputs_from_lock(&locked);
+    print!("{}", iac::compile(&inputs, &opts));
     eprintln!(
         "lenslet: observed access from {} ({} permissions, {} marked `# test` left out). \
          Review before attaching it to a role.",

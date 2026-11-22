@@ -1,0 +1,351 @@
+{
+ "source": "hand-crafted: Bedrock is not served by moto",
+ "cases": [
+  {
+   "name": "bedrock.Converse.usProfile",
+   "note": "an inference profile needs the action on the profile and on the foundation model it routes to (any region)",
+   "access": [
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    ],
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "bedrock:InvokeModel",
+      "arn:aws:bedrock:us-east-1:*:inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+     ],
+     [
+      "bedrock:InvokeModel",
+      "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "bedrock.Converse.usProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/us.anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "Converse",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"messages\":[]}",
+      "bytes": 15,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.ConverseStream.globalProfile",
+   "access": [
+    [
+     "bedrock:InvokeModelWithResponseStream",
+     "arn:aws:bedrock:*:*:inference-profile/global.anthropic.claude-sonnet-4-20250514-v1:0"
+    ],
+    [
+     "bedrock:InvokeModelWithResponseStream",
+     "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "bedrock.ConverseStream.globalProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/global.anthropic.claude-sonnet-4-20250514-v1%3A0/converse-stream",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "ConverseStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"messages\":[]}",
+      "bytes": 15,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.Converse.apacProfile",
+   "access": [
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*:*:inference-profile/apac.amazon.nova-lite-v1:0"
+    ],
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "bedrock.Converse.apacProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/apac.amazon.nova-lite-v1%3A0/converse",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "Converse",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"messages\":[]}",
+      "bytes": 15,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.InvokeModel.profileArn",
+   "access": [
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*:*:inference-profile/eu.meta.llama3-2-3b-instruct-v1:0"
+    ],
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*::foundation-model/meta.llama3-2-3b-instruct-v1:0"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "bedrock:InvokeModel",
+      "arn:aws:bedrock:eu-west-1:123456789012:inference-profile/eu.meta.llama3-2-3b-instruct-v1:0"
+     ],
+     [
+      "bedrock:InvokeModel",
+      "arn:aws:bedrock:*::foundation-model/meta.llama3-2-3b-instruct-v1:0"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "bedrock.InvokeModel.profileArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/arn%3Aaws%3Abedrock%3Aeu-west-1%3A123456789012%3Ainference-profile%2Feu.meta.llama3-2-3b-instruct-v1%3A0/invoke",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "InvokeModel",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.InvokeModel.foundationModel",
+   "note": "foundation model ARNs have an empty account",
+   "access": [
+    [
+     "bedrock:InvokeModel",
+     "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "bedrock:InvokeModel",
+      "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "bedrock.InvokeModel.foundationModel",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/anthropic.claude-3-haiku-20240307-v1%3A0/invoke",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "InvokeModel",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.InvokeModelWithResponseStream.applicationProfile",
+   "note": "the models an application inference profile routes to are not in the request",
+   "access": [
+    [
+     "bedrock:InvokeModelWithResponseStream",
+     "arn:aws:bedrock:*:*:application-inference-profile/abc123xyz9"
+    ],
+    [
+     "bedrock:InvokeModelWithResponseStream",
+     "arn:aws:bedrock:*::foundation-model/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "bedrock.InvokeModelWithResponseStream.applicationProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Aapplication-inference-profile%2Fabc123xyz9/invoke-with-response-stream",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "InvokeModelWithResponseStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "bedrock.GetFoundationModel",
+   "note": "control plane: the model only",
+   "access": [
+    [
+     "bedrock:GetFoundationModel",
+     "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "bedrock.GetFoundationModel",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/foundation-models/anthropic.claude-3-haiku-20240307-v1%3A0",
+    "host": "127.0.0.1:4566",
+    "service": "bedrock",
+    "operation": "GetFoundationModel",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json"
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

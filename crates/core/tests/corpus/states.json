@@ -1,0 +1,410 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "states.CreateStateMachine",
+   "access": [
+    [
+     "states:CreateStateMachine",
+     "arn:aws:states:*:*:stateMachine:corpus-flow"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/sfn-exec"
+    ]
+   ],
+   "call": {
+    "id": "states.CreateStateMachine",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "CreateStateMachine",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.CreateStateMachine"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.CreateStateMachine"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"name\": \"corpus-flow\", \"definition\": \"{\\\"StartAt\\\": \\\"P\\\", \\\"States\\\": {\\\"P\\\": {\\\"Type\\\": \\\"Pass\\\", \\\"End\\\": true}}}\", \"roleArn\": \"arn:aws:iam::123456789012:role/sfn-exec\"}",
+      "bytes": 173,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.DescribeStateMachine",
+   "access": [
+    [
+     "states:DescribeStateMachine",
+     "arn:aws:states:*:*:stateMachine:corpus-flow"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.DescribeStateMachine",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "DescribeStateMachine",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.DescribeStateMachine"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.DescribeStateMachine"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"stateMachineArn\": \"arn:aws:states:us-east-1:123456789012:stateMachine:corpus-flow\"}",
+      "bytes": 85,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.StartExecution",
+   "access": [
+    [
+     "states:StartExecution",
+     "arn:aws:states:*:*:stateMachine:corpus-flow"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.StartExecution",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "StartExecution",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.StartExecution"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.StartExecution"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"stateMachineArn\": \"arn:aws:states:us-east-1:123456789012:stateMachine:corpus-flow\", \"name\": \"run-1\", \"input\": \"{}\"}",
+      "bytes": 117,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.DescribeExecution",
+   "access": [
+    [
+     "states:DescribeExecution",
+     "arn:aws:states:*:*:execution:corpus-flow:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.DescribeExecution",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "DescribeExecution",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.DescribeExecution"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.DescribeExecution"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"executionArn\": \"arn:aws:states:us-east-1:123456789012:execution:corpus-flow:run-1\"}",
+      "bytes": 85,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.ListExecutions",
+   "access": [
+    [
+     "states:ListExecutions",
+     "arn:aws:states:*:*:stateMachine:corpus-flow"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.ListExecutions",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "ListExecutions",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.ListExecutions"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.ListExecutions"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"stateMachineArn\": \"arn:aws:states:us-east-1:123456789012:stateMachine:corpus-flow\"}",
+      "bytes": 85,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.StopExecution",
+   "access": [
+    [
+     "states:StopExecution",
+     "arn:aws:states:*:*:execution:corpus-flow:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.StopExecution",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "StopExecution",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.StopExecution"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.StopExecution"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"executionArn\": \"arn:aws:states:us-east-1:123456789012:execution:corpus-flow:run-1\"}",
+      "bytes": 85,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.ListStateMachines",
+   "access": [
+    [
+     "states:ListStateMachines",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.ListStateMachines",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "ListStateMachines",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.ListStateMachines"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.ListStateMachines"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "states.DeleteStateMachine",
+   "access": [
+    [
+     "states:DeleteStateMachine",
+     "arn:aws:states:*:*:stateMachine:corpus-flow"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "states.DeleteStateMachine",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "states",
+    "operation": "DeleteStateMachine",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSStepFunctions.DeleteStateMachine"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "states.DeleteStateMachine"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"stateMachineArn\": \"arn:aws:states:us-east-1:123456789012:stateMachine:corpus-flow\"}",
+      "bytes": 85,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

@@ -754,7 +754,7 @@ impl AccessDetail {
         };
         let kind = match self.iac_format {
             PolicyFormat::IamJson => SyntaxKind::Json,
-            _ => SyntaxKind::Iac,
+            PolicyFormat::Terraform => SyntaxKind::Iac,
         };
         let doc = Arc::new(BodyDoc::from_text(code.clone(), kind, &[], &ui.p));
         self.iac_text = code;
@@ -769,9 +769,6 @@ impl AccessDetail {
         let ext = match self.iac_format {
             PolicyFormat::IamJson => "lenslet-policy.json",
             PolicyFormat::Terraform => "lenslet-policy.tf",
-            PolicyFormat::CloudFormation => "lenslet-cfn-policy.yaml",
-            PolicyFormat::Sam => "lenslet-sam-policy.yaml",
-            PolicyFormat::CdkTypeScript => "lenslet-policy.ts",
         };
         let dir = self
             .session
@@ -984,9 +981,6 @@ impl Render for AccessDetail {
         let formats = [
             (PolicyFormat::IamJson, "IAM JSON"),
             (PolicyFormat::Terraform, "Terraform"),
-            (PolicyFormat::CloudFormation, "CFN"),
-            (PolicyFormat::Sam, "SAM"),
-            (PolicyFormat::CdkTypeScript, "CDK"),
         ];
         let mut fmt_row = div().flex().flex_wrap().items_center().gap(px(4.0));
         for (fmt, label) in formats {

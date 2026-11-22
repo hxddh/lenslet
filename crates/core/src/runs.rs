@@ -4,7 +4,7 @@
 //! kept; a run that is still going is never deleted.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -281,6 +281,11 @@ fn prune(dir: &Path, keep: usize) {
     }
 }
 
+/// Delete sidecar blobs no run file references.
+///
+/// Nothing is deleted while a run is still active: its proxy may have written
+/// (or be about to reuse) a blob before the line naming it reaches the run
+/// file. References are collected once, in one pass over the run files.
 pub fn prune_orphan_blobs(dir: &Path) {
     let bdir = dir.join("blobs");
     let Ok(entries) = fs::read_dir(&bdir) else {
@@ -294,23 +299,39 @@ pub fn prune_orphan_blobs(dir: &Path) {
     if blob_files.is_empty() {
         return;
     }
-    let mut referenced = BTreeSet::new();
-    for run in list(dir) {
+    let runs = list(dir);
+    if runs.iter().any(|run| is_active(run)) {
+        return;
+    }
+    let mut referenced: HashSet<String> = HashSet::new();
+    for run in runs {
         let Ok(file) = File::open(&run) else {
             continue;
         };
         for line in BufReader::new(file).lines().map_while(Result::ok) {
-            for (name, _) in &blob_files {
-                if !referenced.contains(name) && line.contains(name.as_str()) {
-                    referenced.insert(name.clone());
-                }
-            }
+            collect_blob_names(&line, &mut referenced);
         }
     }
     for (name, path) in blob_files {
         if !referenced.contains(&name) {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+/// Every `<64 hex>.bin` blob name in `line`.
+fn collect_blob_names(line: &str, out: &mut HashSet<String>) {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(found) = line[from..].find(".bin") {
+        let end = from + found;
+        if end >= 64 {
+            let start = end - 64;
+            if bytes[start..end].iter().all(u8::is_ascii_hexdigit) {
+                out.insert(format!("{}.bin", &line[start..end]));
+            }
+        }
+        from = end + 4;
     }
 }
 
@@ -625,9 +646,38 @@ mod tests {
             read_blob(&run_path, &format!("{kept_hash}.bin")).unwrap(),
             payload
         );
+        // While a run is active, its blobs may not be named in its file yet:
+        // nothing is pruned.
+        let live = write_run(
+            &dir,
+            "20261119-000001-2",
+            std::process::id(),
+            &["pytest"],
+            None,
+        );
+        assert!(is_active(&live));
+        prune_orphan_blobs(&dir);
+        assert!(bdir.join(format!("{orphan_hash}.bin")).exists());
+        fs::remove_file(&live).unwrap();
+
         prune_orphan_blobs(&dir);
         assert!(bdir.join(format!("{kept_hash}.bin")).exists());
         assert!(!bdir.join(format!("{orphan_hash}.bin")).exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn blob_names_are_found_anywhere_in_a_line() {
+        let mut found = HashSet::new();
+        let a = "a".repeat(64);
+        let b = "0123456789abcdef".repeat(4);
+        collect_blob_names(
+            &format!(r#"{{"blob":"{a}.bin","x":"short.bin","y":"é{b}.bin","z":".bin"}}"#),
+            &mut found,
+        );
+        assert_eq!(
+            found,
+            HashSet::from([format!("{a}.bin"), format!("{b}.bin")])
+        );
     }
 }
