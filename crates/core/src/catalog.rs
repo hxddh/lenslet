@@ -23,10 +23,17 @@ pub fn resolve_rest_operation(
 ) -> Option<String> {
     let bare = path.split('?').next().unwrap_or(path);
     let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
+    management_operation(service, method, &segs)
+        .or_else(|| application_operation(service, method, &segs, bare))
+        .map(str::to_string)
+}
 
-    let op: &str = match service {
+/// Control-plane REST APIs: API Gateway, EKS, Batch, CloudFront, Route 53,
+/// S3 Control, SES v2.
+fn management_operation(service: &str, method: &str, segs: &[&str]) -> Option<&'static str> {
+    let op = match service {
         // API Gateway v1 (`apigateway`)
-        "apigateway" => match (method, segs.as_slice()) {
+        "apigateway" => match (method, segs) {
             ("POST", ["restapis"]) => "CreateRestApi",
             ("GET", ["restapis"]) => "GetRestApis",
             ("GET", ["restapis", _]) => "GetRestApi",
@@ -49,12 +56,12 @@ pub fn resolve_rest_operation(
             ("GET", ["domainnames"]) => "GetDomainNames",
             // HTTP and WebSocket APIs (v2) sign as `apigateway` too.
             _ if segs.first() == Some(&"v2") => {
-                return resolve_rest_operation("apigatewayv2", method, path, _headers);
+                return management_operation("apigatewayv2", method, segs);
             }
             _ => return None,
         },
         // API Gateway v2 (`apigatewayv2`)
-        "apigatewayv2" => match (method, segs.as_slice()) {
+        "apigatewayv2" => match (method, segs) {
             ("POST", ["v2", "apis"]) => "CreateApi",
             ("GET", ["v2", "apis"]) => "GetApis",
             ("GET", ["v2", "apis", _]) => "GetApi",
@@ -72,7 +79,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // Amazon EKS (`eks`)
-        "eks" => match (method, segs.as_slice()) {
+        "eks" => match (method, segs) {
             ("POST", ["clusters"]) => "CreateCluster",
             ("GET", ["clusters"]) => "ListClusters",
             ("GET", ["clusters", _]) => "DescribeCluster",
@@ -86,7 +93,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // AWS Batch (`batch`)
-        "batch" => match (method, segs.as_slice()) {
+        "batch" => match (method, segs) {
             ("POST", ["v1", "submitjob"]) => "SubmitJob",
             ("POST", ["v1", "describejobs"]) => "DescribeJobs",
             ("POST", ["v1", "listjobs"]) => "ListJobs",
@@ -98,7 +105,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // CloudFront (`cloudfront`)
-        "cloudfront" => match (method, segs.as_slice()) {
+        "cloudfront" => match (method, segs) {
             ("POST", [_, "distribution"]) => "CreateDistribution",
             ("GET", [_, "distribution"]) => "ListDistributions",
             ("GET", [_, "distribution", _]) => "GetDistribution",
@@ -110,7 +117,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // Route 53 (`route53`)
-        "route53" => match (method, segs.as_slice()) {
+        "route53" => match (method, segs) {
             ("POST", [_, "hostedzone"]) => "CreateHostedZone",
             ("GET", [_, "hostedzone"]) => "ListHostedZones",
             ("GET", [_, "hostedzone", _]) => "GetHostedZone",
@@ -121,7 +128,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // S3 Control (`s3-control`)
-        "s3-control" => match (method, segs.as_slice()) {
+        "s3-control" => match (method, segs) {
             ("PUT", ["v20180820", "configuration", "publicAccessBlock"]) => "PutPublicAccessBlock",
             ("GET", ["v20180820", "configuration", "publicAccessBlock"]) => "GetPublicAccessBlock",
             ("DELETE", ["v20180820", "configuration", "publicAccessBlock"]) => {
@@ -136,7 +143,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // SES v2 (`sesv2` / `email` REST v2 paths)
-        "sesv2" | "email" if segs.first() == Some(&"v2") => match (method, segs.as_slice()) {
+        "sesv2" | "email" if segs.first() == Some(&"v2") => match (method, segs) {
             ("POST", ["v2", "email", "outbound-emails"]) => "SendEmail",
             ("POST", ["v2", "email", "outbound-bulk-emails"]) => "SendBulkEmail",
             ("POST", ["v2", "email", "identities"]) => "CreateEmailIdentity",
@@ -148,8 +155,23 @@ pub fn resolve_rest_operation(
             ("GET", ["v2", "email", "account"]) => "GetAccount",
             _ => return None,
         },
+        _ => return None,
+    };
+    Some(op)
+}
+
+/// Application-facing REST APIs: Scheduler, Pipes, RDS Data, OpenSearch,
+/// IoT, SageMaker Runtime, Bedrock Agent Runtime, Backup, X-Ray, GuardDuty,
+/// Glacier, S3 Object Lambda.
+fn application_operation(
+    service: &str,
+    method: &str,
+    segs: &[&str],
+    bare: &str,
+) -> Option<&'static str> {
+    let op = match service {
         // EventBridge Scheduler (`scheduler`)
-        "scheduler" => match (method, segs.as_slice()) {
+        "scheduler" => match (method, segs) {
             ("POST", ["schedules", _]) => "CreateSchedule",
             ("GET", ["schedules", _]) => "GetSchedule",
             ("PUT", ["schedules", _]) => "UpdateSchedule",
@@ -160,7 +182,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // EventBridge Pipes (`pipes`)
-        "pipes" => match (method, segs.as_slice()) {
+        "pipes" => match (method, segs) {
             ("POST", ["v1", "pipes", _]) => "CreatePipe",
             ("GET", ["v1", "pipes", _]) => "DescribePipe",
             ("PUT", ["v1", "pipes", _]) => "UpdatePipe",
@@ -171,7 +193,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // RDS Data API (`rds-data`)
-        "rds-data" => match (method, segs.as_slice()) {
+        "rds-data" => match (method, segs) {
             ("POST", ["Execute"]) => "ExecuteStatement",
             ("POST", ["BatchExecute"]) => "BatchExecuteStatement",
             ("POST", ["BeginTransaction"]) => "BeginTransaction",
@@ -180,7 +202,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // OpenSearch (`es` / `opensearch`)
-        "es" | "opensearch" => match (method, segs.as_slice()) {
+        "es" | "opensearch" => match (method, segs) {
             ("POST", ["2021-01-01", "opensearch", "domain"]) => "CreateDomain",
             ("GET", ["2021-01-01", "opensearch", "domain"]) => "ListDomainNames",
             ("GET", ["2021-01-01", "opensearch", "domain", _]) => "DescribeDomain",
@@ -188,7 +210,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // AWS IoT Core & IoT Data (`iot` / `iotdata`)
-        "iot" => match (method, segs.as_slice()) {
+        "iot" => match (method, segs) {
             ("POST", ["things", _]) => "CreateThing",
             ("GET", ["things", _]) => "DescribeThing",
             ("DELETE", ["things", _]) => "DeleteThing",
@@ -197,7 +219,7 @@ pub fn resolve_rest_operation(
             ("GET", ["policies"]) => "ListPolicies",
             _ => return None,
         },
-        "iotdata" | "iot-data" => match (method, segs.as_slice()) {
+        "iotdata" | "iot-data" => match (method, segs) {
             ("POST", ["topics", ..]) => "Publish",
             ("GET", ["things", _, "shadow"]) => "GetThingShadow",
             ("POST", ["things", _, "shadow"]) => "UpdateThingShadow",
@@ -206,7 +228,7 @@ pub fn resolve_rest_operation(
         },
         // SageMaker Runtime (`sagemaker` / `sagemaker-runtime`)
         "sagemaker-runtime" | "sagemaker" if segs.first() == Some(&"endpoints") => {
-            match (method, segs.as_slice()) {
+            match (method, segs) {
                 ("POST", ["endpoints", _, "invocations"]) => "InvokeEndpoint",
                 ("POST", ["endpoints", _, "invocations-response-stream"]) => {
                     "InvokeEndpointWithResponseStream"
@@ -216,14 +238,14 @@ pub fn resolve_rest_operation(
             }
         }
         // Bedrock Agent Runtime (`bedrock-agent-runtime` / `bedrock-agent`)
-        "bedrock-agent-runtime" => match (method, segs.as_slice()) {
+        "bedrock-agent-runtime" => match (method, segs) {
             ("POST", ["knowledgebases", _, "retrieve"]) => "Retrieve",
             ("POST", ["knowledgebases", _, "retrieveAndGenerate"]) => "RetrieveAndGenerate",
             ("POST", ["agents", _, "agentAliases", _, "sessions", _, "text"]) => "InvokeAgent",
             _ => return None,
         },
         // AWS Backup (`backup`)
-        "backup" => match (method, segs.as_slice()) {
+        "backup" => match (method, segs) {
             ("PUT", ["backup-vaults", _]) => "CreateBackupVault",
             ("GET", ["backup-vaults", _]) => "DescribeBackupVault",
             ("GET", ["backup-vaults"]) => "ListBackupVaults",
@@ -233,7 +255,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // AWS X-Ray (`xray`)
-        "xray" => match (method, segs.as_slice()) {
+        "xray" => match (method, segs) {
             ("POST", ["TraceSegments"]) => "PutTraceSegments",
             ("POST", ["TelemetryRecords"]) => "PutTelemetryRecords",
             ("POST", ["Traces"]) => "BatchGetTraces",
@@ -242,7 +264,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // GuardDuty (`guardduty`)
-        "guardduty" => match (method, segs.as_slice()) {
+        "guardduty" => match (method, segs) {
             ("POST", ["detector"]) => "CreateDetector",
             ("GET", ["detector"]) => "ListDetectors",
             ("GET", ["detector", _]) => "GetDetector",
@@ -252,7 +274,7 @@ pub fn resolve_rest_operation(
             _ => return None,
         },
         // Glacier (`glacier`)
-        "glacier" => match (method, segs.as_slice()) {
+        "glacier" => match (method, segs) {
             ("PUT", [_, "vaults", _]) => "CreateVault",
             ("GET", [_, "vaults", _]) => "DescribeVault",
             ("GET", [_, "vaults"]) => "ListVaults",
@@ -266,7 +288,7 @@ pub fn resolve_rest_operation(
         }
         _ => return None,
     };
-    Some(op.to_string())
+    Some(op)
 }
 
 /// Extract extended service resource ARNs for services beyond the core 18.
@@ -297,57 +319,13 @@ pub fn derive_extra_resources(
     let single = |res: String| Some(vec![res]);
 
     match prefix {
-        "ecs" => {
-            if let Some(td) = field("taskDefinition") {
-                if td.starts_with("arn:") {
-                    return single(td);
-                }
-                return single(arn("ecs", &format!("task-definition/{}", norm(&td))));
-            }
-            if let Some(fam) = field("family") {
-                return single(arn("ecs", &format!("task-definition/{}:*", norm(&fam))));
-            }
-            if let Some(svc) = field("service").or_else(|| field("serviceName")) {
-                let cluster = field("cluster")
-                    .map(|c| norm(c.rsplit('/').next().unwrap_or(&c)))
-                    .unwrap_or_else(|| "default".into());
-                return single(arn(
-                    "ecs",
-                    &format!(
-                        "service/{cluster}/{}",
-                        norm(svc.rsplit('/').next().unwrap_or(&svc))
-                    ),
-                ));
-            }
-            if let Some(cluster) = field("cluster").or_else(|| field("clusterName")) {
-                if cluster.starts_with("arn:") {
-                    return single(cluster);
-                }
-                return single(arn("ecs", &format!("cluster/{}", norm(&cluster))));
-            }
-            None
-        }
-        "eks" => {
-            if let Some(name) = segs
-                .get(1)
-                .filter(|_| segs.first() == Some(&"clusters"))
-                .copied()
-                .map(wire::percent_decode_path)
-                .or_else(|| field("name"))
-                .or_else(|| field("clusterName"))
-            {
-                return single(arn("eks", &format!("cluster/{}", norm(&name))));
-            }
-            None
-        }
+        "ecs" => ecs_resource(&field, &arn, &norm).map(|res| vec![res]),
         "cloudformation" => {
-            if let Some(stack) = field("StackName") {
-                if stack.starts_with("arn:") {
-                    return single(stack);
-                }
-                return single(arn("cloudformation", &format!("stack/{}/*", norm(&stack))));
+            let stack = field("StackName")?;
+            if stack.starts_with("arn:") {
+                return single(stack);
             }
-            None
+            single(arn("cloudformation", &format!("stack/{}/*", norm(&stack))))
         }
         "glue" => glue_resources(operation, json, &field, &arn, &norm),
         "athena" => {
@@ -363,22 +341,68 @@ pub fn derive_extra_resources(
             }
             None
         }
-        "apigateway" => {
-            if segs.first() == Some(&"restapis") {
-                let rest = if let Some(id) = segs.get(1) {
-                    format!("/restapis/{}", norm(id))
-                } else {
-                    "/restapis".into()
-                };
-                return single(arn("apigateway", &rest));
-            }
-            if segs.first() == Some(&"v2") && segs.get(1) == Some(&"apis") {
-                let rest = if let Some(id) = segs.get(2) {
-                    format!("/apis/{}", norm(id))
-                } else {
-                    "/apis".into()
-                };
-                return single(arn("apigateway", &rest));
+        _ => rest_path_resource(prefix, &segs, &field, &arn, &norm).map(|res| vec![res]),
+    }
+}
+
+/// ECS task definitions, services and clusters.
+fn ecs_resource(
+    field: &dyn Fn(&str) -> Option<String>,
+    arn: &dyn Fn(&str, &str) -> String,
+    norm: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let single = Some;
+    if let Some(td) = field("taskDefinition") {
+        if td.starts_with("arn:") {
+            return single(td);
+        }
+        return single(arn("ecs", &format!("task-definition/{}", norm(&td))));
+    }
+    if let Some(fam) = field("family") {
+        return single(arn("ecs", &format!("task-definition/{}:*", norm(&fam))));
+    }
+    if let Some(svc) = field("service").or_else(|| field("serviceName")) {
+        let cluster = field("cluster")
+            .map(|c| norm(c.rsplit('/').next().unwrap_or(&c)))
+            .unwrap_or_else(|| "default".into());
+        return single(arn(
+            "ecs",
+            &format!(
+                "service/{cluster}/{}",
+                norm(svc.rsplit('/').next().unwrap_or(&svc))
+            ),
+        ));
+    }
+    if let Some(cluster) = field("cluster").or_else(|| field("clusterName")) {
+        if cluster.starts_with("arn:") {
+            return single(cluster);
+        }
+        return single(arn("ecs", &format!("cluster/{}", norm(&cluster))));
+    }
+    None
+}
+
+/// Services that name their resource in the REST path (or the body):
+/// EKS, CloudFront, Route 53, SES, SageMaker, OpenSearch, Pipes, Backup.
+fn rest_path_resource(
+    prefix: &str,
+    segs: &[&str],
+    field: &dyn Fn(&str) -> Option<String>,
+    arn: &dyn Fn(&str, &str) -> String,
+    norm: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    let single = Some;
+    match prefix {
+        "eks" => {
+            if let Some(name) = segs
+                .get(1)
+                .filter(|_| segs.first() == Some(&"clusters"))
+                .copied()
+                .map(wire::percent_decode_path)
+                .or_else(|| field("name"))
+                .or_else(|| field("clusterName"))
+            {
+                return single(arn("eks", &format!("cluster/{}", norm(&name))));
             }
             None
         }
@@ -463,7 +487,6 @@ pub fn derive_extra_resources(
         _ => None,
     }
 }
-
 /// Glue Data Catalog calls are authorized on the catalog, the database and
 /// the table together (`catalog`, `database/{db}`, `table/{db}/{table}`);
 /// jobs on `job/{name}`.
@@ -556,107 +579,24 @@ pub fn target_summary(trace: &Trace) -> String {
                 return summary;
             }
         }
-        "sqs" => {
-            if let Some(j) = json.as_ref() {
-                if let Some(q) = j
-                    .get("QueueUrl")
-                    .or_else(|| j.get("QueueName"))
-                    .and_then(Value::as_str)
-                {
-                    let name = q.trim_end_matches('/').rsplit('/').next().unwrap_or(q);
-                    if let Some(entries) = j.get("Entries").and_then(Value::as_array) {
-                        return format!("queue/{name} · {} msgs", entries.len());
-                    }
-                    return format!("queue/{name}");
-                }
-            } else if let Some(q) =
-                form_param(body_text, "QueueUrl").or_else(|| form_param(body_text, "QueueName"))
-            {
-                let name = q.trim_end_matches('/').rsplit('/').next().unwrap_or(&q);
-                return format!("queue/{name}");
-            }
-        }
-        "sns" => {
-            let topic = json
-                .as_ref()
-                .and_then(|j| {
-                    j.get("TopicArn")
-                        .or_else(|| j.get("TargetArn"))
-                        .or_else(|| j.get("Name"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| {
-                    form_param(body_text, "TopicArn")
-                        .or_else(|| form_param(body_text, "TargetArn"))
-                        .or_else(|| form_param(body_text, "Name"))
-                });
-            if let Some(t) = topic {
-                let name = t.rsplit(':').next().unwrap_or(&t);
-                return format!("topic/{name}");
+        "sqs" | "sns" => {
+            if let Some(summary) = messaging_target(&trace.service, json.as_ref(), body_text) {
+                return summary;
             }
         }
         "lambda" => {
-            let bare = trace.path.split('?').next().unwrap_or(&trace.path);
-            let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
-            if let Some(&fname) = segs.get(2).filter(|_| segs.get(1) == Some(&"functions")) {
-                let decoded = wire::percent_decode_path(fname);
-                let short = decoded.rsplit(':').next().unwrap_or(&decoded);
-                return format!("fn/{short}");
-            }
-            if let Some(j) = json.as_ref()
-                && let Some(fname) = j.get("FunctionName").and_then(Value::as_str)
-            {
-                return format!("fn/{fname}");
+            if let Some(summary) = lambda_target_summary(trace, json.as_ref()) {
+                return summary;
             }
         }
         "kms" => {
-            if let Some(j) = json.as_ref() {
-                if let Some(kid) = j
-                    .get("KeyId")
-                    .or_else(|| j.get("TargetKeyId"))
-                    .or_else(|| j.get("AliasName"))
-                    .and_then(Value::as_str)
-                {
-                    let short = kid.rsplit('/').next().unwrap_or(kid);
-                    return format!("key/{short}");
-                }
-                if let Some(spec) = j
-                    .get("KeySpec")
-                    .or_else(|| j.get("CustomerMasterKeySpec"))
-                    .and_then(Value::as_str)
-                {
-                    return spec.to_string();
-                }
-                if trace.operation == "CreateKey" {
-                    return "SYMMETRIC_DEFAULT".to_string();
-                }
+            if let Some(summary) = kms_target_summary(trace, json.as_ref()) {
+                return summary;
             }
         }
         "iam" | "sts" => {
-            let val = json
-                .as_ref()
-                .and_then(|j| {
-                    j.get("RoleName")
-                        .or_else(|| j.get("RoleArn"))
-                        .or_else(|| j.get("UserName"))
-                        .or_else(|| j.get("PolicyName"))
-                        .or_else(|| j.get("PolicyArn"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| {
-                    form_param(body_text, "RoleName")
-                        .or_else(|| form_param(body_text, "RoleArn"))
-                        .or_else(|| form_param(body_text, "UserName"))
-                        .or_else(|| form_param(body_text, "PolicyName"))
-                        .or_else(|| form_param(body_text, "PolicyArn"))
-                });
-            if let Some(v) = val {
-                if let Some(rest) = v.split(':').nth(5) {
-                    return rest.to_string();
-                }
-                return format!("role/{v}");
+            if let Some(summary) = identity_target(json.as_ref(), body_text) {
+                return summary;
             }
         }
         "secretsmanager" => {
@@ -762,6 +702,104 @@ pub fn target_summary(trace: &Trace) -> String {
             if path.is_empty() { "/" } else { path }
         )
     }
+}
+
+/// `queue/{name}` (with a batch's message count) or `topic/{name}`.
+fn messaging_target(service: &str, json: Option<&Value>, body_text: &str) -> Option<String> {
+    let field = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            json.and_then(|j| j.get(*key))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| form_param(body_text, key))
+        })
+    };
+    if service == "sqs" {
+        let queue = field(&["QueueUrl", "QueueName"])?;
+        let name = queue
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&queue);
+        return Some(
+            match json
+                .and_then(|j| j.get("Entries"))
+                .and_then(Value::as_array)
+            {
+                Some(entries) => format!("queue/{name} · {} msgs", entries.len()),
+                None => format!("queue/{name}"),
+            },
+        );
+    }
+    let topic = field(&["TopicArn", "TargetArn", "Name"])?;
+    Some(format!(
+        "topic/{}",
+        topic.rsplit(':').next().unwrap_or(&topic)
+    ))
+}
+
+/// `fn/{name}` or `fn/{name}:{qualifier}`, from the path or the body.
+fn lambda_target_summary(trace: &Trace, json: Option<&Value>) -> Option<String> {
+    let bare = trace.path.split('?').next().unwrap_or(&trace.path);
+    let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
+    let raw = segs
+        .get(2)
+        .filter(|_| segs.get(1) == Some(&"functions"))
+        .map(|name| wire::percent_decode_path(name))
+        .or_else(|| {
+            json.and_then(|j| j.get("FunctionName"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })?;
+    let mut name = raw
+        .split_once(":function:")
+        .map_or(raw.as_str(), |(_, rest)| rest)
+        .to_string();
+    if !name.contains(':')
+        && let Some(qualifier) = wire::query_param(&trace.path, "Qualifier")
+    {
+        name = format!("{name}:{qualifier}");
+    }
+    Some(format!("fn/{name}"))
+}
+
+/// `alias/{name}` for a key named by alias (the IAM resource is the key it
+/// hides), `key/{id}`, or the key spec of a new key.
+fn kms_target_summary(trace: &Trace, json: Option<&Value>) -> Option<String> {
+    let j = json?;
+    if let Some(key) = ["KeyId", "TargetKeyId", "AliasName"]
+        .iter()
+        .find_map(|field| j.get(*field).and_then(Value::as_str))
+    {
+        if let Some((_, alias)) = key.split_once("alias/") {
+            return Some(format!("alias/{alias}"));
+        }
+        return Some(format!("key/{}", key.rsplit('/').next().unwrap_or(key)));
+    }
+    if let Some(spec) = j
+        .get("KeySpec")
+        .or_else(|| j.get("CustomerMasterKeySpec"))
+        .and_then(Value::as_str)
+    {
+        return Some(spec.to_string());
+    }
+    (trace.operation == "CreateKey").then(|| "SYMMETRIC_DEFAULT".to_string())
+}
+
+/// The role, user or policy an IAM or STS call names.
+fn identity_target(json: Option<&Value>, body_text: &str) -> Option<String> {
+    let value = ["RoleName", "RoleArn", "UserName", "PolicyName", "PolicyArn"]
+        .iter()
+        .find_map(|key| {
+            json.and_then(|j| j.get(*key))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| form_param(body_text, key))
+        })?;
+    Some(match value.split(':').nth(5) {
+        Some(rest) => rest.to_string(),
+        None => format!("role/{value}"),
+    })
 }
 
 fn s3_target_summary(trace: &Trace) -> String {
@@ -906,5 +944,36 @@ mod tests {
             target_summary(&ddb_call),
             "table/orders · orderId=\"ord-42\""
         );
+
+        // A qualified function keeps its qualifier; a key named by alias
+        // shows the alias (its IAM resource is the key, `key/*`).
+        for (path, expected) in [
+            ("/2015-03-31/functions/f%3Aprod/invocations", "fn/f:prod"),
+            ("/2015-03-31/functions/f/invocations?Qualifier=7", "fn/f:7"),
+            (
+                "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aus-east-1%3A1%3Afunction%3Af%3Alive/invocations",
+                "fn/f:live",
+            ),
+        ] {
+            let invoke = Trace {
+                path: path.into(),
+                service: "lambda".into(),
+                ..Trace::default()
+            };
+            assert_eq!(target_summary(&invoke), expected);
+        }
+        let kms = Trace {
+            service: "kms".into(),
+            operation: "Encrypt".into(),
+            request: Message {
+                body: Some(BodyTrace {
+                    text: Some(r#"{"KeyId":"arn:aws:kms:us-east-1:1:alias/app"}"#.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Trace::default()
+        };
+        assert_eq!(target_summary(&kms), "alias/app");
     }
 }

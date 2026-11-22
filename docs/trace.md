@@ -30,6 +30,10 @@ not compatible with earlier files.
 | `lock` | the lock path (relative to `cwd` when inside it) when the run is compared with one |
 | `policy` | the IAM policy JSON path when `--policy` is used |
 | `enforce` | `true` when `--enforce` actively blocks unlocked calls |
+| `routes` | `{service: URL}` per-service upstream overrides (`--route`, or auto-routing), when any |
+| `allow_docker` | `true` when `--allow-docker` let container bridge connections reach the proxy |
+| `max_body` | the body capture limit in bytes, when `--max-body` was given |
+| `log` | the captured stdout/stderr file of the command (`--log`), when kept |
 
 ## `call`
 
@@ -55,16 +59,28 @@ not compatible with earlier files.
 | `blocked_phase` | `request` (the call never reached the emulator) or `response` (the emulator had already run it; only its response revealed the denied permission, e.g. the SSE-KMS key of an S3 object) |
 | `replay_of` | the id of the recorded call this one re-sends (`x-lenslet-replay-of`) |
 | `caller_role` | normalized IAM role ARN (`arn:aws:iam::*:role/...`) when the call used temporary session credentials from an earlier `sts:AssumeRole*` call in the run |
-| `target` | human-readable semantic target summary (e.g. `table/orders · orderId="ord-42"`, `s3://bucket/key`, `queue/jobs`) |
-| `request`, `response` | `{headers, content_type?, body?}` |
+| `target` | human-readable semantic target summary (e.g. `table/orders · orderId="ord-42"`, `s3://bucket/key`, `queue/jobs`, `alias/app` for a KMS key named by alias) |
+| `protocol` | the client's HTTP version (`HTTP/1.1`, `HTTP/2.0`) |
+| `upstream_protocol` | the HTTP version of the upstream's response |
+| `upstream` | the upstream URL that handled this call (it differs from the header's when a route applies) |
+| `client_addr` | the calling socket's address, e.g. `127.0.0.1:54321` |
+| `ttfb_ms` | time to the upstream's first response byte, in milliseconds |
+| `access_key_id` | the SigV4 access key id the request was signed with (header or presigned URL) |
+| `request`, `response` | `{headers, trailers?, content_type?, raw_content_type?, body?}`: `trailers` are HTTP/2 or `aws-chunked` trailing headers; `raw_content_type` is the full `Content-Type` when it had parameters |
 
-`body` is `{text?, hex?, encoding?, bytes, truncated, binary, sha256}`. Headers,
+`body` is `{text?, hex?, raw_b64?, blob?, encoding?, bytes, decoded_bytes?, truncated, binary, sha256}`. Headers,
 query strings and bodies are preserved verbatim with **zero redaction**. `text`
 holds up to 1 MiB by default (`--max-body` to change) of decoded text (`identity`,
 `aws-chunked`, `application/vnd.amazon.eventstream`, `gzip`, `deflate`, `zstd`,
 and Smithy RPCv2 / AWS CBOR decoded into JSON for reading; wire bytes are
-forwarded untouched). Binary payloads record `hex` (first 512 bytes) alongside
-`bytes` and `sha256` over the whole wire body.
+forwarded untouched). Binary payloads record `hex` (first 4096 bytes) alongside
+`bytes` and `sha256` over the whole wire body. `decoded_bytes` is the decoded
+size when it differs from the wire `bytes`. Exact wire bytes are kept too:
+inline as `raw_b64` for binary or encoded bodies up to 32 KiB, and as `blob`,
+the name of a content-addressed file `<sha256>.bin` in a `blobs/` directory
+next to the run file, for larger or truncated ones (up to 64 MiB). Blobs no
+run file names are deleted when old runs are pruned, never while a run is
+active.
 
 ### Access derivation
 
@@ -73,7 +89,17 @@ forwarded untouched). Binary payloads record `hex` (first 512 bytes) alongside
   `bedrock`. S3 `ListObjectsV2` becomes `s3:ListBucket`, `HeadObject` becomes
   `s3:GetObject`, multipart calls become `s3:PutObject`, Lambda `Invoke` becomes
   `lambda:InvokeFunction`, and Bedrock `Converse` becomes `bedrock:InvokeModel`.
-  `sts:GetCallerIdentity` needs nothing. `TransactWriteItems` and
+  `sts:GetCallerIdentity`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`
+  need nothing from the caller. KMS `ReEncrypt` needs `kms:ReEncryptFrom` on
+  the source key and `kms:ReEncryptTo` on the destination key. Secrets Manager
+  `BatchGetSecretValue` needs `secretsmanager:BatchGetSecretValue` on `*` and
+  `secretsmanager:GetSecretValue` on each secret in `SecretIdList` (on `*` for
+  the `Filters` form). API Gateway's management API (v1 and v2 alike) is
+  authorized by HTTP verb: `apigateway:GET` on
+  `arn:aws:apigateway:*::/restapis/*` (the account field is empty, generated
+  ids are `*`, v2 paths drop their `/v2` prefix: `/apis/*`); invoking a
+  deployed API is `execute-api:Invoke` on `{api-id}/{stage}/{METHOD}/{path}`.
+  `TransactWriteItems` and
   `TransactGetItems` are not IAM actions: each item contributes its own
   (`PutItem`, `UpdateItem`, `DeleteItem`, `ConditionCheckItem`, `GetItem`).
   `CopyObject` and `UploadPartCopy` also need `s3:GetObject` on the source from
@@ -84,8 +110,27 @@ forwarded untouched). Binary payloads record `hex` (first 512 bytes) alongside
   Bedrock, Secrets Manager, KMS, STS, IAM, EventBridge (including per-entry
   `PutEvents` `EventBusName`, defaulting omitted entries to `default`), and Step
   Functions (`stateMachineArn`, `CreateStateMachine` `name`, and `executionArn`);
-  otherwise `*`. Account and region are `*`, while `/` paths in secrets,
-  parameters and IAM roles are preserved.
+  otherwise `*`. Account and region are `*` (empty where AWS's ARN has no such
+  field: S3, IAM, API Gateway, Bedrock foundation models), while `/` paths in
+  secrets, parameters and IAM roles are preserved. Some calls need several
+  resources:
+  - Lambda: a qualified call (`fn:prod`, `123456789012:function:fn:7`, a full
+    qualified ARN, or `?Qualifier=prod`) needs the qualified ARN
+    `function:fn:prod`; a grant on `function:fn` does not cover it.
+  - KMS: a key named by alias (`alias/app` or an alias ARN) is authorized on
+    the key, which the request does not name: `arn:aws:kms:*:*:key/*` (the
+    alias stays in `target`). `CreateAlias` / `DeleteAlias` / `UpdateAlias`
+    need the alias and the key(s).
+  - Bedrock: invoking through an inference profile (`us.`, `eu.`, `apac.`,
+    `global.` ids or profile ARNs) needs the action on the profile and on the
+    foundation model it routes to, in any region
+    (`arn:aws:bedrock:*::foundation-model/…`; for an application profile,
+    `foundation-model/*`).
+  - Glue Data Catalog: the catalog, the database and the table
+    (`table/{db}/{name}`, or `table/{db}/*` for `GetTables`).
+  - EventBridge rules are `rule/[{bus}/]{name}`; Scheduler schedules
+    `schedule/{group}/{name}` (group `default` unless named); CloudWatch Logs
+    reads `logGroupName` or `logGroupIdentifier` (a name or an ARN).
 - **Normalization**: UUIDs, runs of six or more digits, and hex segments of six
   or more characters become `*`, so generated test names do not churn the lock.
 - **Unreadable bodies**: when the body that names the resource cannot be read
@@ -119,7 +164,7 @@ summaries.
 | `run`, `command`, `exit_code`, `ended`, `duration_ms` | the run; `exit_code` is the program's (`null` for a proxy session) |
 | `calls`, `retries`, `errors`, `blocked`, `unfinished`, `services`, `unmapped` | counts (`retries`, `blocked` and `unmapped` omitted when empty) |
 | `failures` | `[{id, service, operation, status, code, message?, hint?, attempt?, max_attempts?, blocked?}]` |
-| `access` | `[{action, resource, calls, errors, implied?, new?, via?}]`, sorted; `via` names the first calls that needed it, e.g. `DYNAMODB DeleteItem` |
+| `access` | `[{action, resource, calls, errors, implied?, new?, via?, services?, unverified?}]`, sorted; `via` names the first three calls that needed it, e.g. `DYNAMODB DeleteItem`; `services` lists the SigV4 service of every call that needed it (never cut short) |
 | `roles` | `{ "<role arn>": [access entries...] }` per-role permission breakdown when `sts:AssumeRole*` session credentials were used (omitted when empty) |
 | `lock`, `policy` | the lock file or IAM policy JSON compared/enforced with, or `null` |
 | `access_added` | used by this run, not in the lock/policy |
@@ -153,6 +198,19 @@ run's `endpoint`. They never reach the emulator and are never recorded.
 A request with `x-lenslet-replay-of: <call id>` is proxied and recorded like
 any call, with `replay_of` set; the header is removed before forwarding and
 is not recorded among the request headers.
+
+## `lenslet policy`
+
+`lenslet policy [--lock PATH | --run RUN] [--format iam|terraform] [--role ROLE] [--region REG] [--account ACC]`
+prints an IAM policy for the lock (without `# test` lines) or a finished run's
+access: IAM JSON (default), or a Terraform `data "aws_iam_policy_document"
+"lenslet"` data source. One statement per resource, actions sorted. `--lock`
+and `--run` compile the same access to the same statements. ARN fields AWS
+leaves empty stay empty; `*` regions and accounts become `--region` /
+`--account`, or in Terraform `data.aws_region.current.region` and
+`data.aws_caller_identity.current.account_id` (a Bedrock foundation model
+keeps region `*`). `--format cfn`, `sam` and `cdk` were removed in 12.0
+(exit 2).
 
 ## `lenslet check`
 

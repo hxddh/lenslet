@@ -383,7 +383,7 @@ fn render_iam_json(statements: &[Statement], opts: &CompileOptions) -> Value {
             let mut obj = serde_json::Map::new();
             obj.insert("Sid".into(), Value::String(statement.sid.clone()));
             obj.insert("Effect".into(), Value::String("Allow".into()));
-            obj.insert("Action".into(), single_or_list(&statement.actions));
+            obj.insert("Action".into(), json!(statement.actions));
             obj.insert(
                 "Resource".into(),
                 Value::String(item_text(&statement.resource)),
