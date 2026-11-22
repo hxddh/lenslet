@@ -196,6 +196,9 @@ pub struct LensletApp {
     search: Entity<SearchInput>,
     command_field: Entity<SearchInput>,
     root_focus: FocusHandle,
+    /// Move focus to the root on the next frame (a dialog opened from a
+    /// child view), so Enter and Esc reach it.
+    focus_root_next: bool,
 
     mode: Mode,
     prefs: UiPrefs,
@@ -354,6 +357,7 @@ impl LensletApp {
             search,
             command_field,
             root_focus: cx.focus_handle(),
+            focus_root_next: false,
             mode: Mode::Calls,
             prefs,
             modal: Modal::None,
@@ -657,6 +661,7 @@ impl LensletApp {
             }
             AccessEvent::AcceptAll(entries) => {
                 self.modal = Modal::Confirm(entries.clone());
+                self.focus_root_next = true;
                 cx.notify();
             }
             AccessEvent::Toast(message) => self.show_toast(message.clone(), cx),
@@ -1141,6 +1146,9 @@ impl SelectTarget {
 
 impl Render for LensletApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_root_next) {
+            window.focus(&self.root_focus);
+        }
         crate::fsguard::report_frame();
         crate::fsguard::milestone_once("first frame");
         let _scope = crate::fsguard::RenderScope::enter();

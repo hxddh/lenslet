@@ -117,7 +117,7 @@ impl LensletApp {
             )
     }
 
-    /// `python demo · exit 1 · 2 failed · against moto`, opening the picker.
+    /// `python demo · exit 1 · 2 AWS failures · against moto`, opening the picker.
     fn render_run_picker(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
         let session = self.session.read(cx);
@@ -139,8 +139,12 @@ impl LensletApp {
                 let failed = session.failures.len();
                 if failed > 0 {
                     parts.push((
-                        ui.tr(&tr!("{failed} failed", "{failed} 个失败"))
-                            .to_string(),
+                        ui.tr(&if failed == 1 {
+                            tr!("1 AWS failure", "1 项 AWS 失败")
+                        } else {
+                            tr!("{failed} AWS failures", "{failed} 项 AWS 失败")
+                        })
+                        .to_string(),
                         t.red,
                     ));
                 }
@@ -652,18 +656,16 @@ impl LensletApp {
             .border_color(rgb(t.border_subtle))
             .bg(rgb(t.code))
             .p(px(8.0));
-        for (access, _, implied) in entries {
+        for (access, _, _) in entries {
+            // Shown in full (it is what is being reviewed): wrap, never ellipsize.
             list = list.child(
-                widgets::mono(
-                    ui,
-                    format!(
-                        "{}  {}{}",
-                        access.action,
-                        access.resource,
-                        if *implied { "  # implied" } else { "" }
-                    ),
-                )
-                .text_color(rgb(t.text_soft)),
+                div()
+                    .flex_shrink_0()
+                    .font(crate::fonts::mono_font())
+                    .text_size(px(text::SM))
+                    .line_height(px(18.0))
+                    .text_color(rgb(t.text_soft))
+                    .child(format!("{}  {}", access.action, access.resource)),
             );
         }
         let card = widgets::dialog_card(
