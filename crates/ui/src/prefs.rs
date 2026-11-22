@@ -1,7 +1,7 @@
-//! Persistent window preferences in `~/.lenslet/ui.json`.
-//!
-//! Kept strictly in the user's home directory so appearance, accent color,
-//! layout, formatting, and language choices never touch project repositories.
+//! The window's few remembered choices, in `~/.lenslet/ui.json`: the
+//! language, the window size, the inspector and output panes, and the last
+//! project folder. Appearance follows the system (`LENSLET_THEME` overrides
+//! it, for screenshots); the language can be forced with `LENSLET_LANG`.
 
 use std::{
     fs,
@@ -10,47 +10,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The appearance: the system's unless `LENSLET_THEME` says otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeMode {
     #[default]
     System,
     Light,
     Dark,
-}
-
-impl ThemeMode {
-    pub const ALL: [ThemeMode; 3] = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark];
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AccentColor {
-    #[default]
-    Sky,
-    Indigo,
-    Violet,
-    Emerald,
-    Amber,
-    Rose,
-}
-
-impl AccentColor {
-    /// The accents Settings offers (older files may name Violet or Rose).
-    pub const ALL: [AccentColor; 4] = [
-        AccentColor::Sky,
-        AccentColor::Indigo,
-        AccentColor::Emerald,
-        AccentColor::Amber,
-    ];
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Density {
-    #[default]
-    Comfortable,
-    Compact,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,88 +32,33 @@ impl Default for Lang {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
-fn default_output_height() -> f32 {
-    240.0
-}
-
-fn default_inspector_width() -> f32 {
-    crate::theme::INSPECTOR_DEFAULT_W
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiPrefs {
-    #[serde(default)]
-    pub theme: ThemeMode,
-    #[serde(default)]
-    pub accent: AccentColor,
-    #[serde(default)]
-    pub density: Density,
-    #[serde(default)]
     pub lang: Lang,
-    /// Skip popover/palette animations.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reduce_motion: bool,
-    #[serde(default = "default_inspector_width")]
-    pub inspector_width: f32,
-    #[serde(default = "default_true")]
-    pub inspector_open: bool,
-    /// The sidebar starts collapsed.
-    #[serde(default)]
-    pub sidebar_open: bool,
-    /// The Output drawer under Calls, and its height.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub output_open: bool,
-    #[serde(default = "default_output_height")]
-    pub output_height: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_width: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_height: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recent_workspaces: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_upstream: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub proxy_routes: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub proxy_enforce: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub proxy_allow_docker: bool,
+    pub inspector_width: f32,
+    pub inspector_open: bool,
+    pub output_open: bool,
+    pub output_height: f32,
+    pub project_dir: Option<String>,
+    #[serde(skip)]
+    pub theme: ThemeMode,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
         UiPrefs {
-            theme: ThemeMode::default(),
-            accent: AccentColor::default(),
-            density: Density::default(),
             lang: Lang::default(),
-            reduce_motion: false,
-            inspector_width: default_inspector_width(),
-            inspector_open: true,
-            sidebar_open: false,
-            output_open: false,
-            output_height: default_output_height(),
             window_width: None,
             window_height: None,
-            workspace_dir: None,
-            recent_workspaces: Vec::new(),
-            last_command: None,
-            proxy_port: None,
-            proxy_upstream: None,
-            proxy_routes: Vec::new(),
-            proxy_enforce: false,
-            proxy_allow_docker: false,
+            inspector_width: crate::theme::INSPECTOR_DEFAULT_W,
+            inspector_open: true,
+            output_open: false,
+            output_height: 240.0,
+            project_dir: None,
+            theme: ThemeMode::System,
         }
     }
 }
@@ -172,9 +83,7 @@ pub fn load(home: &Path) -> UiPrefs {
     if let Some(forced) = env_lang() {
         prefs.lang = forced;
     }
-    if let Some(forced) = env_theme() {
-        prefs.theme = forced;
-    }
+    prefs.theme = env_theme().unwrap_or_default();
     prefs
 }
 
@@ -188,11 +97,6 @@ pub fn save(home: &Path, prefs: &UiPrefs) {
     }
     if let Ok(text) = serde_json::to_string_pretty(prefs) {
         let _ = fs::write(&target, format!("{text}\n"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
-        }
     }
 }
 
@@ -219,12 +123,12 @@ fn detect_system_lang() -> Lang {
         && out.status.success()
     {
         let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
-        for line in text.lines() {
-            let trimmed = line.trim().trim_matches(['"', ',', '(', ')', ' ']);
-            if trimmed.is_empty() {
-                continue;
-            }
-            return if trimmed.starts_with("zh") {
+        if let Some(first) = text
+            .lines()
+            .map(|line| line.trim().trim_matches(['"', ',', '(', ')', ' ']))
+            .find(|line| !line.is_empty())
+        {
+            return if first.starts_with("zh") {
                 Lang::Zh
             } else {
                 Lang::En
@@ -251,7 +155,6 @@ fn env_theme() -> Option<ThemeMode> {
     match raw.to_string_lossy().trim().to_ascii_lowercase().as_str() {
         "light" => Some(ThemeMode::Light),
         "dark" => Some(ThemeMode::Dark),
-        "system" | "auto" => Some(ThemeMode::System),
         _ => None,
     }
 }
@@ -261,31 +164,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_workbench_preferences_and_clamps_inspector_width() {
-        let dir = std::env::temp_dir().join(format!("lenslet-ui-prefs-{}", std::process::id()));
+    fn keeps_only_the_window_choices() {
+        let dir = crate::testdata::scratch("prefs");
         let prefs = UiPrefs {
-            theme: ThemeMode::Light,
-            accent: AccentColor::Indigo,
-            density: Density::Compact,
             lang: Lang::Zh,
-            reduce_motion: true,
             inspector_width: 520.0,
             inspector_open: false,
-            sidebar_open: true,
             output_open: true,
             output_height: 300.0,
             window_width: Some(1440.0),
             window_height: Some(900.0),
+            project_dir: Some("/p".into()),
             ..UiPrefs::default()
         };
         save(&dir, &prefs);
         let text = fs::read_to_string(path(&dir)).unwrap();
+        let keys: Vec<String> =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+        assert_eq!(
+            keys,
+            [
+                "lang",
+                "window_width",
+                "window_height",
+                "inspector_width",
+                "inspector_open",
+                "output_open",
+                "output_height",
+                "project_dir"
+            ]
+        );
         let parsed: UiPrefs = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, prefs);
 
         let mut out_of_range = parsed;
         out_of_range.inspector_width = 120.0;
         assert_eq!(out_of_range.clamped_inspector_width(), 320.0);
-        let _ = fs::remove_dir_all(&dir);
     }
 }

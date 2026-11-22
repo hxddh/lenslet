@@ -1,11 +1,11 @@
 //! Design tokens for Lenslet: precision-instrument dark and light surfaces
-//! with contrast-calibrated accents. The active look (appearance, accent,
-//! language, density) is a gpui [`Global`]: set when preferences or the
-//! system appearance change, read by every render through [`Ui`].
+//! with one contrast-calibrated accent. The active look (appearance and
+//! language) is a gpui [`Global`]: set when the language or the system
+//! appearance changes, read by every render through [`Ui`].
 
 use gpui::{App, Global, Hsla, Rgba, WindowAppearance, rgb};
 
-use crate::prefs::{AccentColor, Density, Lang, ThemeMode, UiPrefs};
+use crate::prefs::{Lang, ThemeMode, UiPrefs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Appearance {
@@ -18,10 +18,7 @@ pub enum Appearance {
 pub struct Ui {
     pub p: Palette,
     pub appearance: Appearance,
-    pub accent: AccentColor,
     pub lang: Lang,
-    pub density: Density,
-    pub reduce_motion: bool,
 }
 
 struct UiGlobal(Ui);
@@ -32,12 +29,9 @@ impl Ui {
     pub fn new(prefs: &UiPrefs, window: WindowAppearance) -> Self {
         let appearance = resolve(prefs.theme, window);
         Ui {
-            p: palette(appearance, prefs.accent),
+            p: palette(appearance),
             appearance,
-            accent: prefs.accent,
             lang: prefs.lang,
-            density: prefs.density,
-            reduce_motion: prefs.reduce_motion,
         }
     }
 
@@ -52,11 +46,7 @@ impl Ui {
     pub fn install(cx: &mut App, ui: Ui) -> bool {
         let changed = cx.try_global::<UiGlobal>().is_none_or(|old| {
             let old = old.0;
-            old.appearance != ui.appearance
-                || old.accent != ui.accent
-                || old.lang != ui.lang
-                || old.density != ui.density
-                || old.reduce_motion != ui.reduce_motion
+            old.appearance != ui.appearance || old.lang != ui.lang
         });
         if changed {
             cx.set_global(UiGlobal(ui));
@@ -75,7 +65,7 @@ impl Ui {
     }
 
     pub fn row_height(&self) -> f32 {
-        row_height(self.density)
+        ROW_H
     }
 
     pub fn dark(&self) -> bool {
@@ -143,37 +133,12 @@ pub fn resolve(mode: ThemeMode, window: WindowAppearance) -> Appearance {
     }
 }
 
-/// `(accent_hex, row_selected_hex, row_selected_hover_hex, mark_bg_hex)` for `(mode, accent)`.
-pub const fn accent_tokens(mode: Appearance, accent: AccentColor) -> (u32, u32, u32, u32) {
-    match (mode, accent) {
-        (Appearance::Dark, AccentColor::Sky) => (0x7DD3FC, 0x14212E, 0x182736, 0x131C27),
-        (Appearance::Dark, AccentColor::Indigo) => (0xA5B4FC, 0x181C32, 0x1D223C, 0x15182A),
-        (Appearance::Dark, AccentColor::Violet) => (0xC4B5FD, 0x1E1932, 0x241E3C, 0x1A162B),
-        (Appearance::Dark, AccentColor::Emerald) => (0x6EE7B7, 0x122622, 0x162E29, 0x11201D),
-        (Appearance::Dark, AccentColor::Amber) => (0xFCD34D, 0x262013, 0x2F2717, 0x201B11),
-        (Appearance::Dark, AccentColor::Rose) => (0xFDA4AF, 0x281720, 0x311C27, 0x22141B),
-
-        (Appearance::Light, AccentColor::Sky) => (0x0369A1, 0xE3F0FC, 0xD8E9FA, 0xE2EEF9),
-        (Appearance::Light, AccentColor::Indigo) => (0x4338CA, 0xEAEAFE, 0xE0E0FC, 0xE6E7FB),
-        (Appearance::Light, AccentColor::Violet) => (0x6D28D9, 0xF0E9FE, 0xE7DDFD, 0xECE5FB),
-        (Appearance::Light, AccentColor::Emerald) => (0x047857, 0xE4F7F0, 0xD6F1E7, 0xE0F3EC),
-        (Appearance::Light, AccentColor::Amber) => (0xB45309, 0xFEF1DF, 0xFDE8CC, 0xFAECDA),
-        (Appearance::Light, AccentColor::Rose) => (0xBE123C, 0xFEE8EE, 0xFCDCE5, 0xFAE4EA),
-    }
-}
-
-/// The palette for an appearance and accent.
-pub fn palette(mode: Appearance, accent: AccentColor) -> Palette {
-    let mut base = match mode {
+/// The palette for an appearance.
+pub fn palette(mode: Appearance) -> Palette {
+    match mode {
         Appearance::Dark => DARK,
         Appearance::Light => LIGHT,
-    };
-    let (acc, sel, sel_hover, mark) = accent_tokens(mode, accent);
-    base.accent = acc;
-    base.row_selected = sel;
-    base.row_selected_hover = sel_hover;
-    base.mark_bg = mark;
-    base
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -181,7 +146,6 @@ pub struct Palette {
     pub canvas: u32,
     pub header: u32,
     pub toolbar: u32,
-    pub strip: u32,
     pub table_head: u32,
     pub panel: u32,
     pub panel_raised: u32,
@@ -219,7 +183,6 @@ pub const DARK: Palette = Palette {
     canvas: 0x0A0C10,
     header: 0x0E1117,
     toolbar: 0x0C0F15,
-    strip: 0x0B0E14,
     table_head: 0x0C0F14,
     panel: 0x0E1117,
     panel_raised: 0x11161E,
@@ -257,7 +220,6 @@ pub const LIGHT: Palette = Palette {
     canvas: 0xF5F7FA,
     header: 0xEEF2F6,
     toolbar: 0xF4F7FA,
-    strip: 0xECF0F5,
     table_head: 0xF0F4F8,
     panel: 0xFFFFFF,
     panel_raised: 0xFAFBFD,
@@ -294,7 +256,6 @@ pub const LIGHT: Palette = Palette {
 // Layout rhythm: a 4/8-pt grid, one type scale.
 pub const HEADER_H: f32 = 44.0;
 pub const SUBBAR_H: f32 = 36.0;
-pub const TIMELINE_H: f32 = 24.0;
 pub const TABLE_HEAD_H: f32 = 28.0;
 /// The splitter's grab area; only a 1px line is drawn.
 pub const SPLITTER_HIT_W: f32 = 7.0;
@@ -310,12 +271,8 @@ pub mod text {
     pub const XL: f32 = 15.0;
 }
 
-pub fn row_height(density: Density) -> f32 {
-    match density {
-        Density::Comfortable => 48.0,
-        Density::Compact => 32.0,
-    }
-}
+/// Calls table row height (two lines: operation, then target).
+pub const ROW_H: f32 = 44.0;
 
 // Calls table columns.
 pub const ROW_PAD_X: f32 = 16.0;
@@ -418,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn light_and_dark_accent_palettes_maintain_wcag_aa_contrast() {
+    fn light_and_dark_palettes_maintain_wcag_aa_contrast() {
         for token in [
             LIGHT.text,
             LIGHT.text_soft,
@@ -438,18 +395,11 @@ mod tests {
             );
         }
 
-        for accent in AccentColor::ALL {
-            let (dark_acc, _, _, _) = accent_tokens(Appearance::Dark, accent);
-            let dark_ratio = contrast(dark_acc, DARK.panel);
+        for (accent, panel) in [(DARK.accent, DARK.panel), (LIGHT.accent, LIGHT.panel)] {
+            let ratio = contrast(accent, panel);
             assert!(
-                dark_ratio >= 4.5,
-                "{accent:?} dark accent #{dark_acc:06x} contrast {dark_ratio:.2} < 4.5"
-            );
-            let (light_acc, _, _, _) = accent_tokens(Appearance::Light, accent);
-            let light_ratio = contrast(light_acc, LIGHT.panel);
-            assert!(
-                light_ratio >= 4.5,
-                "{accent:?} light accent #{light_acc:06x} contrast {light_ratio:.2} < 4.5"
+                ratio >= 4.5,
+                "accent #{accent:06x} contrast {ratio:.2} < 4.5"
             );
         }
     }

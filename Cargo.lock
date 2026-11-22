@@ -2991,24 +2991,13 @@ name = "lenslet-ui"
 version = "12.0.0"
 dependencies = [
  "anyhow",
- "chrono",
- "flate2",
  "futures",
  "gpui",
- "http",
- "httparse",
  "lenslet-core",
  "libc",
  "log",
- "ring",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "zstd",
 ]
 
 [[package]]

@@ -127,54 +127,6 @@ impl BodyView {
         cx.notify();
     }
 
-    fn ensure_line_visible(&mut self, target: usize) {
-        if self.folded.is_empty() {
-            return;
-        }
-        let mut changed = false;
-        let to_open: Vec<usize> = self
-            .folded
-            .iter()
-            .copied()
-            .filter(|&open| {
-                self.doc
-                    .fold_ranges
-                    .get(&open)
-                    .is_some_and(|&close| target > open && target <= close)
-            })
-            .collect();
-        for open in to_open {
-            self.folded.remove(&open);
-            changed = true;
-        }
-        if changed {
-            self.rebuild_visible();
-        }
-    }
-
-    /// `(1-based current, total)` match indicator for the toolbar.
-    pub fn match_status(&self) -> Option<(usize, usize)> {
-        let count = self.doc.match_lines.len();
-        (count > 0).then(|| (self.active_match.unwrap_or(0).min(count - 1) + 1, count))
-    }
-
-    /// Jump forward (`+1`) or backward (`-1`) across search match lines.
-    pub fn step_match(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self.doc.match_lines.len();
-        if count == 0 {
-            return;
-        }
-        let cur = self.active_match.unwrap_or(0) as isize;
-        let next = (cur + delta).rem_euclid(count as isize) as usize;
-        self.active_match = Some(next);
-        let target_line = self.doc.match_lines[next];
-        self.ensure_line_visible(target_line);
-        if let Ok(vis_ix) = self.visible_lines.binary_search(&target_line) {
-            self.scroll.scroll_to_item(vis_ix, ScrollStrategy::Center);
-        }
-        cx.notify();
-    }
-
     pub fn set_loading(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         cx.notify();
