@@ -9,10 +9,14 @@
 //!
 //! This is *observed* access: what the run exercised, not a security review.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{trace::Trace, wire};
+
+pub mod rest;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Access {
@@ -101,8 +105,7 @@ enum Mode {
 /// Whether a finished call had no recognizable IAM mapping (excluding calls
 /// like `sts:GetCallerIdentity` that genuinely need no permission).
 pub fn is_unmapped(trace: &Trace) -> bool {
-    !trace.pending
-        && trace.access.is_empty()
+    trace.access.is_empty()
         && trace.implied.is_empty()
         && !(trace.service == "sts"
             && matches!(
@@ -128,6 +131,33 @@ pub struct Derived {
     /// Entries (footprint and concrete alike) whose resource stands as `*`
     /// because the request body that names it could not be read.
     pub unverified: Vec<Access>,
+}
+
+impl Derived {
+    /// Write this derivation onto the call's trace line: the footprint, each
+    /// entry marked `new` when there is a lock (`locked`, its lines) that does
+    /// not list it, and the concrete permissions, own then implied.
+    pub fn record(&self, trace: &mut Trace, locked: Option<&BTreeSet<Access>>) {
+        let mark = |entries: &[Access]| -> Vec<CallAccess> {
+            entries
+                .iter()
+                .map(|entry| CallAccess {
+                    action: entry.action.clone(),
+                    resource: entry.resource.clone(),
+                    new: locked.is_some_and(|locked| !locked.contains(entry)),
+                    unverified: self.unverified.contains(entry),
+                })
+                .collect()
+        };
+        trace.access = mark(&self.own);
+        trace.implied = mark(&self.implied);
+        trace.concrete = self
+            .concrete_own
+            .iter()
+            .chain(&self.concrete_implied)
+            .cloned()
+            .collect();
+    }
 }
 
 /// The normalized footprint access one call needs (for `lenslet.lock` and reports).
@@ -367,7 +397,6 @@ fn transaction(mode: Mode, trace: &Trace, body: &Body) -> Vec<Access> {
                 })
                 .collect()
         }
-        Body::TruncatedJson(raw) => scan_truncated_transact(mode, trace, raw),
         _ => Vec::new(),
     };
     out.sort();
@@ -384,76 +413,6 @@ fn transact_action(kind: &str) -> Option<&'static str> {
         "Get" => Some("GetItem"),
         _ => None,
     }
-}
-
-fn scan_truncated_transact(mode: Mode, trace: &Trace, raw: &str) -> Vec<Access> {
-    let mut out = Vec::new();
-    for (kind, action) in [
-        ("Put", "PutItem"),
-        ("Update", "UpdateItem"),
-        ("Delete", "DeleteItem"),
-        ("ConditionCheck", "ConditionCheckItem"),
-        ("Get", "GetItem"),
-    ] {
-        let needle = format!("\"{kind}\"");
-        let mut rest = raw;
-        while let Some(pos) = rest.find(&needle) {
-            rest = &rest[pos + needle.len()..];
-            let after = rest.trim_start();
-            let Some(after_colon) = after.strip_prefix(':') else {
-                continue;
-            };
-            let Some(obj) = after_colon.trim_start().strip_prefix('{') else {
-                continue;
-            };
-            // Scan within this item's leading fields up to the closing `}` at depth 0.
-            let mut end = obj.len();
-            let mut depth = 0i32;
-            let mut in_str = false;
-            let mut escape = false;
-            for (idx, ch) in obj.char_indices() {
-                if escape {
-                    escape = false;
-                    continue;
-                }
-                if in_str {
-                    if ch == '\\' {
-                        escape = true;
-                    } else if ch == '"' {
-                        in_str = false;
-                    }
-                    continue;
-                }
-                match ch {
-                    '"' => in_str = true,
-                    '{' | '[' => depth += 1,
-                    '}' | ']' => {
-                        if depth == 0 {
-                            end = idx;
-                            break;
-                        }
-                        depth -= 1;
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(table) = scan_json_string_values(&obj[..end], "TableName")
-                .into_iter()
-                .next()
-            {
-                out.push(Access::new(
-                    format!("dynamodb:{action}"),
-                    arn_for(
-                        mode,
-                        trace,
-                        "dynamodb",
-                        &format!("table/{}", norm(mode, &table)),
-                    ),
-                ));
-            }
-        }
-    }
-    out
 }
 
 /// The bucket (and in Concrete mode, key) a `CopyObject` / `UploadPartCopy` reads from.
@@ -780,10 +739,9 @@ fn partiql_target(text: &str) -> Option<(String, Option<String>)> {
     Some((table, index))
 }
 
-/// The request body, parsed once: JSON fields, truncated JSON, or form fields.
+/// The request body, parsed once: JSON fields or form fields.
 enum Body {
     Json(Value),
-    TruncatedJson(String),
     Form(Vec<(String, String)>),
     None,
 }
@@ -800,7 +758,6 @@ impl Body {
         if trimmed.starts_with('{') {
             return match serde_json::from_str(text) {
                 Ok(json) => Body::Json(json),
-                Err(_) if body_trace.truncated => Body::TruncatedJson(text.to_string()),
                 Err(_) => Body::None,
             };
         }
@@ -826,7 +783,6 @@ impl Body {
     fn field(&self, name: &str) -> Option<String> {
         match self {
             Body::Json(value) => value.get(name)?.as_str().map(str::to_string),
-            Body::TruncatedJson(raw) => scan_json_string_values(raw, name).into_iter().next(),
             Body::Form(fields) => fields
                 .iter()
                 .find(|(key, _)| key == name)
@@ -997,133 +953,12 @@ impl Body {
                 walk(value, &mut found);
                 found
             }
-            Body::TruncatedJson(raw) => {
-                let mut found = scan_json_string_values(raw, "TableName");
-                found.extend(scan_request_items_tables(raw));
-                found
-            }
             _ => Vec::new(),
         };
         out.sort();
         out.dedup();
         out
     }
-}
-
-/// Extract complete `"key": "value"` string fields from a truncated JSON prefix.
-fn scan_json_string_values(raw: &str, key: &str) -> Vec<String> {
-    let needle = format!("\"{key}\"");
-    let mut out = Vec::new();
-    let mut rest = raw;
-    while let Some(pos) = rest.find(&needle) {
-        rest = &rest[pos + needle.len()..];
-        let after = rest.trim_start();
-        let Some(after_colon) = after.strip_prefix(':') else {
-            continue;
-        };
-        if let Some((val, tail)) = parse_leading_json_string(after_colon.trim_start()) {
-            if !val.is_empty() {
-                out.push(val);
-            }
-            rest = tail;
-        }
-    }
-    out
-}
-
-/// Extract complete table keys under `"RequestItems": { "table_a": ... }` from truncated JSON.
-fn scan_request_items_tables(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(pos) = raw.find("\"RequestItems\"") else {
-        return out;
-    };
-    let after = raw[pos + "\"RequestItems\"".len()..].trim_start();
-    let Some(after_colon) = after.strip_prefix(':') else {
-        return out;
-    };
-    let Some(mut cur) = after_colon.trim_start().strip_prefix('{') else {
-        return out;
-    };
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escape = false;
-    while !cur.is_empty() {
-        if depth == 0 {
-            let trimmed = cur.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
-            if trimmed.starts_with('}') {
-                break;
-            }
-            if let Some((table, after_key)) = parse_leading_json_string(trimmed)
-                && let Some(after_sep) = after_key.trim_start().strip_prefix(':')
-            {
-                if !table.is_empty() {
-                    out.push(table);
-                }
-                cur = after_sep;
-                // Advance past the value at depth 0 until `,` or `}`.
-                let mut val_bytes = 0usize;
-                for (idx, ch) in cur.char_indices() {
-                    val_bytes = idx + ch.len_utf8();
-                    if escape {
-                        escape = false;
-                        continue;
-                    }
-                    if in_str {
-                        if ch == '\\' {
-                            escape = true;
-                        } else if ch == '"' {
-                            in_str = false;
-                        }
-                        continue;
-                    }
-                    match ch {
-                        '"' => in_str = true,
-                        '{' | '[' => depth += 1,
-                        '}' | ']' => {
-                            if depth == 0 {
-                                val_bytes = idx;
-                                break;
-                            }
-                            depth -= 1;
-                        }
-                        ',' if depth == 0 => {
-                            val_bytes = idx + 1;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                cur = &cur[val_bytes..];
-                if depth != 0 || in_str {
-                    break;
-                }
-                continue;
-            }
-        }
-        break;
-    }
-    out
-}
-
-fn parse_leading_json_string(s: &str) -> Option<(String, &str)> {
-    let rest = s.strip_prefix('"')?;
-    let mut escape = false;
-    for (idx, ch) in rest.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if ch == '\\' {
-            escape = true;
-            continue;
-        }
-        if ch == '"' {
-            let literal = &s[..=idx + 1];
-            let parsed: String = serde_json::from_str(literal).ok()?;
-            return Some((parsed, &rest[idx + 1..]));
-        }
-    }
-    None
 }
 
 fn arn_for(mode: Mode, trace: &Trace, service: &str, rest: &str) -> String {
@@ -1273,7 +1108,7 @@ fn resources(mode: Mode, prefix: &str, operation: &str, trace: &Trace, body: &Bo
                 Body::Form(fields) => Some(fields.as_slice()),
                 _ => None,
             };
-            crate::catalog::derive_extra_resources(
+            rest::derive_extra_resources(
                 prefix,
                 operation,
                 trace,
@@ -2604,17 +2439,11 @@ mod tests {
             invocation_id: None,
             attempt: None,
             max_attempts: None,
-            pending: false,
             error: None,
             problem: None,
             access: Vec::new(),
             implied: Vec::new(),
-            new: false,
-            blocked: false,
-            replay_of: None,
-            blocked_phase: None,
-            caller_role: None,
-            target: None,
+            concrete: Vec::new(),
             request: Message {
                 headers: Vec::new(),
                 content_type: Some(if body.is_some_and(|b| b.starts_with('{')) {
@@ -2627,10 +2456,8 @@ mod tests {
                     bytes: text.len() as u64,
                     ..Default::default()
                 }),
-                ..Default::default()
             },
             response: Message::default(),
-            ..Default::default()
         }
     }
 
@@ -3075,60 +2902,6 @@ mod tests {
                 "iam:PassRole",
                 "arn:aws:iam::*:role/lambda-exec"
             )]
-        );
-    }
-
-    #[test]
-    fn salvages_table_permissions_from_truncated_dynamodb_batches() {
-        let mut batch = call(
-            "dynamodb",
-            "BatchWriteItem",
-            "POST",
-            "/",
-            Some(
-                r#"{"RequestItems":{"orders":[{"PutRequest":{"Item":{"k":{"S":"v"}}}}],"audit":[{"PutRequest":{"Item":{"x":"#,
-            ),
-        );
-        batch.request.body.as_mut().unwrap().truncated = true;
-        // The tables read so far, and `*` for whatever the cut-off tail names.
-        let derived = derive_call(&batch);
-        assert_eq!(
-            derived.own,
-            vec![
-                Access::new(
-                    "dynamodb:BatchWriteItem",
-                    "arn:aws:dynamodb:*:*:table/audit"
-                ),
-                Access::new(
-                    "dynamodb:BatchWriteItem",
-                    "arn:aws:dynamodb:*:*:table/orders"
-                ),
-                Access::new("dynamodb:BatchWriteItem", "*"),
-            ]
-        );
-        assert_eq!(
-            derived.unverified,
-            vec![Access::new("dynamodb:BatchWriteItem", "*")]
-        );
-        assert_eq!(derived.concrete_own.last(), derived.own.last());
-
-        let mut tx = call(
-            "dynamodb",
-            "TransactWriteItems",
-            "POST",
-            "/",
-            Some(r#"{"TransactItems":[{"Put":{"TableName":"orders","Item":{"blob":{"S":"xxxx"#),
-        );
-        tx.request.body.as_mut().unwrap().truncated = true;
-        assert_eq!(
-            derive(&tx).0,
-            vec![
-                Access::new("dynamodb:PutItem", "arn:aws:dynamodb:*:*:table/orders"),
-                Access::new("dynamodb:PutItem", "*"),
-                Access::new("dynamodb:UpdateItem", "*"),
-                Access::new("dynamodb:DeleteItem", "*"),
-                Access::new("dynamodb:ConditionCheckItem", "*"),
-            ]
         );
     }
 
@@ -3615,11 +3388,58 @@ mod tests {
     }
 
     #[test]
+    fn a_cbor_request_derives_the_resource_it_names() {
+        // Smithy RPCv2 CBOR: {"TableName": "orders", "Key": {"pk": {"S": "1"}}},
+        // as the proxy stores it (decoded to JSON text).
+        let mut frame = vec![0xa2, 0x69];
+        frame.extend_from_slice(b"TableName");
+        frame.push(0x66);
+        frame.extend_from_slice(b"orders");
+        frame.push(0x63);
+        frame.extend_from_slice(b"Key");
+        frame.extend_from_slice(&[0xa1, 0x62]);
+        frame.extend_from_slice(b"pk");
+        frame.extend_from_slice(&[0xa1, 0x61]);
+        frame.extend_from_slice(b"S");
+        frame.extend_from_slice(&[0x61]);
+        frame.extend_from_slice(b"1");
+        let mut get = call(
+            "dynamodb",
+            "GetItem",
+            "POST",
+            "/service/DynamoDB_20120810/operation/GetItem",
+            None,
+        );
+        get.request.content_type = Some("application/cbor".into());
+        get.request.body = Some(BodyTrace {
+            text: crate::cbor::decode_cbor_json(&frame),
+            encoding: Some("cbor".into()),
+            bytes: frame.len() as u64,
+            ..Default::default()
+        });
+        let derived = derive_call(&get);
+        assert_eq!(
+            derived.own,
+            vec![Access::new(
+                "dynamodb:GetItem",
+                "arn:aws:dynamodb:*:*:table/orders"
+            )]
+        );
+        assert_eq!(
+            derived.concrete_own,
+            vec![Access::new(
+                "dynamodb:GetItem",
+                "arn:aws:dynamodb:us-east-1:*:table/orders"
+            )]
+        );
+        assert!(derived.unverified.is_empty());
+    }
+
+    #[test]
     fn unreadable_bodies_stand_as_a_flagged_wildcard() {
         let mut cbor = call("sqs", "SendMessage", "POST", "/", None);
         cbor.request.body = Some(BodyTrace {
             text: None,
-            hex: Some("a1".into()),
             bytes: 40,
             binary: true,
             ..Default::default()

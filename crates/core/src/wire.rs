@@ -208,7 +208,7 @@ pub fn fallback_operation(service: &str, method: &str, path: &str, headers: &Hea
         "bedrock" | "bedrock-runtime" => bedrock_operation(method, path),
         "execute-api" => Some("Invoke".to_string()),
         "appconfig" | "appconfigdata" => appconfig_operation(method, path),
-        _ => crate::catalog::resolve_rest_operation(service, method, path, headers),
+        _ => crate::access::rest::resolve_rest_operation(service, method, path, headers),
     };
     shaped.unwrap_or_else(|| method.to_string())
 }

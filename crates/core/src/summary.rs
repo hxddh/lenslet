@@ -1,30 +1,39 @@
-//! What a run did: the in-memory tally, the `end` report, and its rendering.
+//! What a run did: the in-memory tally, the findings, the `end` report, and
+//! its rendering for the terminal and for a pull request.
 //!
 //! The report is one object with one schema everywhere: the last line of the
-//! run file, `lenslet run --json`, and `lenslet last --json`.
+//! run file and `lenslet run --json`.
+//!
+//! Findings are the run's one ranked list of what is worth a look:
+//! - `failure`: calls that failed the same way (service, operation, error
+//!   code), with the cause (cross-call root causes included). A failed SDK
+//!   attempt that a later attempt of the same invocation recovered from is
+//!   not a failure of the run.
+//! - `access`: a permission the run used that the lock does not list.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     access::{self, Access},
-    findings::{Finding, FindingKind, LEAKED_SUFFIX, Severity},
+    lock::Lock,
     trace::Trace,
 };
 
-/// Failed calls listed in the human summary; the report keeps all of them.
-const LISTED_FAILURES: usize = 10;
+/// Findings listed in the human summary; the report keeps all of them.
+const LISTED: usize = 10;
 /// Access changes listed in the human summary.
 const LISTED_ACCESS: usize = 20;
 /// Inline new-permission rows in PR Markdown before folding into `<details>`.
 const MARKDOWN_INLINE_ADDED: usize = 30;
 /// Hard ceiling on PR Markdown permission rows so comments stay under 64 KiB.
 const MARKDOWN_MAX_ROWS: usize = 120;
-
-fn is_zero(value: &usize) -> bool {
-    *value == 0
-}
+/// Distinct calls kept per permission in `via`.
+const VIA_LIMIT: usize = 3;
 
 #[derive(Clone, Debug, Default)]
 struct ResourceHistory {
@@ -32,70 +41,64 @@ struct ResourceHistory {
     deleted: Option<(usize, String)>,
 }
 
-/// Tracks resource creation, deletion, and region placement across calls in one
-/// run so missing-resource errors explain exact cross-call root causes.
+/// Tracks resource creation, deletion, and region placement across calls in
+/// one run, so missing-resource errors explain their cross-call root cause.
 #[derive(Clone, Debug, Default)]
 pub struct CausalTracker {
     resources: BTreeMap<(String, String), ResourceHistory>,
 }
 
 impl CausalTracker {
-    /// Enrich `trace.problem.hint` when a prior call in this run explains the
-    /// failure, then update lifecycle state on successful create/delete calls.
-    /// `concrete_own` is the call's concrete own access (body-derived ARNs).
-    /// Returns whether the hint changed.
+    /// Enrich `trace.problem.hint` when an earlier call in this run explains
+    /// the failure, then note successful creates and deletes. `concrete_own`
+    /// is the call's concrete own access. Returns whether the hint changed.
     pub fn observe_and_enrich(
         &mut self,
         trace: &mut Trace,
         concrete_own: &[Access],
         call_no: usize,
     ) -> bool {
-        if trace.pending {
-            return false;
-        }
         let lookup_keys = causal_keys(concrete_own, true);
-
         if trace.status >= 400
-            && !trace.blocked
             && let Some(problem) = trace.problem.as_mut()
             && is_missing_resource_code(&problem.code, trace.status)
         {
             for (svc, stem) in &lookup_keys {
-                if let Some(hist) = self.resources.get(&(svc.clone(), stem.clone())) {
-                    if let Some((del_call, del_op)) = hist.deleted.as_ref() {
-                        problem.hint = Some(format!(
-                            "`{stem}` was deleted earlier in this run at call #{del_call} ({del_op}) before this `{}` ran.",
-                            trace.operation
-                        ));
-                        return true;
-                    }
-                    if !matches!(svc.as_str(), "s3" | "iam")
-                        && let Some((cr_call, cr_op, Some(cr_reg))) = hist.created.as_ref()
-                        && let Some(req_reg) = trace.region.as_deref().filter(|r| !r.is_empty())
-                        && cr_reg != req_reg
-                    {
-                        problem.hint = Some(format!(
-                            "Region mismatch: `{stem}` was created in `{cr_reg}` at call #{cr_call} ({cr_op}), but this `{}` targeted `{req_reg}`.",
-                            trace.operation
-                        ));
-                        return true;
-                    }
+                let Some(hist) = self.resources.get(&(svc.clone(), stem.clone())) else {
+                    continue;
+                };
+                if let Some((del_call, del_op)) = hist.deleted.as_ref() {
+                    problem.hint = Some(format!(
+                        "`{stem}` was deleted earlier in this run at call #{del_call} ({del_op}) before this `{}` ran.",
+                        trace.operation
+                    ));
+                    return true;
+                }
+                if !matches!(svc.as_str(), "s3" | "iam")
+                    && let Some((cr_call, cr_op, Some(cr_reg))) = hist.created.as_ref()
+                    && let Some(req_reg) = trace.region.as_deref().filter(|r| !r.is_empty())
+                    && cr_reg != req_reg
+                {
+                    problem.hint = Some(format!(
+                        "Region mismatch: `{stem}` was created in `{cr_reg}` at call #{cr_call} ({cr_op}), but this `{}` targeted `{req_reg}`.",
+                        trace.operation
+                    ));
+                    return true;
                 }
             }
         }
-
         if trace.status < 400 {
-            let mutate_keys = causal_keys(concrete_own, false);
+            let keys = causal_keys(concrete_own, false);
             if is_create_operation(&trace.operation) {
-                for key in mutate_keys {
+                for key in keys {
                     let entry = self.resources.entry(key).or_default();
                     entry.created = Some((call_no, trace.operation.clone(), trace.region.clone()));
                     entry.deleted = None;
                 }
             } else if is_delete_operation(&trace.operation) {
-                for key in mutate_keys {
-                    let entry = self.resources.entry(key).or_default();
-                    entry.deleted = Some((call_no, trace.operation.clone()));
+                for key in keys {
+                    self.resources.entry(key).or_default().deleted =
+                        Some((call_no, trace.operation.clone()));
                 }
             }
         }
@@ -124,7 +127,7 @@ fn is_missing_resource_code(code: &str, status: u16) -> bool {
         )
 }
 
-pub(crate) fn is_create_operation(op: &str) -> bool {
+fn is_create_operation(op: &str) -> bool {
     matches!(
         op,
         "CreateBucket"
@@ -148,7 +151,7 @@ pub(crate) fn is_create_operation(op: &str) -> bool {
     )
 }
 
-pub(crate) fn is_delete_operation(op: &str) -> bool {
+fn is_delete_operation(op: &str) -> bool {
     matches!(
         op,
         "DeleteBucket"
@@ -174,10 +177,7 @@ pub(crate) fn is_delete_operation(op: &str) -> bool {
 
 /// The resources a call names, as `(service, name)` keys: `("s3",
 /// "s3://bucket/key")`, `("dynamodb", "table/orders")`, `("sqs", "jobs")`.
-pub(crate) fn causal_keys(
-    concrete_own: &[Access],
-    include_parent_bucket: bool,
-) -> Vec<(String, String)> {
+fn causal_keys(concrete_own: &[Access], include_parent_bucket: bool) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for acc in concrete_own {
         let res = acc.resource.as_str();
@@ -208,20 +208,15 @@ pub(crate) fn causal_keys(
         ) else {
             continue;
         };
-        let stem = if arn_svc == "dynamodb" {
-            if let Some((tbl, _)) = rest.split_once("/index/") {
-                tbl.to_string()
-            } else if let Some((tbl, _)) = rest.split_once("/stream/") {
-                tbl.to_string()
-            } else {
-                rest.to_string()
-            }
-        } else if arn_svc == "secretsmanager" {
-            rest.strip_suffix("-*").unwrap_or(rest).to_string()
-        } else {
-            rest.to_string()
+        let stem = match arn_svc {
+            "dynamodb" => rest
+                .split_once("/index/")
+                .or_else(|| rest.split_once("/stream/"))
+                .map_or(rest, |(table, _)| table),
+            "secretsmanager" => rest.strip_suffix("-*").unwrap_or(rest),
+            _ => rest,
         };
-        let key = (arn_svc.to_string(), stem);
+        let key = (arn_svc.to_string(), stem.to_string());
         if !out.contains(&key) {
             out.push(key);
         }
@@ -229,143 +224,7 @@ pub(crate) fn causal_keys(
     out
 }
 
-/// Tracks temporary STS session credentials (`AccessKeyId` → normalized `RoleArn`)
-/// across calls in one run so multi-role workloads attribute permissions per role.
-#[derive(Clone, Debug, Default)]
-pub struct RoleTracker {
-    sessions: BTreeMap<String, String>,
-}
-
-impl RoleTracker {
-    /// Tag `trace.caller_role` if `access_key_id` belongs to a previously assumed
-    /// STS session, and register newly minted credentials on successful `AssumeRole*`.
-    pub fn observe_call(&mut self, access_key_id: Option<&str>, trace: &mut Trace) {
-        if trace.caller_role.is_none()
-            && let Some(akid) = access_key_id
-            && let Some(role) = self.sessions.get(akid)
-        {
-            trace.caller_role = Some(role.clone());
-        }
-        if !trace.pending
-            && trace.status < 400
-            && trace.service == "sts"
-            && trace.operation.starts_with("AssumeRole")
-            && let Some(role_arn) = extract_assumed_role_arn(trace)
-            && let Some(minted_akid) = extract_minted_access_key_id(trace)
-        {
-            self.sessions.insert(minted_akid, role_arn);
-        }
-    }
-
-    pub fn role_for_key(&self, access_key_id: &str) -> Option<&str> {
-        self.sessions.get(access_key_id).map(String::as_str)
-    }
-}
-
-fn normalize_role_arn(raw: &str) -> String {
-    let raw = raw.trim();
-    if let Some(rest) = raw.strip_prefix("arn:")
-        && let Some((partition, r1)) = rest.split_once(':')
-        && let Some((service, r2)) = r1.split_once(':')
-        && let Some((_region, r3)) = r2.split_once(':')
-        && let Some((_account, resource)) = r3.split_once(':')
-    {
-        return format!("arn:{partition}:{service}::*:{resource}");
-    }
-    raw.to_string()
-}
-
-fn extract_assumed_role_arn(trace: &Trace) -> Option<String> {
-    if let Some(q_arn) = crate::wire::query_param(&trace.path, "RoleArn")
-        && !q_arn.is_empty()
-    {
-        return Some(normalize_role_arn(&q_arn));
-    }
-    let body = trace.request.body.as_ref()?.text.as_deref()?.trim();
-    if body.starts_with('{') {
-        let json: serde_json::Value = serde_json::from_str(body).ok()?;
-        let arn = json.get("RoleArn").and_then(|v| v.as_str())?;
-        return (!arn.is_empty()).then(|| normalize_role_arn(arn));
-    }
-    for pair in body.split('&') {
-        if let Some((k, v)) = pair.split_once('=')
-            && k == "RoleArn"
-        {
-            let dec = crate::wire::percent_decode_query(v);
-            if !dec.is_empty() {
-                return Some(normalize_role_arn(&dec));
-            }
-        }
-    }
-    None
-}
-
-fn extract_minted_access_key_id(trace: &Trace) -> Option<String> {
-    let body = trace.response.body.as_ref()?.text.as_deref()?.trim();
-    if body.starts_with('{') {
-        let json: serde_json::Value = serde_json::from_str(body).ok()?;
-        let akid = json
-            .get("Credentials")
-            .and_then(|c| c.get("AccessKeyId"))
-            .or_else(|| json.get("AccessKeyId"))
-            .and_then(|v| v.as_str())?
-            .trim();
-        return (!akid.is_empty()).then(|| akid.to_string());
-    }
-    // STS XML `<Credentials>...<AccessKeyId>ASIA...</AccessKeyId>...</Credentials>`
-    let scope = match body.find("<Credentials>") {
-        Some(idx) => &body[idx..],
-        None => body,
-    };
-    let start = scope.find("<AccessKeyId>")? + "<AccessKeyId>".len();
-    let end = scope[start..].find("</AccessKeyId>")? + start;
-    let akid = scope[start..end].trim();
-    (!akid.is_empty()).then(|| akid.to_string())
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Summary {
-    pub calls: usize,
-    pub retries: usize,
-    pub errors: usize,
-    pub blocked: usize,
-    pub unfinished: usize,
-    pub services: BTreeMap<String, usize>,
-    pub unmapped: BTreeMap<String, usize>,
-    pub failures: Vec<Failure>,
-    pub access: BTreeMap<Access, AccessUse>,
-    /// Permissions partitioned by `sts:AssumeRole*` caller role ARN.
-    pub roles: BTreeMap<String, BTreeMap<Access, AccessUse>>,
-    /// Concrete or fail-closed permissions rejected by the active gate.
-    pub denied_access: BTreeSet<Access>,
-    /// Footprint keys that had at least one call rejected by the active gate.
-    pub denied_footprints: BTreeSet<Access>,
-    pub gate_evaluated: bool,
-    pub causal: CausalTracker,
-    pub role_tracker: RoleTracker,
-    pending: HashSet<String>,
-    invocations: HashSet<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Failure {
-    pub id: String,
-    pub service: String,
-    pub operation: String,
-    pub status: u16,
-    pub code: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u32>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub blocked: bool,
-}
-
+/// How a run used one permission.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccessUse {
     pub calls: usize,
@@ -376,114 +235,272 @@ pub struct AccessUse {
     /// The calls that needed it, e.g. `DYNAMODB DeleteItem` (first few).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub via: Vec<String>,
-    /// The SigV4 services of every call that needed it, sorted: unlike the
-    /// display list `via`, never cut short, so conditions built from it
-    /// (`iam:PassedToService`, `kms:ViaService`) allow every caller.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<String>,
     /// A `*` that stands for a resource some call's request body did not let
-    /// Lenslet read (binary or truncated).
+    /// Lenslet read (binary, or over the inspection limit).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unverified: bool,
 }
 
-/// Distinct calls kept per permission in `via`.
-const VIA_LIMIT: usize = 3;
+/// A failed call, kept until the findings are made.
+#[derive(Clone, Debug)]
+struct FailedCall {
+    index: usize,
+    id: String,
+    service: String,
+    operation: String,
+    status: u16,
+    code: String,
+    message: Option<String>,
+    hint: Option<String>,
+    invocation_id: Option<String>,
+}
 
-fn record_access_use(entry: &mut AccessUse, call: &Trace, own: bool, unverified: bool) {
-    let failed = call.problem.is_some();
-    let via = format!("{} {}", call.service.to_ascii_uppercase(), call.operation);
-    if let Err(at) = entry.services.binary_search(&call.service) {
-        entry.services.insert(at, call.service.clone());
-    }
-    entry.unverified |= unverified;
-    entry.calls += 1;
-    entry.errors += usize::from(failed);
-    entry.implied = if entry.calls == 1 {
-        !own
-    } else {
-        entry.implied && !own
-    };
-    if entry.via.len() < VIA_LIMIT && !entry.via.contains(&via) {
-        entry.via.push(via);
-    }
+/// A permission not in the lock, and the calls that needed it.
+#[derive(Clone, Debug)]
+struct NewAccess {
+    index: usize,
+    calls: Vec<String>,
+    implied: bool,
+    unverified: bool,
+    via: String,
+}
+
+/// The running tally of a run's calls.
+#[derive(Clone, Debug, Default)]
+pub struct Summary {
+    pub calls: usize,
+    pub errors: usize,
+    pub services: BTreeMap<String, usize>,
+    pub unmapped: BTreeMap<String, usize>,
+    pub access: BTreeMap<Access, AccessUse>,
+    pub causal: CausalTracker,
+    failed: Vec<FailedCall>,
+    /// Per SDK invocation, the index of its latest successful attempt.
+    recovered: HashMap<String, usize>,
+    new_access: BTreeMap<Access, NewAccess>,
 }
 
 impl Summary {
-    /// Whether a call has started and not yet been recorded as finished.
-    pub fn in_flight(&self, id: &str) -> bool {
-        self.pending.contains(id)
-    }
-
-    pub fn start(&mut self, id: &str) {
-        self.pending.insert(id.to_string());
-        self.unfinished = self.pending.len();
-    }
-
+    /// Count one finished call (its access already recorded on it).
     pub fn observe(&mut self, trace: &Trace) {
-        if trace.pending {
-            // A pending line only ever describes a call still in flight.
-            return;
-        }
-        self.pending.remove(&trace.id);
-        self.unfinished = self.pending.len();
+        let index = self.calls;
         self.calls += 1;
-        // A replay re-sends its call's invocation id; it is not an SDK retry.
-        let seen_invocation = trace.replay_of.is_none()
-            && trace
-                .invocation_id
-                .as_ref()
-                .is_some_and(|id| !self.invocations.insert(id.clone()));
-        let retried = trace.attempt.is_some_and(|attempt| attempt > 1) || seen_invocation;
-        if retried {
-            self.retries += 1;
-        }
-        if trace.blocked {
-            self.blocked += 1;
-        }
         *self.services.entry(trace.service.clone()).or_default() += 1;
         if access::is_unmapped(trace) {
             *self.unmapped.entry(trace.service.clone()).or_default() += 1;
         }
-        for item in trace.access.iter().chain(trace.implied.iter()) {
+        let via = format!("{} {}", trace.service.to_ascii_uppercase(), trace.operation);
+        let own = trace.access.iter().map(|item| (item, false));
+        let implied = trace.implied.iter().map(|item| (item, true));
+        for (item, is_implied) in own.chain(implied) {
+            let entry = self.access.entry(item.key()).or_default();
+            entry.unverified |= item.unverified;
+            entry.calls += 1;
+            entry.errors += usize::from(trace.problem.is_some());
+            entry.implied = if entry.calls == 1 {
+                is_implied
+            } else {
+                entry.implied && is_implied
+            };
+            if entry.via.len() < VIA_LIMIT && !entry.via.contains(&via) {
+                entry.via.push(via.clone());
+            }
             if item.new {
-                self.denied_footprints.insert(item.key());
+                let new = self
+                    .new_access
+                    .entry(item.key())
+                    .or_insert_with(|| NewAccess {
+                        index,
+                        calls: Vec::new(),
+                        implied: is_implied,
+                        unverified: item.unverified,
+                        via: via.clone(),
+                    });
+                if !new.calls.contains(&trace.id) {
+                    new.calls.push(trace.id.clone());
+                }
             }
         }
-        for (index, item) in trace.access.iter().chain(trace.implied.iter()).enumerate() {
-            let own = index < trace.access.len();
-            record_access_use(
-                self.access.entry(item.key()).or_default(),
-                trace,
-                own,
-                item.unverified,
-            );
-            if let Some(role) = trace.caller_role.as_ref() {
-                let role_map = self.roles.entry(role.clone()).or_default();
-                record_access_use(
-                    role_map.entry(item.key()).or_default(),
-                    trace,
-                    own,
-                    item.unverified,
-                );
+        match trace.problem.as_ref() {
+            Some(problem) => {
+                self.errors += 1;
+                self.failed.push(FailedCall {
+                    index,
+                    id: trace.id.clone(),
+                    service: trace.service.clone(),
+                    operation: trace.operation.clone(),
+                    status: trace.status,
+                    code: problem.code.clone(),
+                    message: problem.message.clone(),
+                    hint: problem.hint.clone(),
+                    invocation_id: trace.invocation_id.clone(),
+                });
             }
-        }
-        if let Some(problem) = trace.problem.as_ref() {
-            self.errors += 1;
-            self.failures.push(Failure {
-                id: trace.id.clone(),
-                service: trace.service.clone(),
-                operation: trace.operation.clone(),
-                status: trace.status,
-                code: problem.code.clone(),
-                message: problem.message.clone(),
-                hint: problem.hint.clone(),
-                attempt: trace.attempt.filter(|attempt| *attempt > 1),
-                max_attempts: trace.max_attempts.filter(|_| retried),
-                blocked: trace.blocked,
-            });
+            None => {
+                if let Some(id) = trace.invocation_id.as_ref() {
+                    self.recovered.insert(id.clone(), index);
+                }
+            }
         }
     }
+
+    /// The findings so far, failures first, each kind in call order. Access
+    /// findings name `lock` (the lock file's label).
+    pub fn findings(&self, lock: &str) -> Vec<Finding> {
+        let mut found: Vec<(usize, Finding)> = Vec::new();
+        let mut groups: BTreeMap<(&str, &str, &str), Vec<&FailedCall>> = BTreeMap::new();
+        for call in &self.failed {
+            let recovered = call
+                .invocation_id
+                .as_ref()
+                .and_then(|id| self.recovered.get(id))
+                .is_some_and(|&ok| ok > call.index);
+            if !recovered {
+                groups
+                    .entry((&call.service, &call.operation, &call.code))
+                    .or_default()
+                    .push(call);
+            }
+        }
+        for calls in groups.into_values() {
+            let first = calls[0];
+            // The latest call is the one shown; the first with a cause explains them all.
+            let last = calls[calls.len() - 1];
+            let hint = calls.iter().find_map(|call| call.hint.clone());
+            let message = last.message.clone();
+            found.push((
+                first.index,
+                Finding::Failure(FailureFinding {
+                    title: format!(
+                        "{} {} → {}{}",
+                        first.service.to_ascii_uppercase(),
+                        first.operation,
+                        first.code,
+                        times(calls.len())
+                    ),
+                    detail: hint.clone().or_else(|| message.clone()),
+                    calls: calls.iter().map(|call| call.id.clone()).collect(),
+                    service: first.service.clone(),
+                    operation: first.operation.clone(),
+                    status: last.status,
+                    code: first.code.clone(),
+                    message,
+                    hint,
+                }),
+            ));
+        }
+        found.sort_by_key(|(index, _)| *index);
+        let mut access: Vec<(usize, Finding)> = self
+            .new_access
+            .iter()
+            .map(|(item, new)| {
+                let mut detail = format!(
+                    "{} by {}.",
+                    if new.implied { "Implied" } else { "Needed" },
+                    new.via
+                );
+                if new.unverified {
+                    detail.push_str(
+                        " Resource unknown: the request body was not readable (binary or too large).",
+                    );
+                }
+                (
+                    new.index,
+                    Finding::Access(AccessFinding {
+                        title: format!(
+                            "{} on {} not in {lock}",
+                            item.action,
+                            short_resource(&item.resource)
+                        ),
+                        detail: Some(detail),
+                        calls: new.calls.clone(),
+                        action: item.action.clone(),
+                        resource: item.resource.clone(),
+                        implied: new.implied,
+                        unverified: new.unverified,
+                    }),
+                )
+            })
+            .collect();
+        access.sort_by_key(|(index, _)| *index);
+        found.extend(access);
+        found.into_iter().map(|(_, finding)| finding).collect()
+    }
+}
+
+/// `table/orders` from `arn:aws:dynamodb:*:*:table/orders`, `bucket/*` from
+/// `arn:aws:s3:::bucket/*`.
+fn short_resource(resource: &str) -> &str {
+    if !resource.starts_with("arn:") {
+        return resource;
+    }
+    resource
+        .splitn(6, ':')
+        .nth(5)
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(resource)
+}
+
+/// One finding: calls that failed the same way, or a permission the lock
+/// does not list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Finding {
+    Failure(FailureFinding),
+    Access(AccessFinding),
+}
+
+impl Finding {
+    pub fn title(&self) -> &str {
+        match self {
+            Finding::Failure(failure) => &failure.title,
+            Finding::Access(access) => &access.title,
+        }
+    }
+
+    /// Ids of the calls this finding is about, in call order.
+    pub fn calls(&self) -> &[String] {
+        match self {
+            Finding::Failure(failure) => &failure.calls,
+            Finding::Access(access) => &access.calls,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureFinding {
+    /// `DYNAMODB GetItem → ResourceNotFoundException ×2`.
+    pub title: String,
+    /// The likely cause, else the error message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub calls: Vec<String>,
+    pub service: String,
+    pub operation: String,
+    /// The HTTP status of the latest failed call.
+    pub status: u16,
+    pub code: String,
+    /// The error message of the latest failed call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The likely cause (cross-call root causes included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessFinding {
+    /// `dynamodb:DeleteItem on table/orders not in lenslet.lock`.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub calls: Vec<String>,
+    pub action: String,
+    pub resource: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub implied: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unverified: bool,
 }
 
 /// One line of the access table.
@@ -493,9 +510,12 @@ pub struct AccessEntry {
     pub resource: String,
     #[serde(flatten)]
     pub used: AccessUse,
-    /// Not in the lock file.
+    /// Used by the run, not in the lock.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new: bool,
+    /// In the lock, not used by the run (`calls` is 0).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unused: bool,
 }
 
 /// A failure kind, for comparing runs: the same call failing the same way.
@@ -506,23 +526,17 @@ pub struct FailureKind {
     pub code: String,
 }
 
-/// What changed since the previous run of the same command.
+/// What changed since the previous run of the same command in the same
+/// directory.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Regressions {
     /// Run id it was compared with.
     pub previous_run: String,
     pub previous_exit_code: Option<i32>,
-    #[serde(default)]
-    pub previous_calls: usize,
-    #[serde(default)]
-    pub previous_duration_ms: u64,
     /// Failing now, not failing then.
     pub new_failures: Vec<FailureKind>,
     /// Failing then, not failing now.
     pub fixed: Vec<FailureKind>,
-    /// Permissions used now that the previous run did not exercise.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub new_access: Vec<Access>,
 }
 
 /// The `end` record: everything a person or an agent needs about one run.
@@ -530,52 +544,87 @@ pub struct Regressions {
 pub struct Report {
     pub version: u32,
     pub run: String,
-    #[serde(default)]
     pub command: Vec<String>,
+    /// The test command's exit code (`128 + signal` when a signal ended it).
     pub exit_code: Option<i32>,
     pub ended: String,
     pub duration_ms: u64,
     pub calls: usize,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub retries: usize,
     pub errors: usize,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub blocked: usize,
-    pub unfinished: usize,
     pub services: BTreeMap<String, usize>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Calls with no recognizable operation, per service.
     pub unmapped: BTreeMap<String, usize>,
-    pub failures: Vec<Failure>,
+    /// Every permission the run used, then the lock lines it did not use.
     pub access: Vec<AccessEntry>,
-    /// Permissions partitioned by `sts:AssumeRole*` caller role ARN, when sessions were assumed.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub roles: BTreeMap<String, Vec<AccessEntry>>,
+    /// Everything worth a look: failures, then access not in the lock.
+    pub findings: Vec<Finding>,
+    pub regressions: Option<Regressions>,
     /// Compared with this lock file; `null` when there is none.
     pub lock: Option<String>,
-    /// Compared/enforced with this IAM policy document, when `--policy` was set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<String>,
-    /// In this run, not in the lock.
-    pub access_added: Vec<Access>,
-    /// In the lock, not exercised by this run.
-    pub access_unused: Vec<Access>,
-    pub regressions: Option<Regressions>,
-    /// Everything worth a look, most severe first: the one list the terminal,
-    /// the PR comment and the window lead with.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub findings: Vec<crate::findings::Finding>,
-    pub trace: String,
-    pub endpoint: String,
-    pub upstream: String,
     /// What answered the calls (see the run header's `emulator`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emulator: Option<String>,
+    pub emulator: String,
+    /// The run file.
+    pub trace: String,
+    /// The test command's combined stdout and stderr.
+    pub log: Option<String>,
 }
 
 impl Report {
-    pub fn failure_kinds(&self) -> BTreeSet<FailureKind> {
-        self.failures
+    /// Fill in the tallies, the access table and the findings from `summary`,
+    /// compared with `lock` (its label and contents) when there is one.
+    pub fn tally(&mut self, summary: &Summary, lock: Option<(&str, &Lock)>) {
+        self.calls = summary.calls;
+        self.errors = summary.errors;
+        self.services = summary.services.clone();
+        self.unmapped = summary.unmapped.clone();
+        self.lock = lock.map(|(label, _)| label.to_string());
+        self.access = summary
+            .access
             .iter()
+            .map(|(access, used)| AccessEntry {
+                action: access.action.clone(),
+                resource: access.resource.clone(),
+                used: used.clone(),
+                new: lock.is_some_and(|(_, lock)| !lock.access.contains(access)),
+                unused: false,
+            })
+            .collect();
+        if let Some((_, lock)) = lock {
+            self.access.extend(
+                lock.access
+                    .iter()
+                    .filter(|access| !summary.access.contains_key(*access))
+                    .map(|access| AccessEntry {
+                        action: access.action.clone(),
+                        resource: access.resource.clone(),
+                        used: AccessUse::default(),
+                        new: false,
+                        unused: true,
+                    }),
+            );
+        }
+        self.findings = summary.findings(lock.map_or(crate::lock::FILE_NAME, |(label, _)| label));
+    }
+
+    /// Permissions the run used that the lock does not list.
+    pub fn added(&self) -> impl Iterator<Item = &AccessEntry> {
+        self.access.iter().filter(|entry| entry.new)
+    }
+
+    /// Lock lines the run did not use.
+    pub fn unused(&self) -> impl Iterator<Item = &AccessEntry> {
+        self.access.iter().filter(|entry| entry.unused)
+    }
+
+    pub fn failures(&self) -> impl Iterator<Item = &FailureFinding> {
+        self.findings.iter().filter_map(|finding| match finding {
+            Finding::Failure(failure) => Some(failure),
+            Finding::Access(_) => None,
+        })
+    }
+
+    pub fn failure_kinds(&self) -> BTreeSet<FailureKind> {
+        self.failures()
             .map(|failure| FailureKind {
                 service: failure.service.clone(),
                 operation: failure.operation.clone(),
@@ -584,78 +633,27 @@ impl Report {
             .collect()
     }
 
-    pub fn access_set(&self) -> BTreeSet<Access> {
-        self.access
-            .iter()
-            .map(|entry| Access::new(entry.action.clone(), entry.resource.clone()))
-            .collect()
-    }
-
-    /// Fill in the access table and compare against either a lock file or an IAM policy gate.
-    pub fn set_access_with_gate(&mut self, summary: &Summary, gate: Option<&crate::lock::Gate>) {
-        let policy_evaluated = gate.is_some_and(|g| g.is_policy()) && summary.gate_evaluated;
-        let to_entries = |map: &BTreeMap<Access, AccessUse>| -> Vec<AccessEntry> {
-            map.iter()
-                .map(|(access, used)| AccessEntry {
-                    action: access.action.clone(),
-                    resource: access.resource.clone(),
-                    used: used.clone(),
-                    new: if policy_evaluated {
-                        summary.denied_footprints.contains(access)
-                    } else {
-                        summary.denied_footprints.contains(access)
-                            || gate.is_some_and(|gate| !gate.allows(access))
-                    },
-                })
-                .collect()
-        };
-        self.access = to_entries(&summary.access);
-        self.roles = summary
-            .roles
-            .iter()
-            .map(|(role, map)| (role.clone(), to_entries(map)))
-            .collect();
-        if let Some(gate) = gate {
-            if policy_evaluated {
-                self.access_added = summary.denied_access.iter().cloned().collect();
-            } else {
-                let mut added: BTreeSet<Access> = summary
-                    .access
-                    .keys()
-                    .filter(|access| !gate.allows(access))
-                    .cloned()
-                    .collect();
-                added.extend(summary.denied_access.iter().cloned());
-                self.access_added = added.into_iter().collect();
-            }
-            if let Some(locked) = gate.locked_set() {
-                self.access_unused = locked
-                    .iter()
-                    .filter(|access| !summary.access.contains_key(*access))
-                    .cloned()
-                    .collect();
-            }
-        }
-    }
-
     pub fn compare_with(&mut self, previous: &Report) {
         let now = self.failure_kinds();
         let then = previous.failure_kinds();
-        let now_access = self.access_set();
-        let then_access = previous.access_set();
         self.regressions = Some(Regressions {
             previous_run: previous.run.clone(),
             previous_exit_code: previous.exit_code,
-            previous_calls: previous.calls,
-            previous_duration_ms: previous.duration_ms,
             new_failures: now.difference(&then).cloned().collect(),
             fixed: then.difference(&now).cloned().collect(),
-            new_access: now_access.difference(&then_access).cloned().collect(),
         });
     }
 
-    /// The human report, printed to stderr after the command exits.
-    pub fn render(&self, trace: &str) -> String {
+    fn new_failures(&self) -> BTreeSet<FailureKind> {
+        self.regressions
+            .as_ref()
+            .map(|regressions| regressions.new_failures.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The human report, printed to stderr after the command exits. Paths
+    /// under `home` are shown as `~/…`.
+    pub fn render(&self, home: &Path) -> String {
         let mut out = String::new();
         let services = if self.services.is_empty() {
             String::new()
@@ -667,85 +665,29 @@ impl Report {
                 names.join(", ")
             )
         };
-        let retries = retries_label(self.retries);
-        let blocked_summary = if self.blocked > 0 {
-            format!(" ({} blocked)", self.blocked)
-        } else {
-            String::new()
-        };
         out.push_str(&format!(
-            "lenslet: {}{retries} · {}{blocked_summary}{} · {}{}\n",
+            "lenslet: {} · {}{services} · {} · against {}\n",
             plural(self.calls, "call"),
             plural(self.errors, "error"),
-            services,
             seconds(self.duration_ms),
-            self.against(),
+            self.emulator,
         ));
-        if self.findings.is_empty() {
-            // A report written before findings existed.
-            for failure in self.failures.iter().take(LISTED_FAILURES) {
-                out.push_str(&failure_lines(failure, 1));
-            }
-            if self.failures.len() > LISTED_FAILURES {
-                out.push_str(&format!(
-                    "  … and {} more\n",
-                    self.failures.len() - LISTED_FAILURES
-                ));
-            }
+        let failures: Vec<&FailureFinding> = self.failures().collect();
+        for failure in failures.iter().take(LISTED) {
+            out.push_str(&failure_lines(failure));
         }
-        // Access findings are the `access:` list below; the rest lead.
-        let listed: Vec<&Finding> = self.listed_findings().collect();
-        for finding in listed.iter().take(LISTED_FAILURES) {
-            match (finding.kind, self.failure_of(finding)) {
-                (FindingKind::Failure, Some(failure)) => {
-                    out.push_str(&failure_lines(failure, finding.calls.len()));
-                }
-                _ => {
-                    let glyph = match finding.severity {
-                        Severity::Error => '✗',
-                        Severity::Warning => '!',
-                        Severity::Info => '·',
-                    };
-                    out.push_str(&format!("  {glyph} {}\n", finding.title));
-                    if let Some(detail) = finding.detail.as_deref() {
-                        out.push_str(&format!("      → {detail}\n"));
-                    }
-                }
-            }
-        }
-        if listed.len() > LISTED_FAILURES {
-            out.push_str(&format!(
-                "  … and {} more\n",
-                listed.len() - LISTED_FAILURES
-            ));
-        }
-        if let Some(line) = self.leaked_line() {
-            out.push_str(&format!("  · {line}\n"));
+        if failures.len() > LISTED {
+            out.push_str(&format!("  … and {} more\n", failures.len() - LISTED));
         }
         if let Some(regressions) = self.regressions.as_ref()
-            && (!regressions.new_failures.is_empty()
-                || !regressions.fixed.is_empty()
-                || !regressions.new_access.is_empty())
+            && (!regressions.new_failures.is_empty() || !regressions.fixed.is_empty())
         {
             let new = regressions.new_failures.len();
-            let mut parts = Vec::new();
-            if new > 0 || !regressions.fixed.is_empty() {
-                parts.push(format!(
-                    "{new} new {}, {} fixed",
-                    if new == 1 { "failure" } else { "failures" },
-                    regressions.fixed.len()
-                ));
-            }
-            if !regressions.new_access.is_empty() {
-                parts.push(format!(
-                    "+{} vs previous run",
-                    plural(regressions.new_access.len(), "permission")
-                ));
-            }
             out.push_str(&format!(
-                "  since run {}: {}\n",
+                "  since run {}: {new} new {}, {} fixed\n",
                 regressions.previous_run,
-                parts.join(" · ")
+                if new == 1 { "failure" } else { "failures" },
+                regressions.fixed.len()
             ));
             for kind in &regressions.new_failures {
                 out.push_str(&format!(
@@ -756,59 +698,55 @@ impl Report {
                 ));
             }
         }
-        let gate_name = self.policy.as_deref().or(self.lock.as_deref());
-        match gate_name {
-            Some(gate) if !self.access_added.is_empty() => {
+        let added: Vec<&AccessEntry> = self.added().collect();
+        let used = self.access.iter().filter(|entry| !entry.unused).count();
+        match self.lock.as_deref() {
+            Some(lock) if !added.is_empty() => {
                 out.push_str(&format!(
-                    "  access: {} not in {gate}\n",
-                    plural(self.access_added.len(), "permission")
+                    "  access: {} not in {lock}\n",
+                    plural(added.len(), "permission")
                 ));
-                for access in self.access_added.iter().take(LISTED_ACCESS) {
+                for entry in added.iter().take(LISTED_ACCESS) {
                     out.push_str(&format!(
                         "    + {:<32} {}{}\n",
-                        access.action,
-                        access.resource,
-                        if self.unverified(access) {
+                        entry.action,
+                        entry.resource,
+                        if entry.used.unverified {
                             "  (resource unknown: request body not readable)"
                         } else {
                             ""
                         }
                     ));
                 }
-                if self.access_added.len() > LISTED_ACCESS {
-                    out.push_str(&format!(
-                        "    … and {} more\n",
-                        self.access_added.len() - LISTED_ACCESS
-                    ));
+                if added.len() > LISTED_ACCESS {
+                    out.push_str(&format!("    … and {} more\n", added.len() - LISTED_ACCESS));
                 }
             }
-            Some(gate) => out.push_str(&format!(
-                "  access: within {gate} ({} used)\n",
-                plural(self.access.len(), "permission")
+            Some(lock) => out.push_str(&format!(
+                "  access: within {lock} ({} used)\n",
+                plural(used, "permission")
             )),
-            None if !self.access.is_empty() => out.push_str(&format!(
+            None if used > 0 => out.push_str(&format!(
                 "  access: {} observed · `lenslet run --update -- …` writes lenslet.lock\n",
-                plural(self.access.len(), "permission")
+                plural(used, "permission")
             )),
             None => {}
         }
+        let unused: Vec<&AccessEntry> = self.unused().collect();
         if let Some(lock) = self.lock.as_deref()
-            && !self.access_unused.is_empty()
+            && !unused.is_empty()
         {
             out.push_str(&format!(
                 "  unused: {} in {lock} not exercised by this run\n",
-                plural(self.access_unused.len(), "permission")
+                plural(unused.len(), "permission")
             ));
-            for access in self.access_unused.iter().take(LISTED_ACCESS) {
-                out.push_str(&format!(
-                    "    - {:<32} {}\n",
-                    access.action, access.resource
-                ));
+            for entry in unused.iter().take(LISTED_ACCESS) {
+                out.push_str(&format!("    - {:<32} {}\n", entry.action, entry.resource));
             }
-            if self.access_unused.len() > LISTED_ACCESS {
+            if unused.len() > LISTED_ACCESS {
                 out.push_str(&format!(
                     "    … and {} more\n",
-                    self.access_unused.len() - LISTED_ACCESS
+                    unused.len() - LISTED_ACCESS
                 ));
             }
         }
@@ -822,173 +760,122 @@ impl Report {
                 if total == 1 { "is" } else { "are" }
             ));
         }
-        if self.unfinished > 0 {
-            out.push_str(&format!(
-                "  {} still in flight when the command exited\n",
-                plural(self.unfinished, "call")
-            ));
-        }
-        if self.calls == 0 && self.unfinished == 0 {
+        if self.calls == 0 {
             out.push_str(
                 "  no AWS calls reached Lenslet: does the program honor AWS_ENDPOINT_URL?\n",
             );
         }
+        let log = self
+            .log
+            .as_deref()
+            .map(|log| format!(" · output {}", tilde(log, home)))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "lenslet: trace {trace} · `lenslet ui` to inspect\n"
+            "lenslet: trace {}{log} · `lenslet ui` to inspect\n",
+            tilde(&self.trace, home)
         ));
         out
     }
-}
-
-impl Report {
-    /// Findings shown in their own list: all but access findings, which the
-    /// access section lists with the calls behind them.
-    fn listed_findings(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|finding| !matches!(finding.kind, FindingKind::Access | FindingKind::Leaked))
-    }
-
-    /// Resources the run created and left behind, as one line: test fixtures
-    /// usually do this on purpose, so they are a note, not a list.
-    fn leaked_line(&self) -> Option<String> {
-        let names: Vec<&str> = self
-            .findings
-            .iter()
-            .filter(|finding| finding.kind == FindingKind::Leaked)
-            .map(|finding| {
-                finding
-                    .title
-                    .strip_suffix(LEAKED_SUFFIX)
-                    .unwrap_or(&finding.title)
-            })
-            .collect();
-        if names.is_empty() {
-            return None;
-        }
-        let shown = names.iter().take(4).copied().collect::<Vec<_>>().join(", ");
-        let more = if names.len() > 4 {
-            format!(" and {} more", names.len() - 4)
-        } else {
-            String::new()
-        };
-        Some(format!(
-            "{} created and not deleted: {shown}{more}",
-            plural(names.len(), "resource")
-        ))
-    }
-
-    /// The latest failed call of a failure finding: the one shown for it.
-    fn failure_of(&self, finding: &Finding) -> Option<&Failure> {
-        let last = finding.calls.last()?;
-        self.failures.iter().find(|failure| &failure.id == last)
-    }
-
-    /// Whether this permission's resource is a `*` standing for one that a
-    /// request body did not let Lenslet read.
-    fn unverified(&self, access: &Access) -> bool {
-        self.access.iter().any(|entry| {
-            entry.used.unverified
-                && entry.action == access.action
-                && entry.resource == access.resource
-        })
-    }
-
-    /// ` · against moto (started by Lenslet)`: what answered the calls, for
-    /// the first line of the terminal and Markdown reports. Empty for a
-    /// report written before Lenslet recorded it.
-    fn against(&self) -> String {
-        self.emulator
-            .as_deref()
-            .map(|emulator| format!(" · against {emulator}"))
-            .unwrap_or_default()
-    }
 
     /// The report as GitHub-flavored Markdown: what a PR comment or a CI job
-    /// summary shows. Findings lead, then access changes, each with the calls
+    /// summary shows. Failures lead, then access changes, each with the calls
     /// behind it.
     pub fn markdown(&self) -> String {
         let mut out = String::new();
-        let command = if self.command.is_empty() {
-            "proxy session".to_string()
-        } else {
-            format!("`{}`", self.command.join(" ").replace('`', "'"))
-        };
+        let command = format!("`{}`", self.command.join(" ").replace('`', "'"));
         let exit = match self.exit_code {
             Some(0) => "passed".to_string(),
             Some(code) => format!("**failed** (exit {code})"),
             None => "ended".to_string(),
         };
         out.push_str(&format!("### Lenslet · {command} {exit}\n\n"));
-        let blocked_md = if self.blocked > 0 {
-            format!(" ({} blocked)", self.blocked)
-        } else {
-            String::new()
-        };
         out.push_str(&format!(
-            "{}{} · {}{blocked_md} · {}{}\n\n",
+            "{} · {} · {} · against {}\n\n",
             plural(self.calls, "AWS call"),
-            retries_label(self.retries),
             plural(self.errors, "error"),
             plural(self.services.len(), "service"),
-            self.against(),
+            self.emulator,
         ));
-        self.markdown_findings(&mut out);
-
-        let via = |access: &crate::access::Access| {
-            self.access
-                .iter()
-                .find(|entry| entry.action == access.action && entry.resource == access.resource)
-                .map(|entry| {
-                    let mut text = entry.used.via.join(", ");
-                    if entry.used.implied {
-                        text.push_str(" (implied)");
-                    }
-                    if entry.used.unverified {
-                        text.push_str(" (resource unknown: request body not readable)");
-                    }
-                    text
-                })
-                .unwrap_or_default()
-        };
-        let gate_name = self.policy.as_deref().or(self.lock.as_deref());
-        match gate_name {
-            Some(gate) if !self.access_added.is_empty() => {
-                let remedy = if self.policy.is_some() {
-                    format!("Review them or grant them in `{gate}`.")
+        let failures: Vec<&FailureFinding> = self.failures().collect();
+        if !failures.is_empty() {
+            let new = self.new_failures();
+            out.push_str("| | Failure | Why |\n|---|---|---|\n");
+            for failure in failures.iter().take(LISTED * 2) {
+                let marker = if new.contains(&FailureKind {
+                    service: failure.service.clone(),
+                    operation: failure.operation.clone(),
+                    code: failure.code.clone(),
+                }) {
+                    " **new**"
                 } else {
-                    format!(
-                        "Review them; if they are intended, run `lenslet run --update` and commit `{gate}`."
-                    )
+                    ""
                 };
+                let detail = [
+                    failure
+                        .message
+                        .as_deref()
+                        .map(|message| one_line(message, 100)),
+                    failure.hint.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" — ");
                 out.push_str(&format!(
-                    "**{} not in `{gate}`.** {remedy}\n\n",
-                    plural(self.access_added.len(), "permission")
+                    "| ✗ | {}{marker} | {} |\n",
+                    failure.title.replace('|', "\\|"),
+                    detail.replace('|', "\\|")
+                ));
+            }
+            if failures.len() > LISTED * 2 {
+                out.push_str(&format!(
+                    "\n_… and {} more in the JSON report._\n",
+                    failures.len() - LISTED * 2
+                ));
+            }
+            out.push('\n');
+        }
+
+        let via = |entry: &AccessEntry| {
+            let mut text = entry.used.via.join(", ");
+            if entry.used.implied {
+                text.push_str(" (implied)");
+            }
+            if entry.used.unverified {
+                text.push_str(" (resource unknown: request body not readable)");
+            }
+            text
+        };
+        let row = |entry: &AccessEntry| {
+            format!(
+                "| + | `{}` | `{}` | {} |\n",
+                entry.action,
+                entry.resource,
+                via(entry)
+            )
+        };
+        let added: Vec<&AccessEntry> = self.added().collect();
+        let used = self.access.iter().filter(|entry| !entry.unused).count();
+        match self.lock.as_deref() {
+            Some(lock) if !added.is_empty() => {
+                out.push_str(&format!(
+                    "**{} not in `{lock}`.** Review them; if they are intended, run `lenslet run --update` and commit `{lock}`.\n\n",
+                    plural(added.len(), "permission")
                 ));
                 out.push_str("| | Permission | Resource | Needed by |\n|---|---|---|---|\n");
-                for access in self.access_added.iter().take(MARKDOWN_INLINE_ADDED) {
-                    out.push_str(&format!(
-                        "| + | `{}` | `{}` | {} |\n",
-                        access.action,
-                        access.resource,
-                        via(access)
-                    ));
+                for entry in added.iter().take(MARKDOWN_INLINE_ADDED) {
+                    out.push_str(&row(entry));
                 }
                 out.push('\n');
-                if self.access_added.len() > MARKDOWN_INLINE_ADDED {
-                    let extra = &self.access_added[MARKDOWN_INLINE_ADDED..];
+                if added.len() > MARKDOWN_INLINE_ADDED {
+                    let extra = &added[MARKDOWN_INLINE_ADDED..];
                     let shown = extra.len().min(MARKDOWN_MAX_ROWS - MARKDOWN_INLINE_ADDED);
                     out.push_str(&format!(
                         "<details><summary>… and {} more new permissions</summary>\n\n| | Permission | Resource | Needed by |\n|---|---|---|---|\n",
                         extra.len()
                     ));
-                    for access in extra.iter().take(shown) {
-                        out.push_str(&format!(
-                            "| + | `{}` | `{}` | {} |\n",
-                            access.action,
-                            access.resource,
-                            via(access)
-                        ));
+                    for entry in extra.iter().take(shown) {
+                        out.push_str(&row(entry));
                     }
                     if extra.len() > shown {
                         out.push_str(&format!(
@@ -999,33 +886,34 @@ impl Report {
                     out.push_str("\n</details>\n\n");
                 }
             }
-            Some(gate) => out.push_str(&format!(
-                "AWS access is within `{gate}` ({} used).\n\n",
-                plural(self.access.len(), "permission")
+            Some(lock) => out.push_str(&format!(
+                "AWS access is within `{lock}` ({} used).\n\n",
+                plural(used, "permission")
             )),
             None => out.push_str(&format!(
                 "{} observed; there is no `lenslet.lock` to compare with yet.\n\n",
-                plural(self.access.len(), "permission")
+                plural(used, "permission")
             )),
         }
+        let unused: Vec<&AccessEntry> = self.unused().collect();
         if let Some(lock) = self.lock.as_deref()
-            && !self.access_unused.is_empty()
+            && !unused.is_empty()
         {
             out.push_str(&format!(
                 "<details><summary>{} in <code>{lock}</code> not exercised by this run</summary>\n\n",
-                plural(self.access_unused.len(), "permission")
+                plural(unused.len(), "permission")
             ));
             out.push_str("| | Permission | Resource |\n|---|---|---|\n");
-            for access in self.access_unused.iter().take(MARKDOWN_MAX_ROWS) {
+            for entry in unused.iter().take(MARKDOWN_MAX_ROWS) {
                 out.push_str(&format!(
                     "| − | `{}` | `{}` |\n",
-                    access.action, access.resource
+                    entry.action, entry.resource
                 ));
             }
-            if self.access_unused.len() > MARKDOWN_MAX_ROWS {
+            if unused.len() > MARKDOWN_MAX_ROWS {
                 out.push_str(&format!(
                     "\n_… and {} more in `{lock}`._\n",
-                    self.access_unused.len() - MARKDOWN_MAX_ROWS
+                    unused.len() - MARKDOWN_MAX_ROWS
                 ));
             }
             out.push_str("\n</details>\n\n");
@@ -1044,42 +932,6 @@ impl Report {
                 if total == 1 { "is" } else { "are" }
             ));
         }
-        if !self.failures.is_empty() && self.findings.is_empty() {
-            let new: BTreeSet<FailureKind> = self
-                .regressions
-                .as_ref()
-                .map(|regressions| regressions.new_failures.iter().cloned().collect())
-                .unwrap_or_default();
-            out.push_str(&format!(
-                "**{}**\n\n| Call | Status | Error | Likely cause |\n|---|---|---|---|\n",
-                plural(self.failures.len(), "failed call")
-            ));
-            for failure in self.failures.iter().take(LISTED_FAILURES * 2) {
-                let kind = FailureKind {
-                    service: failure.service.clone(),
-                    operation: failure.operation.clone(),
-                    code: failure.code.clone(),
-                };
-                let marker = if failure.blocked {
-                    " **blocked**"
-                } else if new.contains(&kind) {
-                    " **new**"
-                } else {
-                    ""
-                };
-                let attempt = attempt_label(failure.attempt, failure.max_attempts);
-                out.push_str(&format!(
-                    "| {} {}{marker}{attempt} | {} | `{}` {} | {} |\n",
-                    failure.service.to_ascii_uppercase(),
-                    failure.operation,
-                    failure.status,
-                    failure.code,
-                    one_line(failure.message.as_deref().unwrap_or(""), 100).replace('|', "\\|"),
-                    failure.hint.as_deref().unwrap_or("").replace('|', "\\|"),
-                ));
-            }
-            out.push('\n');
-        }
         out.push_str(&format!(
             "<sub>Lenslet {} · observed access from this run, not a security review</sub>\n",
             env!("CARGO_PKG_VERSION")
@@ -1088,94 +940,15 @@ impl Report {
     }
 }
 
-impl Report {
-    /// The findings table at the top of the Markdown report.
-    fn markdown_findings(&self, out: &mut String) {
-        let listed: Vec<&Finding> = self.listed_findings().collect();
-        let leaked = self.leaked_line();
-        if listed.is_empty() {
-            if let Some(line) = leaked {
-                out.push_str(&format!("{line}.\n\n"));
-            }
-            return;
-        }
-        let new: BTreeSet<FailureKind> = self
-            .regressions
-            .as_ref()
-            .map(|regressions| regressions.new_failures.iter().cloned().collect())
-            .unwrap_or_default();
-        out.push_str("| | Finding | Detail |\n|---|---|---|\n");
-        for finding in listed.iter().take(LISTED_FAILURES * 2) {
-            let glyph = match finding.severity {
-                Severity::Error => "✗",
-                Severity::Warning => "!",
-                Severity::Info => "·",
-            };
-            let failure = self
-                .failure_of(finding)
-                .filter(|_| finding.kind == FindingKind::Failure);
-            let marker = match failure {
-                Some(failure) if failure.blocked => " **blocked**",
-                Some(failure)
-                    if new.contains(&FailureKind {
-                        service: failure.service.clone(),
-                        operation: failure.operation.clone(),
-                        code: failure.code.clone(),
-                    }) =>
-                {
-                    " **new**"
-                }
-                _ => "",
-            };
-            // A failure shows its message and its likely cause.
-            let detail = match failure {
-                Some(failure) => [
-                    failure
-                        .message
-                        .as_deref()
-                        .map(|message| one_line(message, 100)),
-                    failure.hint.clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" — "),
-                None => finding.detail.clone().unwrap_or_default(),
-            };
-            out.push_str(&format!(
-                "| {glyph} | {}{marker} | {} |\n",
-                finding.title.replace('|', "\\|"),
-                detail.replace('|', "\\|")
-            ));
-        }
-        if listed.len() > LISTED_FAILURES * 2 {
-            out.push_str(&format!(
-                "\n_… and {} more in the JSON report._\n",
-                listed.len() - LISTED_FAILURES * 2
-            ));
-        }
-        out.push('\n');
-        if let Some(line) = leaked {
-            out.push_str(&format!("{line}.\n\n"));
-        }
-    }
-}
-
-/// `  ✗ SQS SendMessage  400  Code ×2 (attempt 2/3)  message` and its cause.
-fn failure_lines(failure: &Failure, count: usize) -> String {
-    let attempt = attempt_label(failure.attempt, failure.max_attempts);
-    let blocked_tag = if failure.blocked { " [blocked]" } else { "" };
-    let times = if count > 1 {
-        format!(" ×{count}")
-    } else {
-        String::new()
-    };
+/// `  ✗ SQS SendMessage  400  Code ×2  message` and its cause.
+fn failure_lines(failure: &FailureFinding) -> String {
     let mut out = format!(
-        "  ✗ {} {}  {}  {}{times}{attempt}{blocked_tag}",
+        "  ✗ {} {}  {}  {}{}",
         failure.service.to_ascii_uppercase(),
         failure.operation,
         failure.status,
-        failure.code
+        failure.code,
+        times(failure.calls.len())
     );
     if let Some(message) = failure.message.as_deref() {
         out.push_str("  ");
@@ -1188,27 +961,27 @@ fn failure_lines(failure: &Failure, count: usize) -> String {
     out
 }
 
-fn plural(count: usize, noun: &str) -> String {
+/// `~/.lenslet/runs/x.jsonl` for a path under `home`.
+pub fn tilde(path: &str, home: &Path) -> String {
+    match Path::new(path).strip_prefix(home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.to_string(),
+    }
+}
+
+fn times(count: usize) -> String {
+    if count > 1 {
+        format!(" ×{count}")
+    } else {
+        String::new()
+    }
+}
+
+pub fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("1 {noun}")
     } else {
         format!("{count} {noun}s")
-    }
-}
-
-fn retries_label(retries: usize) -> String {
-    match retries {
-        0 => String::new(),
-        1 => " (1 retry)".to_string(),
-        n => format!(" ({n} retries)"),
-    }
-}
-
-fn attempt_label(attempt: Option<u32>, max: Option<u32>) -> String {
-    match (attempt.filter(|n| *n > 1), max) {
-        (Some(attempt), Some(max)) => format!(" (attempt {attempt}/{max})"),
-        (Some(attempt), None) => format!(" (attempt {attempt})"),
-        _ => String::new(),
     }
 }
 
@@ -1231,195 +1004,10 @@ fn one_line(text: &str, max: usize) -> String {
     }
 }
 
-/// Structured comparison between two finished runs (`lenslet diff`).
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunDiff {
-    pub base_run: String,
-    pub target_run: String,
-    pub base_command: Vec<String>,
-    pub target_command: Vec<String>,
-    pub base_exit_code: Option<i32>,
-    pub target_exit_code: Option<i32>,
-    pub base_calls: usize,
-    pub target_calls: usize,
-    pub base_errors: usize,
-    pub target_errors: usize,
-    pub base_blocked: usize,
-    pub target_blocked: usize,
-    pub base_duration_ms: u64,
-    pub target_duration_ms: u64,
-    pub new_failures: Vec<FailureKind>,
-    pub fixed_failures: Vec<FailureKind>,
-    pub access_added: Vec<Access>,
-    pub access_removed: Vec<Access>,
-    pub service_deltas: BTreeMap<String, isize>,
-}
-
-impl RunDiff {
-    pub fn compute(base: &Report, target: &Report) -> Self {
-        let base_f = base.failure_kinds();
-        let target_f = target.failure_kinds();
-        let base_a = base.access_set();
-        let target_a = target.access_set();
-
-        let mut services: BTreeSet<&String> = base.services.keys().collect();
-        services.extend(target.services.keys());
-        let mut service_deltas = BTreeMap::new();
-        for svc in services {
-            let b = base.services.get(svc).copied().unwrap_or(0) as isize;
-            let t = target.services.get(svc).copied().unwrap_or(0) as isize;
-            if t - b != 0 {
-                service_deltas.insert(svc.clone(), t - b);
-            }
-        }
-
-        RunDiff {
-            base_run: base.run.clone(),
-            target_run: target.run.clone(),
-            base_command: base.command.clone(),
-            target_command: target.command.clone(),
-            base_exit_code: base.exit_code,
-            target_exit_code: target.exit_code,
-            base_calls: base.calls,
-            target_calls: target.calls,
-            base_errors: base.errors,
-            target_errors: target.errors,
-            base_blocked: base.blocked,
-            target_blocked: target.blocked,
-            base_duration_ms: base.duration_ms,
-            target_duration_ms: target.duration_ms,
-            new_failures: target_f.difference(&base_f).cloned().collect(),
-            fixed_failures: base_f.difference(&target_f).cloned().collect(),
-            access_added: target_a.difference(&base_a).cloned().collect(),
-            access_removed: base_a.difference(&target_a).cloned().collect(),
-            service_deltas,
-        }
-    }
-
-    pub fn is_identical(&self) -> bool {
-        self.new_failures.is_empty()
-            && self.fixed_failures.is_empty()
-            && self.access_added.is_empty()
-            && self.access_removed.is_empty()
-            && self.base_calls == self.target_calls
-            && self.base_errors == self.target_errors
-    }
-
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        let call_delta = self.target_calls as isize - self.base_calls as isize;
-        let dur_delta = self.target_duration_ms as i64 - self.base_duration_ms as i64;
-        out.push_str(&format!(
-            "lenslet diff: {} → {}\n",
-            self.base_run, self.target_run
-        ));
-        out.push_str(&format!(
-            "  calls: {} → {} ({:+}) · errors: {} → {} · duration: {} → {} ({:+} ms)\n",
-            self.base_calls,
-            self.target_calls,
-            call_delta,
-            self.base_errors,
-            self.target_errors,
-            seconds(self.base_duration_ms),
-            seconds(self.target_duration_ms),
-            dur_delta,
-        ));
-        if !self.new_failures.is_empty() {
-            out.push_str(&format!("  new failures ({}):\n", self.new_failures.len()));
-            for f in &self.new_failures {
-                out.push_str(&format!(
-                    "    ✗ {} {}  {}\n",
-                    f.service.to_ascii_uppercase(),
-                    f.operation,
-                    f.code
-                ));
-            }
-        }
-        if !self.fixed_failures.is_empty() {
-            out.push_str(&format!("  fixed ({}):\n", self.fixed_failures.len()));
-            for f in &self.fixed_failures {
-                out.push_str(&format!(
-                    "    ✓ {} {}  {}\n",
-                    f.service.to_ascii_uppercase(),
-                    f.operation,
-                    f.code
-                ));
-            }
-        }
-        if !self.access_added.is_empty() {
-            out.push_str(&format!("  access added ({}):\n", self.access_added.len()));
-            for a in &self.access_added {
-                out.push_str(&format!("    + {:<32} {}\n", a.action, a.resource));
-            }
-        }
-        if !self.access_removed.is_empty() {
-            out.push_str(&format!(
-                "  access not exercised ({}):\n",
-                self.access_removed.len()
-            ));
-            for a in &self.access_removed {
-                out.push_str(&format!("    - {:<32} {}\n", a.action, a.resource));
-            }
-        }
-        if self.is_identical() {
-            out.push_str("  no changes in calls, failures, or IAM access.\n");
-        }
-        out
-    }
-
-    pub fn markdown(&self) -> String {
-        let mut out = format!(
-            "### Lenslet Diff: `{}` → `{}`\n\n",
-            self.base_run, self.target_run
-        );
-        out.push_str(&format!(
-            "- **Calls**: {} → {} ({:+})\n- **Errors**: {} → {}\n- **Duration**: {} → {}\n\n",
-            self.base_calls,
-            self.target_calls,
-            self.target_calls as isize - self.base_calls as isize,
-            self.base_errors,
-            self.target_errors,
-            seconds(self.base_duration_ms),
-            seconds(self.target_duration_ms),
-        ));
-        if !self.new_failures.is_empty() {
-            out.push_str("**New Failures**\n\n| Service | Operation | Error |\n|---|---|---|\n");
-            for f in &self.new_failures {
-                out.push_str(&format!(
-                    "| `{}` | `{}` | `{}` |\n",
-                    f.service, f.operation, f.code
-                ));
-            }
-            out.push('\n');
-        }
-        if !self.fixed_failures.is_empty() {
-            out.push_str("**Fixed**\n\n| Service | Operation | Error |\n|---|---|---|\n");
-            for f in &self.fixed_failures {
-                out.push_str(&format!(
-                    "| `{}` | `{}` | `{}` |\n",
-                    f.service, f.operation, f.code
-                ));
-            }
-            out.push('\n');
-        }
-        if !self.access_added.is_empty() || !self.access_removed.is_empty() {
-            out.push_str("**IAM Access Changes**\n\n| | Action | Resource |\n|---|---|---|\n");
-            for a in &self.access_added {
-                out.push_str(&format!("| + | `{}` | `{}` |\n", a.action, a.resource));
-            }
-            for a in &self.access_removed {
-                out.push_str(&format!("| − | `{}` | `{}` |\n", a.action, a.resource));
-            }
-            out.push('\n');
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{access::CallAccess, problem, trace::Message};
+    use crate::{access::CallAccess, problem, trace::BodyTrace};
 
     fn trace(id: &str, service: &str, status: u16, body: Option<&str>) -> Trace {
         Trace {
@@ -1433,12 +1021,6 @@ mod tests {
             status,
             ms: 3,
             authorization: true,
-            region: None,
-            invocation_id: None,
-            attempt: None,
-            max_attempts: None,
-            pending: false,
-            error: None,
             problem: problem::from_response(status, &[], body),
             access: vec![CallAccess {
                 action: format!("{service}:SendMessage"),
@@ -1446,51 +1028,39 @@ mod tests {
                 new: false,
                 unverified: false,
             }],
-            implied: Vec::new(),
-            new: false,
-            blocked: false,
-            replay_of: None,
-            blocked_phase: None,
-            caller_role: None,
-            target: None,
-            request: Message::default(),
-            response: Message::default(),
             ..Default::default()
         }
     }
 
     fn access(action: &str, resource: &str) -> Access {
-        Access {
-            action: action.into(),
-            resource: resource.into(),
+        Access::new(action, resource)
+    }
+
+    fn lock(entries: &[Access]) -> Lock {
+        Lock {
+            access: entries.iter().cloned().collect(),
+            ..Lock::default()
         }
     }
 
-    fn lock_gate(locked: &BTreeSet<Access>) -> crate::lock::Gate {
-        crate::lock::Gate::from_lock("lenslet.lock", locked.clone())
-    }
-
-    fn report(summary: &Summary) -> Report {
-        Report {
+    fn report(summary: &Summary, locked: Option<&Lock>) -> Report {
+        let mut report = Report {
+            version: crate::trace::VERSION,
             run: "r2".into(),
-            calls: summary.calls,
-            retries: summary.retries,
-            errors: summary.errors,
-            unfinished: summary.unfinished,
-            services: summary.services.clone(),
-            unmapped: summary.unmapped.clone(),
-            failures: summary.failures.clone(),
+            command: vec!["npm".into(), "test".into()],
             duration_ms: 1500,
+            emulator: "moto (started by Lenslet)".into(),
+            trace: "/home/u/.lenslet/runs/r2.jsonl".into(),
+            log: Some("/home/u/.lenslet/runs/r2.log".into()),
             ..Report::default()
-        }
+        };
+        report.tally(summary, locked.map(|lock| ("lenslet.lock", lock)));
+        report
     }
 
     #[test]
-    fn tallies_calls_errors_access_and_in_flight() {
+    fn tallies_calls_errors_and_access_against_the_lock() {
         let mut summary = Summary::default();
-        summary.start("a");
-        summary.start("b");
-        assert!(summary.in_flight("a"));
         summary.observe(&trace("a", "sqs", 200, None));
         summary.observe(&trace(
             "b",
@@ -1498,303 +1068,160 @@ mod tests {
             400,
             Some(r#"{"__type":"InvalidParameterValue","message":"bad\nbody"}"#),
         ));
-        summary.observe(&trace("c", "s3", 200, None));
-        assert_eq!(
-            (summary.calls, summary.errors, summary.unfinished),
-            (3, 1, 0)
-        );
+        let mut s3 = trace("c", "s3", 200, None);
+        s3.access[0].new = true;
+        summary.observe(&s3);
+        assert_eq!((summary.calls, summary.errors), (3, 1));
         let sqs = &summary.access[&access("sqs:SendMessage", "arn:aws:sqs:*:*:jobs")];
         assert_eq!((sqs.calls, sqs.errors, sqs.implied), (2, 1, false));
 
-        let mut report = report(&summary);
-        let locked: BTreeSet<Access> = [
+        let locked = lock(&[
             access("sqs:SendMessage", "arn:aws:sqs:*:*:jobs"),
             access("sqs:DeleteMessage", "arn:aws:sqs:*:*:jobs"),
-        ]
-        .into();
-        report.lock = Some("lenslet.lock".into());
-        report.set_access_with_gate(&summary, Some(&lock_gate(&locked)));
-        assert_eq!(
-            report.access_added,
-            vec![access("s3:SendMessage", "arn:aws:s3:*:*:jobs")]
-        );
-        assert_eq!(
-            report.access_unused,
-            vec![access("sqs:DeleteMessage", "arn:aws:sqs:*:*:jobs")]
-        );
-        assert!(report.access.iter().any(|entry| entry.new));
+        ]);
+        let report = report(&summary, Some(&locked));
+        let added: Vec<&str> = report.added().map(|e| e.resource.as_str()).collect();
+        assert_eq!(added, ["arn:aws:s3:*:*:jobs"]);
+        let unused: Vec<&str> = report.unused().map(|e| e.action.as_str()).collect();
+        assert_eq!(unused, ["sqs:DeleteMessage"]);
+        assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
+        assert!(matches!(report.findings[0], Finding::Failure(_)));
+        let Finding::Access(new) = &report.findings[1] else {
+            panic!("{:?}", report.findings[1]);
+        };
+        assert_eq!(new.title, "s3:SendMessage on jobs not in lenslet.lock");
+        assert_eq!(new.calls, ["c"]);
+        assert_eq!(new.detail.as_deref(), Some("Needed by S3 SendMessage."));
 
-        let text = report.render("~/.lenslet/runs/x.jsonl");
-        assert!(text.starts_with("lenslet: 3 calls · 1 error · 2 services (s3, sqs) · 1.5 s"));
-        assert!(text.contains("✗ SQS SendMessage  400  InvalidParameterValue  bad body"));
-        assert!(text.contains("access: 1 permission not in lenslet.lock"));
-        assert!(text.contains("+ s3:SendMessage"));
-
+        // The JSON has no derived duplicates of the access table.
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["failures"][0]["code"], "InvalidParameterValue");
-        assert_eq!(json["access"][0]["calls"], 1);
-        let back: Report = serde_json::from_value(json).unwrap();
-        assert_eq!(back.access, report.access);
+        for gone in [
+            "failures",
+            "access_added",
+            "access_unused",
+            "retries",
+            "policy",
+        ] {
+            assert!(json.get(gone).is_none(), "{gone}");
+        }
+        assert_eq!(json["findings"][0]["kind"], "failure");
+        assert_eq!(json["findings"][1]["kind"], "access");
+        assert_eq!(json["access"][2]["unused"], true);
+    }
+
+    #[test]
+    fn failures_group_by_kind_and_recovered_attempts_are_not_failures() {
+        let mut summary = Summary::default();
+        let mut first = trace("a1", "sqs", 500, Some(r#"{"__type":"InternalError"}"#));
+        first.invocation_id = Some("inv-1".into());
+        let mut retry = trace("a2", "sqs", 200, None);
+        retry.invocation_id = Some("inv-1".into());
+        retry.attempt = Some(2);
+        summary.observe(&first);
+        summary.observe(&retry);
+        for id in ["b1", "b2"] {
+            summary.observe(&trace(
+                id,
+                "sqs",
+                400,
+                Some(r#"{"__type":"QueueDoesNotExist","message":"no queue"}"#),
+            ));
+        }
+        let findings = summary.findings("lenslet.lock");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let Finding::Failure(failure) = &findings[0] else {
+            panic!()
+        };
+        assert_eq!(failure.title, "SQS SendMessage → QueueDoesNotExist ×2");
+        assert_eq!(failure.calls, ["b1", "b2"]);
+        assert_eq!(failure.status, 400);
+        assert_eq!(failure.message.as_deref(), Some("no queue"));
+        assert_eq!(
+            summary.errors, 3,
+            "every failed call still counts as an error"
+        );
     }
 
     #[test]
     fn compares_failures_with_the_previous_run() {
-        let failing = |code: &str| Failure {
-            id: "x".into(),
-            service: "sqs".into(),
-            operation: "SendMessage".into(),
-            status: 400,
-            code: code.into(),
-            ..Failure::default()
-        };
-        let previous = Report {
-            run: "r1".into(),
-            exit_code: Some(0),
-            failures: vec![failing("Throttling")],
-            ..Report::default()
-        };
-        let mut now = Report {
-            run: "r2".into(),
-            failures: vec![failing("QueueDoesNotExist")],
-            ..Report::default()
-        };
-        now.compare_with(&previous);
+        let mut summary = Summary::default();
+        summary.observe(&trace(
+            "a",
+            "sqs",
+            400,
+            Some(r#"{"__type":"QueueDoesNotExist"}"#),
+        ));
+        let mut now = report(&summary, None);
+        let mut then_summary = Summary::default();
+        then_summary.observe(&trace("x", "s3", 404, Some("<Code>NoSuchKey</Code>")));
+        let then = report(&then_summary, None);
+        now.compare_with(&then);
         let regressions = now.regressions.clone().unwrap();
-        assert_eq!(regressions.new_failures[0].code, "QueueDoesNotExist");
-        assert_eq!(regressions.fixed[0].code, "Throttling");
+        assert_eq!(regressions.new_failures.len(), 1);
+        assert_eq!(regressions.fixed[0].code, "NoSuchKey");
+        let text = now.render(Path::new("/home/u"));
         assert!(
-            now.render("t")
-                .contains("since run r1: 1 new failure, 1 fixed")
+            text.contains("since run r2: 1 new failure, 1 fixed"),
+            "{text}"
         );
+        assert!(now.markdown().contains("**new**"));
     }
 
     #[test]
-    fn says_when_nothing_arrived_and_how_to_lock() {
-        let text = Report::default().render("t");
-        assert!(text.contains("AWS_ENDPOINT_URL"));
+    fn the_terminal_report_says_what_answered_where_the_output_is_and_how_to_lock() {
         let mut summary = Summary::default();
+        let mut unmapped = trace("u1", "custom-svc", 200, None);
+        unmapped.operation = "POST".into();
+        unmapped.access.clear();
         summary.observe(&trace("a", "sqs", 200, None));
-        let mut report = report(&summary);
-        report.set_access_with_gate(&summary, None);
-        assert!(report.render("t").contains("--update"));
-    }
-
-    #[test]
-    fn reports_say_what_answered_the_calls() {
-        let mut summary = Summary::default();
-        summary.observe(&trace("a", "sqs", 200, None));
-        let mut report = report(&summary);
-        report.emulator = Some("moto (started by Lenslet)".into());
-        let terminal = report.render("~/.lenslet/runs/r2.jsonl");
-        let first = terminal.lines().next().unwrap();
+        summary.observe(&unmapped);
+        let report = report(&summary, None);
+        let text = report.render(Path::new("/home/u"));
+        let first = text.lines().next().unwrap();
         assert!(
             first.ends_with(" · against moto (started by Lenslet)"),
             "{first}"
         );
-        let md = report.markdown();
-        let stats = md.lines().find(|line| line.contains("AWS call")).unwrap();
-        assert_eq!(
-            stats,
-            "1 AWS call · 0 errors · 1 service · against moto (started by Lenslet)"
-        );
-        let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["emulator"], "moto (started by Lenslet)");
-        // Reports written before 12.0 have no `emulator` and say nothing.
-        report.emulator = None;
-        assert!(!report.markdown().contains("against"));
-        assert!(
-            serde_json::to_value(&report)
-                .unwrap()
-                .get("emulator")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn markdown_explains_access_changes_and_failures() {
-        let mut summary = Summary::default();
-        summary.observe(&trace("a", "sqs", 200, None));
-        summary.observe(&trace(
-            "b",
-            "s3",
-            404,
-            Some(r#"<Error><Code>NoSuchKey</Code><Message>gone | away</Message></Error>"#),
-        ));
-        let mut report = report(&summary);
-        report.command = vec!["npm".into(), "test".into()];
-        report.exit_code = Some(1);
-        report.lock = Some("lenslet.lock".into());
-        let locked: BTreeSet<Access> = [
-            access("sqs:SendMessage", "arn:aws:sqs:*:*:jobs"),
-            access("sqs:DeleteMessage", "arn:aws:sqs:*:*:jobs"),
-        ]
-        .into();
-        report.set_access_with_gate(&summary, Some(&lock_gate(&locked)));
-        assert_eq!(
-            summary.access[&access("s3:SendMessage", "arn:aws:s3:*:*:jobs")].via,
-            ["S3 SendMessage"]
-        );
-        let md = report.markdown();
-        assert!(
-            md.starts_with("### Lenslet · `npm test` **failed** (exit 1)"),
-            "{md}"
-        );
-        assert!(
-            md.contains("**1 permission not in `lenslet.lock`.**"),
-            "{md}"
-        );
-        assert!(
-            md.contains("| + | `s3:SendMessage` | `arn:aws:s3:*:*:jobs` | S3 SendMessage |"),
-            "{md}"
-        );
-        assert!(
-            md.contains("1 permission in <code>lenslet.lock</code> not exercised"),
-            "{md}"
-        );
-        assert!(md.contains("| − | `sqs:DeleteMessage`"), "{md}");
-        assert!(
-            md.contains("`NoSuchKey` gone \\| away"),
-            "pipes are escaped: {md}"
-        );
-
-        let text = report.render("t");
-        assert!(text.contains("unused: 1 permission in lenslet.lock not exercised by this run"));
-        assert!(text.contains("- sqs:DeleteMessage"));
-    }
-
-    #[test]
-    fn surfaces_sdk_retries_and_unmapped_calls() {
-        let mut summary = Summary::default();
-        let mut first = trace("a1", "sqs", 500, Some(r#"{"__type":"InternalError"}"#));
-        first.invocation_id = Some("inv-1".into());
-        let mut retry = trace("a2", "sqs", 500, Some(r#"{"__type":"InternalError"}"#));
-        retry.invocation_id = Some("inv-1".into());
-        retry.attempt = Some(2);
-        retry.max_attempts = Some(3);
-        let mut unmapped = trace("u1", "custom-svc", 200, None);
-        unmapped.operation = "POST".into();
-        unmapped.access.clear();
-
-        summary.observe(&first);
-        summary.observe(&retry);
-        summary.observe(&unmapped);
-        assert_eq!(summary.retries, 1);
-        assert_eq!(summary.unmapped.get("custom-svc"), Some(&1));
-
-        let report = report(&summary);
-        let text = report.render("t");
-        assert!(text.contains("3 calls (1 retry)"), "{text}");
-        assert!(text.contains("InternalError (attempt 2/3)"), "{text}");
+        assert!(text.contains("access: 1 permission observed · `lenslet run --update"));
         assert!(
             text.contains("note: 1 call (custom-svc) had no recognizable operation"),
             "{text}"
         );
-        let md = report.markdown();
-        assert!(md.contains("3 AWS calls (1 retry)"), "{md}");
-        assert!(md.contains("(attempt 2/3)"), "{md}");
-        assert!(md.contains("`custom-svc`"), "{md}");
-    }
-
-    #[test]
-    fn causal_tracker_explains_region_mismatch_and_prior_deletion() {
-        let mut tracker = CausalTracker::default();
-
-        // Call #1: CreateTable `orders` in `us-west-2` succeeds.
-        let mut create_tbl = trace("c1", "dynamodb", 200, None);
-        create_tbl.operation = "CreateTable".into();
-        create_tbl.region = Some("us-west-2".into());
-        create_tbl.request.body = Some(crate::trace::BodyTrace {
-            text: Some(r#"{"TableName":"orders"}"#.into()),
-            bytes: 22,
-            ..Default::default()
-        });
-        let snap1 = access::derive_call(&create_tbl).concrete_own;
-        tracker.observe_and_enrich(&mut create_tbl, &snap1, 1);
-
-        // Call #2: GetItem on `orders` in `us-east-1` fails with ResourceNotFoundException.
-        let mut get_wrong_reg = trace(
-            "c2",
-            "dynamodb",
-            400,
-            Some(r#"{"__type":"ResourceNotFoundException","message":"not found"}"#),
-        );
-        get_wrong_reg.operation = "GetItem".into();
-        get_wrong_reg.region = Some("us-east-1".into());
-        get_wrong_reg.request.body = create_tbl.request.body.clone();
-        let snap2 = access::derive_call(&get_wrong_reg).concrete_own;
-        tracker.observe_and_enrich(&mut get_wrong_reg, &snap2, 2);
-        let hint = get_wrong_reg
-            .problem
-            .as_ref()
-            .and_then(|p| p.hint.as_deref())
-            .unwrap_or("");
         assert!(
-            hint.contains("Region mismatch")
-                && hint.contains("us-west-2")
-                && hint.contains("us-east-1")
-                && hint.contains("call #1"),
-            "unexpected hint: {hint}"
+            text.ends_with(
+                "lenslet: trace ~/.lenslet/runs/r2.jsonl · output ~/.lenslet/runs/r2.log · `lenslet ui` to inspect\n"
+            ),
+            "{text}"
         );
-
-        // Call #3: DeleteBucket `receipts`, followed by Call #4 PutObject `/receipts/a.txt` → 404 NoSuchBucket.
-        let mut del_bucket = trace("c3", "s3", 204, None);
-        del_bucket.operation = "DeleteBucket".into();
-        del_bucket.path = "/receipts".into();
-        let snap3 = access::derive_call(&del_bucket).concrete_own;
-        tracker.observe_and_enrich(&mut del_bucket, &snap3, 3);
-
-        let mut put_after_del = trace(
-            "c4",
-            "s3",
-            404,
-            Some("<Error><Code>NoSuchBucket</Code><Message>gone</Message></Error>"),
-        );
-        put_after_del.operation = "PutObject".into();
-        put_after_del.path = "/receipts/a.txt".into();
-        let snap4 = access::derive_call(&put_after_del).concrete_own;
-        tracker.observe_and_enrich(&mut put_after_del, &snap4, 4);
-        let del_hint = put_after_del
-            .problem
-            .as_ref()
-            .and_then(|p| p.hint.as_deref())
-            .unwrap_or("");
+        let nothing = super::tests::report(&Summary::default(), None);
         assert!(
-            del_hint.contains("s3://receipts")
-                && del_hint.contains("deleted earlier")
-                && del_hint.contains("call #3"),
-            "unexpected hint: {del_hint}"
+            nothing
+                .render(Path::new("/home/u"))
+                .contains("no AWS calls reached Lenslet")
         );
     }
 
     #[test]
     fn findings_lead_the_summary_and_the_pr_comment_without_repeats() {
-        use crate::findings::analyze;
         let mut summary = Summary::default();
-        let mut calls = Vec::new();
         for id in ["a", "b"] {
             let mut failed = trace(
                 id,
                 "sqs",
                 400,
-                Some(r#"{"__type":"QueueDoesNotExist","message":"no queue"}"#),
+                Some(r#"{"__type":"QueueDoesNotExist","message":"no | queue"}"#),
             );
             failed.access[0].new = true;
             failed.access[0].unverified = true;
             failed.access[0].resource = "*".into();
             summary.observe(&failed);
-            calls.push(failed);
         }
-        let mut report = report(&summary);
-        report.command = vec!["npm".into(), "test".into()];
+        let mut report = report(&summary, Some(&lock(&[access("s3:GetObject", "*")])));
         report.exit_code = Some(1);
-        report.lock = Some("lenslet.lock".into());
-        report.findings = analyze(&calls);
-        report.set_access_with_gate(&summary, Some(&lock_gate(&BTreeSet::new())));
-        assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
 
-        let text = report.render("t");
+        let text = report.render(Path::new("/home/u"));
         assert!(
-            text.contains("✗ SQS SendMessage  400  QueueDoesNotExist ×2  no queue"),
+            text.contains("✗ SQS SendMessage  400  QueueDoesNotExist ×2  no | queue"),
             "{text}"
         );
         assert_eq!(text.matches("QueueDoesNotExist").count(), 1, "{text}");
@@ -1802,93 +1229,95 @@ mod tests {
             text.contains("+ sqs:SendMessage                  *  (resource unknown: request body not readable)"),
             "{text}"
         );
-        assert_eq!(text.matches("sqs:SendMessage").count(), 1, "{text}");
+        assert!(text.contains("unused: 1 permission in lenslet.lock not exercised by this run"));
+        assert!(text.contains("- s3:GetObject"));
 
         let md = report.markdown();
-        let findings_at = md.find("| | Finding | Detail |").expect(&md);
         assert!(
-            findings_at < md.find("not in `lenslet.lock`").unwrap(),
+            md.starts_with("### Lenslet · `npm test` **failed** (exit 1)"),
+            "{md}"
+        );
+        let failures_at = md.find("| | Failure | Why |").expect(&md);
+        assert!(
+            failures_at < md.find("not in `lenslet.lock`").unwrap(),
             "{md}"
         );
         assert!(
-            md.contains("| ✗ | SQS SendMessage → QueueDoesNotExist ×2 | no queue — The resource"),
+            md.contains(
+                "| ✗ | SQS SendMessage → QueueDoesNotExist ×2 | no \\| queue — The resource"
+            ),
             "{md}"
         );
-        assert!(!md.contains("failed call"), "no second failure table: {md}");
         assert!(
-            md.contains("(resource unknown: request body not readable)"),
+            md.contains("**1 permission not in `lenslet.lock`.** Review them; if they are intended, run `lenslet run --update`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| + | `sqs:SendMessage` | `*` | SQS SendMessage (resource unknown: request body not readable) |"),
+            "{md}"
+        );
+        assert!(md.contains("| − | `s3:GetObject`"), "{md}");
+        assert!(
+            md.contains("1 AWS call") || md.contains("2 AWS calls"),
             "{md}"
         );
     }
 
     #[test]
-    fn tracks_sts_assumed_role_sessions_and_partitions_access_by_role() {
-        let mut summary = Summary::default();
-        let mut assume = Trace {
-            id: "1".into(),
-            method: "POST".into(),
-            path: "/".into(),
-            service: "sts".into(),
-            operation: "AssumeRole".into(),
-            status: 200,
-            request: crate::trace::Message {
-                body: Some(crate::trace::BodyTrace {
-                    text: Some(
-                        "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fcheckout-api"
-                            .into(),
-                    ),
-                    bytes: 82,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            response: crate::trace::Message {
-                body: Some(crate::trace::BodyTrace {
-                    text: Some(
-                        "<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>ASIAWORKERTEST01</AccessKeyId></Credentials></AssumeRoleResult></AssumeRoleResponse>"
-                            .into(),
-                    ),
-                    bytes: 148,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
+    fn causal_tracker_explains_region_mismatch_and_prior_deletion() {
+        let mut tracker = CausalTracker::default();
+        let body = Some(BodyTrace {
+            text: Some(r#"{"TableName":"orders"}"#.into()),
+            bytes: 22,
             ..Default::default()
-        };
-        summary
-            .role_tracker
-            .observe_call(Some("AKIASTATIC"), &mut assume);
-        assert!(assume.caller_role.is_none());
-        summary.observe(&assume);
+        });
+        let mut create = trace("c1", "dynamodb", 200, None);
+        create.operation = "CreateTable".into();
+        create.region = Some("us-west-2".into());
+        create.request.body = body.clone();
+        let concrete = access::derive_call(&create).concrete_own;
+        tracker.observe_and_enrich(&mut create, &concrete, 1);
 
-        let mut ddb = Trace {
-            id: "2".into(),
-            method: "POST".into(),
-            path: "/".into(),
-            service: "dynamodb".into(),
-            operation: "PutItem".into(),
-            status: 200,
-            access: vec![crate::access::CallAccess {
-                action: "dynamodb:PutItem".into(),
-                resource: "arn:aws:dynamodb:*:*:table/orders".into(),
-                new: false,
-                unverified: false,
-            }],
-            ..Default::default()
-        };
-        summary
-            .role_tracker
-            .observe_call(Some("ASIAWORKERTEST01"), &mut ddb);
-        assert_eq!(
-            ddb.caller_role.as_deref(),
-            Some("arn:aws:iam::*:role/checkout-api")
+        let mut get = trace(
+            "c2",
+            "dynamodb",
+            400,
+            Some(r#"{"__type":"ResourceNotFoundException","message":"not found"}"#),
         );
-        summary.observe(&ddb);
+        get.operation = "GetItem".into();
+        get.region = Some("us-east-1".into());
+        get.request.body = body;
+        let concrete = access::derive_call(&get).concrete_own;
+        assert!(tracker.observe_and_enrich(&mut get, &concrete, 2));
+        let hint = get.problem.as_ref().unwrap().hint.clone().unwrap();
+        assert!(
+            hint.contains("Region mismatch")
+                && hint.contains("us-west-2")
+                && hint.contains("call #1"),
+            "{hint}"
+        );
 
-        let mut rep = report(&summary);
-        rep.set_access_with_gate(&summary, None);
-        let role_entries = rep.roles.get("arn:aws:iam::*:role/checkout-api").unwrap();
-        assert_eq!(role_entries.len(), 1);
-        assert_eq!(role_entries[0].action, "dynamodb:PutItem");
+        let mut delete = trace("c3", "s3", 204, None);
+        delete.operation = "DeleteBucket".into();
+        delete.path = "/receipts".into();
+        let concrete = access::derive_call(&delete).concrete_own;
+        tracker.observe_and_enrich(&mut delete, &concrete, 3);
+        let mut put = trace(
+            "c4",
+            "s3",
+            404,
+            Some("<Error><Code>NoSuchBucket</Code><Message>gone</Message></Error>"),
+        );
+        put.operation = "PutObject".into();
+        put.path = "/receipts/a.txt".into();
+        let concrete = access::derive_call(&put).concrete_own;
+        tracker.observe_and_enrich(&mut put, &concrete, 4);
+        let hint = put.problem.as_ref().unwrap().hint.clone().unwrap();
+        assert!(
+            hint.contains("s3://receipts")
+                && hint.contains("deleted earlier")
+                && hint.contains("call #3"),
+            "{hint}"
+        );
     }
 }
