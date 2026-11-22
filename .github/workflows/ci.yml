@@ -45,7 +45,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v5
         with:
@@ -54,9 +54,9 @@ jobs:
         run: git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+      # CI builds the native (Apple silicon) app only; the release adds x86_64.
       - run: cargo build --release --locked --target aarch64-apple-darwin -p lenslet
-      - run: cargo build --release --locked --target x86_64-apple-darwin -p lenslet
       - run: bash scripts/package-macos.sh 0.0.0-ci dist

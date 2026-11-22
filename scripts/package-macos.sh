@@ -6,9 +6,14 @@ version="$1"; dist="$2"
 work="$(mktemp -d)"
 app="$work/Lenslet.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$dist"
-lipo -create -output "$app/Contents/MacOS/lenslet" \
-  target/aarch64-apple-darwin/release/lenslet \
-  target/x86_64-apple-darwin/release/lenslet
+# Universal when both architectures were built, else the one that was.
+built=()
+for arch in aarch64 x86_64; do
+  bin="target/${arch}-apple-darwin/release/lenslet"
+  [ -f "$bin" ] && built+=("$bin")
+done
+[ "${#built[@]}" -gt 0 ] || { echo "no macOS release build found" >&2; exit 1; }
+lipo -create -output "$app/Contents/MacOS/lenslet" "${built[@]}"
 iconset="$work/AppIcon.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
