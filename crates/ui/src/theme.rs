@@ -69,8 +69,9 @@ impl Ui {
         if self.lang == Lang::Zh { zh } else { en }
     }
 
-    pub fn zh(&self) -> bool {
-        self.lang == Lang::Zh
+    /// A [`crate::i18n::Tr`] in the current language.
+    pub fn tr<'a>(&self, text: &'a crate::i18n::Tr) -> &'a str {
+        self.t(&text.en, &text.zh)
     }
 
     pub fn row_height(&self) -> f32 {

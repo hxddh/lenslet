@@ -70,6 +70,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_output_height() -> f32 {
+    240.0
+}
+
 fn default_inspector_width() -> f32 {
     crate::theme::INSPECTOR_DEFAULT_W
 }
@@ -91,8 +95,14 @@ pub struct UiPrefs {
     pub inspector_width: f32,
     #[serde(default = "default_true")]
     pub inspector_open: bool,
-    #[serde(default = "default_true")]
+    /// The sidebar starts collapsed.
+    #[serde(default)]
     pub sidebar_open: bool,
+    /// The Output drawer under Calls, and its height.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_open: bool,
+    #[serde(default = "default_output_height")]
+    pub output_height: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_width: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +135,9 @@ impl Default for UiPrefs {
             reduce_motion: false,
             inspector_width: default_inspector_width(),
             inspector_open: true,
-            sidebar_open: true,
+            sidebar_open: false,
+            output_open: false,
+            output_height: default_output_height(),
             window_width: None,
             window_height: None,
             workspace_dir: None,
@@ -259,7 +271,9 @@ mod tests {
             reduce_motion: true,
             inspector_width: 520.0,
             inspector_open: false,
-            sidebar_open: false,
+            sidebar_open: true,
+            output_open: true,
+            output_height: 300.0,
             window_width: Some(1440.0),
             window_height: Some(900.0),
             ..UiPrefs::default()

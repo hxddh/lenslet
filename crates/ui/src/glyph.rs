@@ -74,21 +74,6 @@ pub fn search_icon(color: Hsla) -> impl IntoElement {
     crate::icons::icon("icons/search.svg", 13.0, color)
 }
 
-/// Settings gear icon rendered via embedded vector SVG.
-pub fn gear_icon(color: Hsla) -> impl IntoElement {
-    crate::icons::icon("icons/settings.svg", 14.0, color)
-}
-
-/// Split-sidebar icon (`⌘B` toggle right inspector).
-pub fn sidebar_icon(color: Hsla, active: bool) -> impl IntoElement {
-    let c = if active {
-        Hsla { a: 1.0, ..color }
-    } else {
-        color
-    };
-    crate::icons::icon("icons/sidebar-right.svg", 14.0, c)
-}
-
 /// Left workspace sidebar icon (`⌘0`).
 pub fn left_sidebar_icon(color: Hsla, active: bool) -> impl IntoElement {
     let c = if active {

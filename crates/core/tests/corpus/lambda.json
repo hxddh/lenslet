@@ -1,0 +1,1130 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "lambda.CreateFunction",
+   "access": [
+    [
+     "lambda:CreateFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/corpus-exec"
+    ]
+   ],
+   "call": {
+    "id": "lambda.CreateFunction",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "CreateFunction",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.CreateFunction"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"FunctionName\": \"corpus-fn\", \"Runtime\": \"python3.12\", \"Role\": \"arn:aws:iam::123456789012:role/corpus-exec\", \"Handler\": \"index.handler\", \"Code\": {\"ZipFile\": \"UEsDBA==\"}}",
+      "bytes": 169,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.GetFunction",
+   "access": [
+    [
+     "lambda:GetFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.GetFunction",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "GetFunction",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.GetFunction"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.GetFunction.qualifier",
+   "access": [
+    [
+     "lambda:GetFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:prod"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.GetFunction.qualifier",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn?Qualifier=prod",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "GetFunction",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.GetFunction.qualifier"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.GetFunctionConfiguration",
+   "access": [
+    [
+     "lambda:GetFunctionConfiguration",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.GetFunctionConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn/configuration",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "GetFunctionConfiguration",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.GetFunctionConfiguration"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.UpdateFunctionConfiguration",
+   "access": [
+    [
+     "lambda:UpdateFunctionConfiguration",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/corpus-exec-v2"
+    ]
+   ],
+   "call": {
+    "id": "lambda.UpdateFunctionConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/2015-03-31/functions/corpus-fn/configuration",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "UpdateFunctionConfiguration",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.UpdateFunctionConfiguration"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"Role\": \"arn:aws:iam::123456789012:role/corpus-exec-v2\"}",
+      "bytes": 57,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.PublishVersion",
+   "access": [
+    [
+     "lambda:PublishVersion",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.PublishVersion",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/versions",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "PublishVersion",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.PublishVersion"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.CreateAlias",
+   "access": [
+    [
+     "lambda:CreateAlias",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.CreateAlias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/aliases",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "CreateAlias",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.CreateAlias"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"Name\": \"prod\", \"FunctionVersion\": \"1\"}",
+      "bytes": 40,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.GetAlias",
+   "access": [
+    [
+     "lambda:GetAlias",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.GetAlias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn/aliases/prod",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "GetAlias",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.GetAlias"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.ListAliases",
+   "access": [
+    [
+     "lambda:ListAliases",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.ListAliases",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn/aliases",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "ListAliases",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.ListAliases"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.ListVersionsByFunction",
+   "access": [
+    [
+     "lambda:ListVersionsByFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.ListVersionsByFunction",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn/versions",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "ListVersionsByFunction",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.ListVersionsByFunction"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.Invoke",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.qualifierParam",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:prod"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "lambda:InvokeFunction",
+      "arn:aws:lambda:us-east-1:*:function:corpus-fn:prod"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "lambda.Invoke.qualifierParam",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/invocations?Qualifier=prod",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.qualifierParam"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.nameColon",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:prod"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.Invoke.nameColon",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn%3Aprod/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.nameColon"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.arnVersion",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:7"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "lambda:InvokeFunction",
+      "arn:aws:lambda:us-east-1:123456789012:function:corpus-fn:7"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "lambda.Invoke.arnVersion",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Acorpus-fn%3A7/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.arnVersion"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.arn",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.Invoke.arn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Acorpus-fn/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.arn"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.partialArn",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:prod"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.Invoke.partialArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/123456789012%3Afunction%3Acorpus-fn%3Aprod/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.partialArn"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.Invoke.async",
+   "access": [
+    [
+     "lambda:InvokeFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.Invoke.async",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/invocations",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "Invoke",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.Invoke.async"
+      }
+     ],
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.AddPermission",
+   "access": [
+    [
+     "lambda:AddPermission",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.AddPermission",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/policy",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "AddPermission",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.AddPermission"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"StatementId\": \"s3\", \"Action\": \"lambda:InvokeFunction\", \"Principal\": \"s3.amazonaws.com\"}",
+      "bytes": 89,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.AddPermission.qualifier",
+   "access": [
+    [
+     "lambda:AddPermission",
+     "arn:aws:lambda:*:*:function:corpus-fn:prod"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.AddPermission.qualifier",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2015-03-31/functions/corpus-fn/policy?Qualifier=prod",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "AddPermission",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.AddPermission.qualifier"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"StatementId\": \"s3p\", \"Action\": \"lambda:InvokeFunction\", \"Principal\": \"s3.amazonaws.com\"}",
+      "bytes": 90,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.GetPolicy",
+   "access": [
+    [
+     "lambda:GetPolicy",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.GetPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions/corpus-fn/policy",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "GetPolicy",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.GetPolicy"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.RemovePermission",
+   "access": [
+    [
+     "lambda:RemovePermission",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.RemovePermission",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/2015-03-31/functions/corpus-fn/policy/s3",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "RemovePermission",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.RemovePermission"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.TagResource",
+   "access": [
+    [
+     "lambda:TagResource",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.TagResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/2017-03-31/tags/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Acorpus-fn",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "TagResource",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.TagResource"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"Tags\": {\"team\": \"corpus\"}}",
+      "bytes": 28,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.ListTags",
+   "access": [
+    [
+     "lambda:ListTags",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.ListTags",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2017-03-31/tags/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3Acorpus-fn",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "ListTags",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.ListTags"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.PutFunctionConcurrency",
+   "access": [
+    [
+     "lambda:PutFunctionConcurrency",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.PutFunctionConcurrency",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/2017-10-31/functions/corpus-fn/concurrency",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "PUT",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "lambda.PutFunctionConcurrency"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"ReservedConcurrentExecutions\": 2}",
+      "bytes": 35,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.ListFunctions",
+   "access": [
+    [
+     "lambda:ListFunctions",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.ListFunctions",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/2015-03-31/functions",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "ListFunctions",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.ListFunctions"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.DeleteAlias",
+   "access": [
+    [
+     "lambda:DeleteAlias",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.DeleteAlias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/2015-03-31/functions/corpus-fn/aliases/prod",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "DELETE",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.DeleteAlias"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.DeleteFunction.version",
+   "access": [
+    [
+     "lambda:DeleteFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn:1"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.DeleteFunction.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/2015-03-31/functions/corpus-fn?Qualifier=1",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "DeleteFunction",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.DeleteFunction.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "lambda.DeleteFunction",
+   "access": [
+    [
+     "lambda:DeleteFunction",
+     "arn:aws:lambda:*:*:function:corpus-fn"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "lambda.DeleteFunction",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/2015-03-31/functions/corpus-fn",
+    "host": "127.0.0.1:4566",
+    "service": "lambda",
+    "operation": "DeleteFunction",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "lambda.DeleteFunction"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

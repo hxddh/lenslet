@@ -507,7 +507,9 @@ impl Capture {
                 .filter(|(_, capped)| !*capped && !wire_truncated)
                 .map(|(b, _)| b.len() as u64)
                 .filter(|&n| n != self.bytes),
-            truncated: wire_truncated && !has_blob,
+            // A decoded preview cut at the limit is a prefix too.
+            truncated: (wire_truncated && !has_blob)
+                || decoded.as_ref().is_some_and(|(_, capped)| *capped),
             binary: true,
             sha256,
         })
@@ -572,30 +574,6 @@ fn decode_payload(prefix: &[u8], content: &Content, limit: usize) -> Option<(Vec
         return Some((bytes, comp_capped || cbor_capped));
     }
     Some((decompressed.into_owned(), comp_capped))
-}
-
-/// Strip `aws-chunked` framing when present, preserving inner payload bytes untouched.
-pub fn unframe_aws_chunked_bytes(raw: &[u8], aws_chunked: bool, limit: usize) -> Vec<u8> {
-    if !aws_chunked || raw.is_empty() {
-        return raw.to_vec();
-    }
-    decode_aws_chunked(raw, limit)
-        .map(|(bytes, _)| bytes)
-        .unwrap_or_else(|| raw.to_vec())
-}
-
-/// Unframe `aws-chunked` and decompress `gzip`/`deflate`/`zstd` wire bytes for RPC/JSON/Query handlers.
-pub fn decode_wire_bytes(raw: &[u8], content: &Content, limit: usize) -> Vec<u8> {
-    if raw.is_empty() {
-        return Vec::new();
-    }
-    let unframed = unframe_aws_chunked_bytes(raw, content.aws_chunked, limit);
-    match content.encoding {
-        Some(Encoding::Identity) | None => unframed,
-        Some(other) => decode_compressed(&unframed, other, limit)
-            .map(|(bytes, _)| bytes)
-            .unwrap_or(unframed),
-    }
 }
 
 /// Unframe AWS `application/vnd.amazon.eventstream` binary messages into readable
@@ -946,26 +924,29 @@ fn decode_compressed(prefix: &[u8], encoding: Encoding, limit: usize) -> Option<
         return Some((Vec::new(), false));
     }
     let ceiling = limit.saturating_add(1);
-    let read_bounded = |mut reader: Box<dyn Read + '_>| -> Vec<u8> {
+    // The decoded bytes, and whether decoding stopped on an error (a cut or
+    // corrupt stream): what was decoded is then only a prefix.
+    let read_bounded = |mut reader: Box<dyn Read + '_>| -> (Vec<u8>, bool) {
         let mut out = Vec::new();
         let mut chunk = [0u8; 4096];
         while out.len() < ceiling {
             match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => return (out, false),
+                Err(_) => return (out, true),
                 Ok(n) => {
                     let keep = n.min(ceiling.saturating_sub(out.len()));
                     out.extend_from_slice(&chunk[..keep]);
                 }
             }
         }
-        out
+        (out, false)
     };
-    let mut out = match encoding {
-        Encoding::Identity => prefix.to_vec(),
+    let (mut out, cut) = match encoding {
+        Encoding::Identity => (prefix.to_vec(), false),
         Encoding::Gzip => read_bounded(Box::new(GzDecoder::new(prefix))),
         Encoding::Deflate => {
             let zlib = read_bounded(Box::new(ZlibDecoder::new(prefix)));
-            if !zlib.is_empty() {
+            if !zlib.0.is_empty() {
                 zlib
             } else {
                 read_bounded(Box::new(DeflateDecoder::new(prefix)))
@@ -979,7 +960,7 @@ fn decode_compressed(prefix: &[u8], encoding: Encoding, limit: usize) -> Option<
     if out.is_empty() {
         return None;
     }
-    let capped = out.len() > limit;
+    let capped = out.len() > limit || cut;
     if capped {
         out.truncate(limit);
     }
@@ -1275,6 +1256,32 @@ mod tests {
         let bad_body = bad.body(&gzip).unwrap();
         assert!(bad_body.binary);
         assert!(bad_body.text.is_none());
+
+        // A stream cut short decodes only a prefix: it says so.
+        let long = "{\"k\":\"".to_string() + &"v".repeat(200_000) + "\"}";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(long.as_bytes()).unwrap();
+        let whole = encoder.finish().unwrap();
+        let mut cut = Capture::new(true);
+        cut.feed(&whole[..whole.len() / 2]);
+        let cut_body = cut.body(&gzip).unwrap();
+        assert!(!cut_body.binary);
+        assert!(cut_body.truncated, "a cut stream is a prefix");
+        assert!(cut_body.decoded_bytes.is_none());
+
+        // A binary payload decoded past the limit is marked truncated too.
+        let octets = content(&headers(&[
+            ("content-type", "application/octet-stream"),
+            ("content-encoding", "gzip"),
+        ]));
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&vec![0u8; limit * 4]).unwrap();
+        let mut capped = Capture::with_limit(limit);
+        capped.feed(&encoder.finish().unwrap());
+        let capped_body = capped.body(&octets).unwrap();
+        assert!(capped_body.binary);
+        assert!(capped_body.truncated);
+        assert!(capped_body.decoded_bytes.is_none());
     }
 
     #[test]

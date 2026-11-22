@@ -271,50 +271,65 @@ impl<'a> CborReader<'a> {
             6 => {
                 let tag = self.read_arg(info)?;
                 let inner = self.read_value(depth + 1)?;
-                if tag == 1 {
-                    if let Some(secs) = inner.as_f64() {
-                        let whole = secs.trunc() as i64;
-                        let nanos = ((secs.fract().abs()) * 1e9).round() as u32;
-                        if let Some(dt) =
-                            DateTime::<Utc>::from_timestamp(whole, nanos.min(999_999_999))
-                        {
-                            return Some(Value::String(dt.to_rfc3339()));
-                        }
-                    } else if let Some(secs) = inner.as_i64()
-                        && let Some(dt) = DateTime::<Utc>::from_timestamp(secs, 0)
-                    {
-                        return Some(Value::String(dt.to_rfc3339()));
-                    }
+                if tag == 1
+                    && let Some(time) = inner.as_f64().and_then(epoch_to_rfc3339)
+                {
+                    return Some(Value::String(time));
                 }
                 Some(inner)
             }
             // 7: Simple values & floats
-            7 => match info {
-                20 => Some(Value::Bool(false)),
-                21 => Some(Value::Bool(true)),
-                22 | 23 => Some(Value::Null),
-                25 => {
-                    let s = self.read_slice(2)?;
-                    let f = f16_to_f64(u16::from_be_bytes([s[0], s[1]]));
-                    Some(float_to_json(f))
-                }
-                26 => {
-                    let s = self.read_slice(4)?;
-                    let f = f32::from_be_bytes([s[0], s[1], s[2], s[3]]) as f64;
-                    Some(float_to_json(f))
-                }
-                27 => {
-                    let s = self.read_slice(8)?;
-                    let f = f64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
-                    Some(float_to_json(f))
-                }
-                0..=19 => Some(Value::Number(Number::from(info as u64))),
-                24 => Some(Value::Number(Number::from(self.read_byte()? as u64))),
-                _ => None,
-            },
+            7 => self.read_simple(info),
             _ => None,
         }
     }
+
+    /// Major type 7: simple values and floats.
+    fn read_simple(&mut self, info: u8) -> Option<Value> {
+        match info {
+            20 => Some(Value::Bool(false)),
+            21 => Some(Value::Bool(true)),
+            22 | 23 => Some(Value::Null),
+            25 => {
+                let s = self.read_slice(2)?;
+                Some(float_to_json(f16_to_f64(u16::from_be_bytes([s[0], s[1]]))))
+            }
+            26 => {
+                let s = self.read_slice(4)?;
+                Some(float_to_json(
+                    f32::from_be_bytes([s[0], s[1], s[2], s[3]]) as f64
+                ))
+            }
+            27 => {
+                let s = self.read_slice(8)?;
+                Some(float_to_json(f64::from_be_bytes([
+                    s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                ])))
+            }
+            0..=19 => Some(Value::Number(Number::from(info as u64))),
+            24 => Some(Value::Number(Number::from(self.read_byte()? as u64))),
+            _ => None,
+        }
+    }
+}
+
+/// RFC 3339 for epoch seconds (CBOR tag 1). A fraction counts forward from
+/// the whole second below: `-1.5` is half a second after `-2`
+/// (1969-12-31T23:59:58.5Z), not after `-1`.
+fn epoch_to_rfc3339(secs: f64) -> Option<String> {
+    if !secs.is_finite() {
+        return None;
+    }
+    let mut whole = secs.floor();
+    let mut nanos = ((secs - whole) * 1e9).round();
+    if nanos >= 1e9 {
+        whole += 1.0;
+        nanos = 0.0;
+    }
+    if whole < i64::MIN as f64 || whole > i64::MAX as f64 {
+        return None;
+    }
+    DateTime::<Utc>::from_timestamp(whole as i64, nanos as u32).map(|dt| dt.to_rfc3339())
 }
 
 fn value_to_key(val: Value) -> String {
@@ -409,5 +424,68 @@ mod tests {
         });
         let encoded = encode_cbor(&roundtrip_src);
         assert_eq!(decode_cbor(&encoded).as_ref(), Some(&roundtrip_src));
+    }
+
+    fn tagged_epoch(secs: f64) -> Value {
+        let mut frame = vec![0xc1, 0xfb];
+        frame.extend_from_slice(&secs.to_be_bytes());
+        decode_cbor(&frame).expect("valid CBOR")
+    }
+
+    #[test]
+    fn fractional_epochs_before_1970_count_from_the_second_below() {
+        assert_eq!(tagged_epoch(-1.5), "1969-12-31T23:59:58.500+00:00");
+        assert_eq!(tagged_epoch(-0.25), "1969-12-31T23:59:59.750+00:00");
+        assert_eq!(tagged_epoch(1.5), "1970-01-01T00:00:01.500+00:00");
+        assert_eq!(tagged_epoch(-2.0), "1969-12-31T23:59:58+00:00");
+        // A fraction that rounds up to a whole second carries over.
+        assert_eq!(tagged_epoch(-0.000_000_000_1), "1970-01-01T00:00:00+00:00");
+        // Out of range or not finite: the value itself.
+        assert_eq!(tagged_epoch(1e300), serde_json::json!(1e300));
+        let mut nan = vec![0xc1, 0xfb];
+        nan.extend_from_slice(&f64::NAN.to_be_bytes());
+        assert_eq!(decode_cbor(&nan), Some(Value::String("NaN".into())));
+    }
+
+    #[test]
+    fn hostile_frames_are_rejected_without_recursion_or_allocation_blowups() {
+        // Nesting deeper than MAX_DEPTH: arrays of one array each.
+        let mut deep = vec![0x81; MAX_DEPTH + 2];
+        deep.push(0x00);
+        assert_eq!(decode_cbor(&deep), None);
+        let mut ok = vec![0x81; MAX_DEPTH];
+        ok.push(0x00);
+        assert!(decode_cbor(&ok).is_some());
+        // Indefinite-length nesting is bounded the same way.
+        let mut indefinite = vec![0x9f; 10_000];
+        indefinite.extend(vec![0xff; 10_000]);
+        assert_eq!(decode_cbor(&indefinite), None);
+        // Huge declared lengths with nothing behind them.
+        for frame in [
+            vec![0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // bytes(2^64-1)
+            vec![0x7b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // text(2^63-1)
+            vec![0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // array(2^64-1)
+            vec![0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00], // map(2^32)
+            vec![0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // chunk
+        ] {
+            assert_eq!(decode_cbor(&frame), None, "{frame:02x?}");
+        }
+        // An array with more items than the item budget fails fast.
+        let mut wide = vec![0x9a];
+        wide.extend_from_slice(&(MAX_ITEMS as u32 + 1).to_be_bytes());
+        wide.extend(vec![0x00; MAX_ITEMS + 1]);
+        assert_eq!(decode_cbor(&wide), None);
+        // Truncated heads and reserved additional-information values.
+        for frame in [
+            vec![0x19, 0x01],
+            vec![0x1c],
+            vec![0xf8],
+            vec![0xfc],
+            vec![0xa1, 0x00],
+        ] {
+            assert_eq!(decode_cbor(&frame), None, "{frame:02x?}");
+        }
+        // Trailing bytes after a complete value.
+        assert_eq!(decode_cbor(&[0x00, 0x00]), None);
     }
 }

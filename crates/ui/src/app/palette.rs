@@ -4,8 +4,12 @@
 
 use gpui::{AnyElement, Context, ElementId, FontWeight, Window, div, prelude::*, px, rgb};
 
-use super::{Cmd, LensletApp, MenuEntry, Mode, session::Baseline, widgets};
+use super::{
+    Cmd, FilterCmd, LensletApp, LockCmd, MenuEntry, Modal, Mode, PrefCmd, RunNav,
+    session::Baseline, widgets,
+};
 use crate::{
+    daemon::ShellFormat,
     i18n,
     model::StatusFilter,
     prefs::{AccentColor, Density, Lang, ThemeMode},
@@ -14,13 +18,11 @@ use crate::{
 
 impl LensletApp {
     pub(super) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open {
+        if matches!(self.modal, Modal::Palette) {
             self.close_palette(window, cx);
             return;
         }
-        self.palette_open = true;
-        self.settings_open = false;
-        self.overlay = None;
+        self.modal = Modal::Palette;
         self.palette_index = 0;
         self.palette_input
             .update(cx, |input, cx| input.clear(window, cx));
@@ -29,9 +31,7 @@ impl LensletApp {
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        self.focus_list(window, cx);
-        cx.notify();
+        self.close_modal(window, cx);
     }
 
     pub(super) fn palette_step(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -53,7 +53,7 @@ impl LensletApp {
 
     /// Rebuild the filtered entries (on open and on each query change).
     pub(super) fn refresh_palette(&mut self, cx: &mut Context<Self>) {
-        if !self.palette_open {
+        if !matches!(self.modal, Modal::Palette) {
             return;
         }
         let query = self.palette_input.read(cx).query().to_lowercase();
@@ -84,70 +84,92 @@ impl LensletApp {
                 cmd,
             });
         };
-        add(
-            format!(
-                "▶ {}: `{}`",
-                ui.t("Quick Run", "一键运行"),
-                self.detected_cmd
-            ),
-            None,
-            Cmd::QuickRun,
-        );
-        add(
-            ui.t("Run Command Through Lenslet…", "自定义运行命令…")
-                .into(),
-            Some(i18n::shortcut("N")),
-            Cmd::OpenLauncher,
-        );
-        add(
-            ui.t(
-                "Open Lenslet Terminal (Pre-configured AWS_ENDPOINT_URL)",
-                "打开抓包终端（自动配置 AWS_ENDPOINT_URL）",
-            )
-            .into(),
-            None,
-            Cmd::OpenTerminal,
-        );
-        if session.demo {
+        if self.managed_run.is_some() {
             add(
-                ui.t("Exit Interactive Demo", "退出交互示例").into(),
-                None,
-                Cmd::ExitDemo,
+                ui.t("Stop the run", "停止运行").into(),
+                Some(i18n::shortcut(".")),
+                Cmd::StopRun,
             );
         } else {
             add(
-                ui.t("Explore Interactive Demo", "浏览交互示例").into(),
-                None,
-                Cmd::EnterDemo,
+                ui.t("Run tests", "运行测试").into(),
+                Some(i18n::shortcut("R")),
+                Cmd::Run,
             );
         }
         add(
-            ui.t("Compose New Local AWS Request…", "新建本地 AWS 请求…")
-                .into(),
-            Some(i18n::shortcut("⇧N")),
-            Cmd::NewRequest,
+            ui.t("Run options…", "运行选项…").into(),
+            Some(i18n::shortcut("N")),
+            Cmd::RunOptions,
         );
         add(
-            ui.t("Open Workspace Folder…", "打开项目工作区目录…").into(),
-            Some(i18n::shortcut("⌥O")),
+            ui.t("Open a terminal through Lenslet", "打开经过 Lenslet 的终端")
+                .into(),
+            None,
+            Cmd::OpenTerminal,
+        );
+        for fmt in ShellFormat::ALL {
+            add(
+                format!(
+                    "{} ({})",
+                    ui.t("Copy environment", "复制环境变量"),
+                    fmt.label()
+                ),
+                None,
+                Cmd::CopyEnv(fmt),
+            );
+        }
+        if self.managed_proxy.is_some() {
+            add(
+                ui.t("Stop the proxy", "停止本地代理").into(),
+                None,
+                Cmd::Proxy(false),
+            );
+        } else if !self.proxy.running {
+            let port = self.proxy_port;
+            add(
+                ui.tr(&crate::tr!(
+                    "Start the proxy on :{port}",
+                    "在 :{port} 启动本地代理"
+                ))
+                .into(),
+                None,
+                Cmd::Proxy(true),
+            );
+        }
+        add(
+            if session.demo {
+                ui.t("Exit the demo", "退出演示").into()
+            } else {
+                ui.t("Explore the demo", "浏览演示").into()
+            },
+            None,
+            Cmd::Demo(!session.demo),
+        );
+        add(
+            ui.t("Open project folder…", "打开项目目录…").into(),
+            None,
             Cmd::OpenWorkspace,
         );
         add(
+            ui.t("Open run file…", "打开运行文件…").into(),
+            Some(i18n::shortcut("O")),
+            Cmd::OpenFile,
+        );
+        add(
+            ui.t("Export run summary…", "导出运行摘要…").into(),
+            Some(i18n::shortcut("S")),
+            Cmd::ExportReport,
+        );
+        add(
             ui.t(
-                "Generate GitHub Actions CI Workflow (.github/workflows/lenslet.yml)",
-                "生成 GitHub Actions CI 工作流 (.github/workflows/lenslet.yml)",
+                "Generate GitHub Actions workflow…",
+                "生成 GitHub Actions 工作流…",
             )
             .into(),
             None,
-            Cmd::InitCiWorkflow,
+            Cmd::InitCi,
         );
-        if self.managed_run.is_some() {
-            add(
-                ui.t("Stop Active Command Run", "停止当前运行的命令").into(),
-                Some(i18n::shortcut(".")),
-                Cmd::StopActiveRun,
-            );
-        }
         add(
             ui.t("Show Calls", "显示请求").into(),
             Some(i18n::shortcut("1")),
@@ -159,189 +181,108 @@ impl LensletApp {
             Cmd::Mode(Mode::Access),
         );
         add(
-            ui.t(
-                "Show Output & Run Telemetry",
-                "显示终端输出与全量运行元数据",
-            )
-            .into(),
-            Some(i18n::shortcut("3")),
-            Cmd::Mode(Mode::Console),
+            ui.t("Toggle Output", "显示/隐藏输出").into(),
+            Some(i18n::shortcut("J")),
+            Cmd::ToggleOutput,
+        );
+        add(
+            ui.t("Toggle sidebar", "显示/隐藏侧栏").into(),
+            Some(i18n::shortcut("0")),
+            Cmd::ToggleSidebar,
+        );
+        add(
+            ui.t("Toggle inspector", "显示/隐藏详情栏").into(),
+            Some(i18n::shortcut("B")),
+            Cmd::ToggleInspector,
         );
         add(
             ui.t("Search", "搜索").into(),
             Some("/".into()),
             Cmd::FocusSearch,
         );
-        add(
-            ui.t("Toggle Workspace Sidebar", "显示/隐藏工作区侧栏")
-                .into(),
-            Some(i18n::shortcut("0")),
-            Cmd::ToggleSidebar,
-        );
-        add(
-            ui.t("Toggle Inspector", "显示/隐藏详情栏").into(),
-            Some(i18n::shortcut("B")),
-            Cmd::ToggleInspector,
-        );
-        add(
-            ui.t("Open Trace File…", "打开追踪文件 (.jsonl)…").into(),
-            Some(i18n::shortcut("O")),
-            Cmd::OpenFile,
-        );
-        add(
-            ui.t("Export Run Summary JSON…", "导出运行摘要 JSON…")
-                .into(),
-            Some(i18n::shortcut("S")),
-            Cmd::ExportReport,
-        );
-        if session.path.is_some() {
+        if session.evicted > 0 && !session.store.is_unbounded() {
+            let n = session.evicted;
             add(
-                ui.t(
-                    "Reveal Trace File in File Manager",
-                    "在文件管理器中显示追踪文件",
-                )
-                .into(),
-                Some(i18n::shortcut("⇧R")),
-                Cmd::RevealTrace,
-            );
-        }
-        if self.managed_proxy.is_some() {
-            add(
-                ui.t("Stop Managed Local Proxy", "停止托管本地代理").into(),
-                None,
-                Cmd::StopProxy,
-            );
-        } else if !self.env_probe.running {
-            add(
-                ui.t("Start Local Proxy (:9297)", "启动本地代理 (:9297)")
+                ui.tr(&crate::tr!("Load all calls (+{n})", "加载全部调用（+{n}）"))
                     .into(),
                 None,
-                Cmd::StartProxy,
+                Cmd::Runs(RunNav::LoadAll),
             );
         }
-        if let Some((_, kind)) = self.managed_emulator.as_ref() {
-            add(
-                format!("{} {}", ui.t("Stop", "停止"), kind.label()),
-                None,
-                Cmd::StopEmulator,
-            );
-        } else {
-            for &kind in &self.env_probe.installed_emulators {
+        if let Some(call) = self.inspector.read(cx).call().cloned() {
+            if self.inspector.read(cx).can_replay(cx) {
                 add(
-                    format!("{} {}", ui.t("Start", "启动"), kind.label()),
-                    None,
-                    Cmd::StartEmulator(kind),
+                    ui.t("Replay the call", "重放请求").into(),
+                    Some(i18n::shortcut("⏎")),
+                    Cmd::Replay,
+                );
+                add(
+                    ui.t("Edit & Replay…", "编辑并重放…").into(),
+                    Some(i18n::shortcut("⇧⏎")),
+                    Cmd::EditReplay,
                 );
             }
-        }
-        add(
-            ui.t("Copy Proxy Shell Environment", "复制代理终端环境变量")
-                .into(),
-            None,
-            Cmd::CopyProxyEnv(crate::daemon::ShellFormat::Sh),
-        );
-        if session.evicted > 0 && !session.store.is_unbounded() {
             add(
-                if ui.zh() {
-                    format!("无损加载全部调用记录（+{}）", session.evicted)
-                } else {
-                    format!("Load All Calls Without Cap (+{})", session.evicted)
-                },
-                None,
-                Cmd::LoadAllCalls,
+                ui.t("Copy the call as curl", "将请求复制为 curl").into(),
+                Some(i18n::shortcut("⇧C")),
+                Cmd::CopyCurl(call),
             );
-        }
-        if self.inspector.read(cx).call().is_some() {
             add(
-                ui.t("Save Selected Payload…", "保存当前请求/响应报文…")
-                    .into(),
-                Some(i18n::shortcut("⌥S")),
+                ui.t("Save payload…", "保存报文…").into(),
+                None,
                 Cmd::SavePayload,
             );
         }
         add(
-            ui.t("About Lenslet", "关于 Lenslet").into(),
+            ui.t("Copy IAM policy JSON", "复制 IAM 策略 JSON").into(),
             None,
-            Cmd::OpenAbout,
-        );
-        add(
-            ui.t("Reload Run", "重新加载运行").into(),
-            Some(i18n::shortcut("R")),
-            Cmd::Reload,
-        );
-        if self.inspector.read(cx).can_replay(cx) {
-            add(
-                ui.t("Replay Selected Call", "重放选中的请求").into(),
-                Some(i18n::shortcut("⏎")),
-                Cmd::Replay,
-            );
-            add(
-                ui.t(
-                    "Edit & Replay Selected Call (SigV4 Composer)",
-                    "编辑并重放选中的请求 (SigV4 Composer)",
-                )
-                .into(),
-                Some(i18n::shortcut("⇧⏎")),
-                Cmd::OpenComposer,
-            );
-        }
-        if let Some(call) = self.inspector.read(cx).call().cloned() {
-            add(
-                ui.t("Copy Selected Call as curl", "将选中的请求复制为 curl")
-                    .into(),
-                Some(i18n::shortcut("⇧C")),
-                Cmd::CopyCurl(call),
-            );
-        }
-        add(
-            ui.t("Copy IAM Policy JSON", "复制 IAM 策略 JSON").into(),
-            Some(i18n::shortcut("⇧E")),
             Cmd::CopyPolicy,
         );
-        let not_in_lock: Vec<_> = session
+        let not_in_lock = session
             .access_rows
             .iter()
             .filter(|row| row.used && !row.in_lock)
-            .map(|row| (row.access.clone(), row.implied))
-            .collect();
-        if session.can_edit_lock() && !not_in_lock.is_empty() {
+            .count();
+        if not_in_lock > 0 {
+            let n = not_in_lock;
             add(
-                if ui.zh() {
-                    format!("将 {} 项新权限写入 lenslet.lock", not_in_lock.len())
-                } else {
-                    format!(
-                        "Accept {} New Permissions into lenslet.lock",
-                        not_in_lock.len()
-                    )
-                },
+                ui.tr(&crate::tr!(
+                    "Review {n} permissions not in the lock",
+                    "查看 {n} 项未入锁权限"
+                ))
+                .into(),
                 None,
-                Cmd::Accept(not_in_lock),
+                Cmd::Lock(LockCmd::ReviewNotInLock),
             );
         }
         for (status, en, zh) in [
-            (StatusFilter::Errors, "Filter: Errors", "筛选：错误"),
+            (StatusFilter::Errors, "Filter: errors", "筛选：错误"),
             (
                 StatusFilter::Changed,
-                "Filter: Changed vs Baseline",
+                "Filter: changed vs baseline",
                 "筛选：与基线不同",
             ),
-            (StatusFilter::Retries, "Filter: Retries", "筛选：重试"),
-            (StatusFilter::Slow, "Filter: Slow", "筛选：慢请求"),
-            (StatusFilter::Blocked, "Filter: Blocked", "筛选：已拦截"),
+            (StatusFilter::Retries, "Filter: retries", "筛选：重试"),
+            (StatusFilter::Slow, "Filter: slow", "筛选：慢请求"),
+            (StatusFilter::Blocked, "Filter: blocked", "筛选：已拦截"),
         ] {
-            add(ui.t(en, zh).into(), None, Cmd::FilterStatus(status));
+            add(
+                ui.t(en, zh).into(),
+                None,
+                Cmd::Filter(FilterCmd::Status(status)),
+            );
         }
         for facet in session.store.facets() {
             add(
-                format!("{} {}", ui.t("Filter: Service", "筛选：服务"), facet.label),
+                format!("{} {}", ui.t("Filter: service", "筛选：服务"), facet.label),
                 None,
-                Cmd::FilterService(facet.id),
+                Cmd::Filter(FilterCmd::Service(facet.id)),
             );
         }
         add(
-            ui.t("Clear All Filters", "清除全部筛选").into(),
+            ui.t("Clear filters", "清除筛选").into(),
             Some("Esc".into()),
-            Cmd::ClearFilters,
+            Cmd::Filter(FilterCmd::Clear),
         );
         add(
             ui.t("Compare with lenslet.lock", "对比 lenslet.lock")
@@ -350,42 +291,48 @@ impl LensletApp {
             Cmd::SetBaseline(Baseline::Lock),
         );
         add(
-            ui.t("Compare with Previous Run", "对比上一次运行").into(),
+            ui.t("Compare with the previous run", "对比上一次运行")
+                .into(),
             None,
             Cmd::SetBaseline(Baseline::Previous),
         );
         if session.source.runs_dir().is_some() {
             add(
-                ui.t("Previous Run", "上一个运行").into(),
+                ui.t("Previous run", "上一个运行").into(),
                 Some(i18n::shortcut("[")),
-                Cmd::PrevRun,
+                Cmd::Runs(RunNav::Prev),
             );
             add(
-                ui.t("Next Run", "下一个运行").into(),
+                ui.t("Next run", "下一个运行").into(),
                 Some(i18n::shortcut("]")),
-                Cmd::NextRun,
+                Cmd::Runs(RunNav::Next),
             );
             add(
-                ui.t("Follow Newest Run", "跟随最新运行").into(),
+                ui.t("Follow the newest run", "跟随最新运行").into(),
                 None,
-                Cmd::FollowLatest,
+                Cmd::Runs(RunNav::Latest),
             );
         }
+        add(
+            ui.t("Reload the run", "重新加载运行").into(),
+            None,
+            Cmd::Runs(RunNav::Reload),
+        );
         for run in session.runs.iter().take(20) {
             add(
                 format!(
                     "{} {} · {}",
-                    ui.t("Open Run", "打开运行"),
+                    ui.t("Open run", "打开运行"),
                     run.id,
                     run.label()
                 ),
                 None,
-                Cmd::PinRun(run.path.clone()),
+                Cmd::Runs(RunNav::Open(run.path.clone())),
             );
         }
         for run in session.runs.iter().filter(|r| r.ended()).take(10) {
             add(
-                format!("{} {}", ui.t("Compare with Run", "对比运行"), run.id),
+                format!("{} {}", ui.t("Compare with run", "对比运行"), run.id),
                 None,
                 Cmd::SetBaseline(Baseline::Run(run.path.clone())),
             );
@@ -398,7 +345,7 @@ impl LensletApp {
                     i18n::theme_label(mode, ui.lang)
                 ),
                 None,
-                Cmd::Theme(mode),
+                Cmd::Pref(PrefCmd::Theme(mode)),
             );
         }
         for accent in AccentColor::ALL {
@@ -409,7 +356,7 @@ impl LensletApp {
                     i18n::accent_label(accent, ui.lang)
                 ),
                 None,
-                Cmd::Accent(accent),
+                Cmd::Pref(PrefCmd::Accent(accent)),
             );
         }
         for density in [Density::Comfortable, Density::Compact] {
@@ -420,24 +367,28 @@ impl LensletApp {
                     i18n::density_label(density, ui.lang)
                 ),
                 None,
-                Cmd::Density(density),
+                Cmd::Pref(PrefCmd::Density(density)),
             );
         }
-        add("Language: English".into(), None, Cmd::Lang(Lang::En));
-        add("语言：中文".into(), None, Cmd::Lang(Lang::Zh));
         add(
-            ui.t(
-                "Install CLI to PATH (~/.local/bin)",
-                "安装 CLI 到 PATH (~/.local/bin)",
-            )
-            .into(),
+            "Language: English".into(),
             None,
-            Cmd::InstallCli,
+            Cmd::Pref(PrefCmd::Lang(Lang::En)),
+        );
+        add(
+            "语言：中文".into(),
+            None,
+            Cmd::Pref(PrefCmd::Lang(Lang::Zh)),
         );
         add(
             ui.t("Settings…", "设置…").into(),
             Some(i18n::shortcut(",")),
             Cmd::OpenSettings,
+        );
+        add(
+            ui.t("About Lenslet", "关于 Lenslet").into(),
+            None,
+            Cmd::OpenAbout,
         );
         add(
             ui.t("Quit Lenslet", "退出 Lenslet").into(),
@@ -508,9 +459,9 @@ impl LensletApp {
                     .text_size(px(text::XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(t.text_muted))
-                    .child(ui.t("↑↓  navigate", "↑↓  选择"))
-                    .child(ui.t("⏎  run", "⏎  执行"))
-                    .child(ui.t("esc  close", "esc  关闭")),
+                    .child(format!("↑↓  {}", ui.t("navigate", "选择")))
+                    .child(format!("{}  {}", i18n::key("⏎"), ui.t("run", "执行")))
+                    .child(format!("Esc  {}", ui.t("close", "关闭"))),
             );
         div()
             .absolute()

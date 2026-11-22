@@ -1,0 +1,558 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "glue.CreateDatabase",
+   "access": [
+    [
+     "glue:CreateDatabase",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:CreateDatabase",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.CreateDatabase",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "CreateDatabase",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.CreateDatabase"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.CreateDatabase"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseInput\": {\"Name\": \"corpus_db\"}}",
+      "bytes": 40,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.GetDatabase",
+   "access": [
+    [
+     "glue:GetDatabase",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:GetDatabase",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.GetDatabase",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "GetDatabase",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.GetDatabase"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.GetDatabase"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus_db\"}",
+      "bytes": 21,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.CreateTable",
+   "access": [
+    [
+     "glue:CreateTable",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:CreateTable",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ],
+    [
+     "glue:CreateTable",
+     "arn:aws:glue:*:*:table/corpus_db/orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.CreateTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "CreateTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.CreateTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.CreateTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseName\": \"corpus_db\", \"TableInput\": {\"Name\": \"orders\"}}",
+      "bytes": 63,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.GetTable",
+   "access": [
+    [
+     "glue:GetTable",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:GetTable",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ],
+    [
+     "glue:GetTable",
+     "arn:aws:glue:*:*:table/corpus_db/orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.GetTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "GetTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.GetTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.GetTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseName\": \"corpus_db\", \"Name\": \"orders\"}",
+      "bytes": 47,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.GetTables",
+   "access": [
+    [
+     "glue:GetTables",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:GetTables",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ],
+    [
+     "glue:GetTables",
+     "arn:aws:glue:*:*:table/corpus_db/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.GetTables",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "GetTables",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.GetTables"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.GetTables"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseName\": \"corpus_db\"}",
+      "bytes": 29,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.UpdateTable",
+   "access": [
+    [
+     "glue:UpdateTable",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:UpdateTable",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ],
+    [
+     "glue:UpdateTable",
+     "arn:aws:glue:*:*:table/corpus_db/orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.UpdateTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "UpdateTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.UpdateTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.UpdateTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseName\": \"corpus_db\", \"TableInput\": {\"Name\": \"orders\", \"Description\": \"d\"}}",
+      "bytes": 83,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.DeleteTable",
+   "access": [
+    [
+     "glue:DeleteTable",
+     "arn:aws:glue:*:*:catalog"
+    ],
+    [
+     "glue:DeleteTable",
+     "arn:aws:glue:*:*:database/corpus_db"
+    ],
+    [
+     "glue:DeleteTable",
+     "arn:aws:glue:*:*:table/corpus_db/orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.DeleteTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "DeleteTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.DeleteTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.DeleteTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DatabaseName\": \"corpus_db\", \"Name\": \"orders\"}",
+      "bytes": 47,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.CreateJob",
+   "access": [
+    [
+     "glue:CreateJob",
+     "arn:aws:glue:*:*:job/corpus-etl"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/glue-etl"
+    ]
+   ],
+   "call": {
+    "id": "glue.CreateJob",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "CreateJob",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.CreateJob"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.CreateJob"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-etl\", \"Role\": \"arn:aws:iam::123456789012:role/glue-etl\", \"Command\": {\"Name\": \"glueetl\", \"ScriptLocation\": \"s3://corpus-bucket/etl.py\"}}",
+      "bytes": 152,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.GetJob",
+   "access": [
+    [
+     "glue:GetJob",
+     "arn:aws:glue:*:*:job/corpus-etl"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.GetJob",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "GetJob",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.GetJob"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.GetJob"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"JobName\": \"corpus-etl\"}",
+      "bytes": 25,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "glue.StartJobRun",
+   "access": [
+    [
+     "glue:StartJobRun",
+     "arn:aws:glue:*:*:job/corpus-etl"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "glue.StartJobRun",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "glue",
+    "operation": "StartJobRun",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSGlue.StartJobRun"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "glue.StartJobRun"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"JobName\": \"corpus-etl\"}",
+      "bytes": 25,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

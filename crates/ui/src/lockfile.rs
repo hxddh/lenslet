@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use lenslet_core::{access::Access, lock::Lock};
 
-use crate::{fsguard, model::RunHeader};
+use lenslet_core::trace::RunHeader;
+
+use crate::fsguard;
 
 /// The lock a run is compared with: its header's `lock`, else `cwd/lenslet.lock`.
 /// `None` when the run is gated by an IAM policy instead.

@@ -10,9 +10,11 @@
 #   --dir PATH        LENSLET_INSTALL_DIR  default: ~/.local/bin
 #
 # Linux gets a static CLI binary (any distro, any glibc); macOS a universal one.
-# With --app, macOS installs Lenslet.app into /Applications (or ~/Applications),
-# clears com.apple.quarantine, and links `lenslet` into --dir; Linux installs
-# both `lenslet` and `lenslet-ui`. Every download is verified against SHA256SUMS.
+# With --app, macOS installs Lenslet.app into /Applications (or ~/Applications)
+# and links `lenslet` into --dir (an existing Lenslet.app is kept, renamed
+# Lenslet.app.old-TIMESTAMP; the quarantine flag is left for you to clear, and
+# the command to do so is printed); Linux installs both `lenslet` and
+# `lenslet-ui`. Every download is verified against SHA256SUMS before use.
 set -eu
 
 REPO="hxddh/lenslet"
@@ -25,7 +27,7 @@ while [ $# -gt 0 ]; do
     --app) INSTALL_APP="1"; shift ;;
     --version) VERSION="$2"; shift 2 ;;
     --dir) DIR="$2"; shift 2 ;;
-    -h|--help) sed -n '2,15p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0" 2>/dev/null || true; exit 0 ;;
     *) echo "lenslet install: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -76,7 +78,9 @@ trap cleanup EXIT INT TERM
 
 verify_sha256() {
   asset="$1"
-  expected=$(grep " $asset\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)
+  # Exact match on the file name column (`sha256  name` or `sha256 *name`):
+  # no regex, so dots and other characters in the name match only themselves.
+  expected=$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$TMP/SHA256SUMS")
   [ -n "$expected" ] || fail "$asset is not in SHA256SUMS"
   if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$TMP/$asset" | cut -d' ' -f1)
@@ -103,15 +107,21 @@ if [ "$INSTALL_APP" = "1" ] && [ "$OS" = "Darwin" ]; then
     mkdir -p "$APP_DIR"
   fi
   APP_DEST="$APP_DIR/Lenslet.app"
-  rm -rf "$APP_DEST"
+  if [ -e "$APP_DEST" ]; then
+    OLD="$APP_DEST.old-$(date +%Y%m%d-%H%M%S)"
+    mv "$APP_DEST" "$OLD" || fail "could not move the existing $APP_DEST aside"
+    say "kept the previous app as $OLD (delete it when you no longer need it)"
+  fi
   cp -R "$TMP/mnt/Lenslet.app" "$APP_DEST"
-  xattr -cr "$APP_DEST" 2>/dev/null || true
   hdiutil detach "$TMP/mnt" -quiet 2>/dev/null || true
 
   mkdir -p "$DIR"
   ln -sf "$APP_DEST/Contents/MacOS/lenslet" "$DIR/lenslet"
   say "installed Lenslet.app to $APP_DEST"
   say "linked $("$DIR/lenslet" --version) to $DIR/lenslet"
+  say "if macOS says Lenslet.app cannot be opened, remove the quarantine flag:"
+  say "  xattr -d com.apple.quarantine \"$APP_DEST\""
+  say "or open it once, then System Settings > Privacy & Security > Open Anyway."
 elif [ "$INSTALL_APP" = "1" ] && [ "$OS" = "Linux" ]; then
   FILE="lenslet-$VERSION-$ARCH-linux.tar.gz"
   say "downloading Lenslet desktop + CLI $VERSION ($ARCH-linux)"

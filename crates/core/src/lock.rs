@@ -252,7 +252,11 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| FILE_NAME.to_string());
-    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique per process *and* per write: two threads of one process (the
+    // window and a run) never share a temporary file.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
     let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
     let result = (|| -> std::io::Result<()> {
         let mut file = fs::File::create(&temp)?;
@@ -273,29 +277,6 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result.with_context(|| format!("write {}", path.display()))
-}
-
-/// An IAM policy document granting the locked access, without `test` lines.
-pub fn policy(lock: &Lock) -> serde_json::Value {
-    // One statement per resource, actions sorted: compact and reviewable.
-    let mut by_resource: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for entry in lock.access.difference(&lock.test) {
-        by_resource
-            .entry(entry.resource.as_str())
-            .or_default()
-            .push(entry.action.as_str());
-    }
-    let statements: Vec<serde_json::Value> = by_resource
-        .into_iter()
-        .map(|(resource, actions)| {
-            serde_json::json!({
-                "Effect": "Allow",
-                "Action": actions,
-                "Resource": resource,
-            })
-        })
-        .collect();
-    serde_json::json!({ "Version": "2012-10-17", "Statement": statements })
 }
 
 /// What a run's derived permissions are checked or actively enforced against:
@@ -608,26 +589,19 @@ impl RequestContext {
     ) -> Self {
         let mut next = self.clone();
         if implied_action.eq_ignore_ascii_case("iam:PassRole") {
-            let principal = match parent_service {
-                "ecs" => "ecs-tasks.amazonaws.com".to_string(),
-                "monitoring" => "cloudwatch.amazonaws.com".to_string(),
-                "email" | "sesv2" => "ses.amazonaws.com".to_string(),
-                "bedrock-runtime" => "bedrock.amazonaws.com".to_string(),
-                other => format!("{other}.amazonaws.com"),
-            };
-            next.values
-                .insert("iam:passedtoservice".into(), vec![principal]);
+            next.values.insert(
+                "iam:passedtoservice".into(),
+                vec![access::passed_to_service(parent_service)],
+            );
         } else if implied_action.to_ascii_lowercase().starts_with("kms:")
             && let Some(reg) = region.filter(|r| !r.is_empty())
         {
-            let via_svc = match parent_service {
-                "streams.dynamodb" | "dynamodbstreams" => "dynamodb",
-                "email" | "sesv2" => "ses",
-                other => other,
-            };
             next.values.insert(
                 "kms:viaservice".into(),
-                vec![format!("{via_svc}.{reg}.amazonaws.com")],
+                vec![format!(
+                    "{}.{reg}.amazonaws.com",
+                    access::kms_via_service_name(parent_service)
+                )],
             );
         }
         next
@@ -1039,6 +1013,17 @@ impl Gate {
                     }
                 }
             }
+            // AWS rejects a statement that has both forms of an element.
+            if obj.contains_key("Action") && obj.contains_key("NotAction") {
+                anyhow::bail!(
+                    "IAM Statement has both `Action` and `NotAction`; AWS accepts only one of them"
+                );
+            }
+            if obj.contains_key("Resource") && obj.contains_key("NotResource") {
+                anyhow::bail!(
+                    "IAM Statement has both `Resource` and `NotResource`; AWS accepts only one of them"
+                );
+            }
             if actions.is_empty() && not_actions.is_empty() {
                 anyhow::bail!("IAM Statement must specify `Action` or `NotAction`");
             }
@@ -1439,10 +1424,57 @@ fn parse_condition_operator(raw: &str) -> Result<(SetQuantifier, BaseOp, bool)> 
         "Bool" => BaseOp::Bool,
         "Null" if quantifier == SetQuantifier::Single => BaseOp::Null,
         _ => {
+            if let Some(spelled) = operator_spelling(raw) {
+                anyhow::bail!(
+                    "IAM Condition operator `{raw}` is not valid: AWS condition operators are case-sensitive; did you mean `{spelled}`?"
+                );
+            }
             anyhow::bail!("IAM Condition operator `{raw}` is not supported locally")
         }
     };
     Ok((quantifier, op, if_exists))
+}
+
+/// The correctly cased spelling of a condition operator written in another
+/// case (`stringequals` → `StringEquals`), if it is one.
+fn operator_spelling(raw: &str) -> Option<String> {
+    const OPERATORS: &[&str] = &[
+        "StringEquals",
+        "StringNotEquals",
+        "StringEqualsIgnoreCase",
+        "StringNotEqualsIgnoreCase",
+        "StringLike",
+        "StringNotLike",
+        "ArnEquals",
+        "ArnNotEquals",
+        "ArnLike",
+        "ArnNotLike",
+        "NumericEquals",
+        "NumericNotEquals",
+        "NumericLessThan",
+        "NumericLessThanEquals",
+        "NumericGreaterThan",
+        "NumericGreaterThanEquals",
+        "Bool",
+        "Null",
+    ];
+    let lower = raw.to_ascii_lowercase();
+    let (quantifier, rest) = if let Some(rest) = lower.strip_prefix("foranyvalue:") {
+        ("ForAnyValue:", rest)
+    } else if let Some(rest) = lower.strip_prefix("forallvalues:") {
+        ("ForAllValues:", rest)
+    } else {
+        ("", lower.as_str())
+    };
+    let (base, if_exists) = match rest.strip_suffix("ifexists") {
+        Some(base) if base != "null" => (base, "IfExists"),
+        _ => (rest, ""),
+    };
+    let spelled = OPERATORS
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(base))?;
+    let candidate = format!("{quantifier}{spelled}{if_exists}");
+    (candidate != raw).then_some(candidate)
 }
 
 fn parse_condition_values(
@@ -1554,8 +1586,10 @@ impl ConditionClause {
             }
             BaseOp::StringLike => values.iter().any(|p| glob_match(p, actual)),
             BaseOp::StringNotLike => values.iter().all(|p| !glob_match(p, actual)),
-            BaseOp::ArnEquals => values.iter().any(|p| actual == p),
-            BaseOp::ArnNotEquals => values.iter().all(|p| actual != p),
+            // In AWS `ArnEquals` and `ArnLike` behave the same: both match
+            // each ARN part with `*` / `?` wildcards.
+            BaseOp::ArnEquals => values.iter().any(|p| arn_covers(p, actual)),
+            BaseOp::ArnNotEquals => values.iter().all(|p| !arn_covers(p, actual)),
             BaseOp::ArnLike => values.iter().any(|p| arn_covers(p, actual)),
             BaseOp::ArnNotLike => values.iter().all(|p| !arn_covers(p, actual)),
             BaseOp::Bool => {
@@ -1793,7 +1827,10 @@ mod tests {
              s3:GetObject  arn:aws:s3:::assets/*\n\
              s3:CreateBucket  arn:aws:s3:::assets  # test\n",
         );
-        let policy = policy(&lock);
+        let policy = crate::iac::compile_iam_value(
+            &crate::iac::inputs_from_lock(&lock),
+            &crate::iac::CompileOptions::default(),
+        );
         let statements = policy["Statement"].as_array().unwrap();
         assert_eq!(statements.len(), 2, "{policy}");
         assert_eq!(statements[0]["Resource"], "arn:aws:s3:::assets/*");
@@ -2555,5 +2592,106 @@ mod tests {
             resource: "arn:aws:sqs:us-east-1:123:q".into(),
         }));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policies_aws_would_reject_are_rejected_with_a_reason() {
+        for (statement, needle) in [
+            (
+                r#"{"Effect":"Allow","Action":"s3:GetObject","NotAction":"s3:PutObject","Resource":"*"}"#,
+                "both `Action` and `NotAction`",
+            ),
+            (
+                r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","NotResource":"arn:aws:s3:::b/*"}"#,
+                "both `Resource` and `NotResource`",
+            ),
+            (
+                r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"stringequals":{"aws:RequestedRegion":"us-east-1"}}}"#,
+                "case-sensitive; did you mean `StringEquals`?",
+            ),
+            (
+                r#"{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"forAnyValue:StringLikeIfExists":{"aws:TagKeys":"a"}}}"#,
+                "did you mean `ForAnyValue:StringLikeIfExists`?",
+            ),
+        ] {
+            let error = Gate::from_policy_str(
+                &format!(r#"{{"Version":"2012-10-17","Statement":[{statement}]}}"#),
+                "p",
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains(needle), "{error:#}");
+        }
+        let unknown = Gate::from_policy_str(
+            r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*","Condition":{"DateLessThan":{"aws:CurrentTime":"2030-01-01T00:00:00Z"}}}]}"#,
+            "p",
+        )
+        .unwrap_err();
+        assert!(format!("{unknown:#}").contains("not supported locally"));
+    }
+
+    #[test]
+    fn arn_equals_matches_wildcards_like_arn_like() {
+        let gate = Gate::from_policy_str_simulating(
+            r#"{"Statement":[
+                {"Sid":"Equals","Effect":"Allow","Action":"sqs:SendMessage","Resource":"*",
+                 "Condition":{"ArnEquals":{"aws:SourceArn":"arn:aws:sns:*:123456789012:alerts-*"}}},
+                {"Sid":"NotEquals","Effect":"Deny","Action":"sqs:SendMessage","Resource":"*",
+                 "Condition":{"ArnNotEquals":{"aws:SourceArn":"arn:aws:sns:us-?ast-1:*:*"}}}
+            ]}"#,
+            "p",
+        )
+        .unwrap();
+        let send = Access::new("sqs:SendMessage", "arn:aws:sqs:us-east-1:*:jobs");
+        let with = |arn: &str| {
+            let mut ctx = RequestContext::default();
+            ctx.extend_overrides(&BTreeMap::from([(
+                "aws:SourceArn".to_string(),
+                vec![arn.to_string()],
+            )]));
+            gate.decide(&send, Some(&ctx))
+        };
+        let allowed = with("arn:aws:sns:us-east-1:123456789012:alerts-prod");
+        assert!(allowed.allowed, "{allowed:?}");
+        assert_eq!(allowed.by.as_deref(), Some("Equals"));
+        assert_eq!(
+            with("arn:aws:sns:us-east-1:123456789012:billing").reason,
+            Reason::NoAllow
+        );
+        let denied = with("arn:aws:sns:eu-west-1:123456789012:alerts-prod");
+        assert_eq!(denied.reason, Reason::ExplicitDeny);
+        assert_eq!(denied.by.as_deref(), Some("NotEquals"));
+    }
+
+    #[test]
+    fn concurrent_writes_from_one_process_never_share_a_temporary_file() {
+        let path = temp_lock("threads");
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for round in 0..10 {
+                        let entry = access(
+                            "sqs:SendMessage",
+                            &format!("arn:aws:sqs:*:*:q{index}-{round}"),
+                        );
+                        accept(&path, &[(entry, false)]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        // Every write succeeded and the result parses; no temporary file is left.
+        let lock = read(&path).unwrap().unwrap();
+        assert!(!lock.access.is_empty());
+        let dir = path.parent().unwrap();
+        let leftovers: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(dir);
     }
 }

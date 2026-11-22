@@ -1,0 +1,868 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "iam.CreateRole",
+   "note": "created with Path=/service-role/: the role ARN includes the path",
+   "access": [
+    [
+     "iam:CreateRole",
+     "arn:aws:iam::*:role/service-role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.CreateRole",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "CreateRole",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.CreateRole"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateRole&Version=2010-05-08&RoleName=corpus-exec&Path=%2Fservice-role%2F&AssumeRolePolicyDocument=%7B%22Version%22%3A+%222012-10-17%22%2C+%22Statement%22%3A+%5B%5D%7D",
+      "bytes": 175,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.GetRole",
+   "access": [
+    [
+     "iam:GetRole",
+     "arn:aws:iam::*:role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.GetRole",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "GetRole",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.GetRole"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetRole&Version=2010-05-08&RoleName=corpus-exec",
+      "bytes": 54,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.PutRolePolicy",
+   "access": [
+    [
+     "iam:PutRolePolicy",
+     "arn:aws:iam::*:role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.PutRolePolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "PutRolePolicy",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.PutRolePolicy"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=PutRolePolicy&Version=2010-05-08&RoleName=corpus-exec&PolicyName=inline&PolicyDocument=%7B%22Version%22%3A+%222012-10-17%22%2C+%22Statement%22%3A+%5B%5D%7D",
+      "bytes": 162,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.AttachRolePolicy",
+   "access": [
+    [
+     "iam:AttachRolePolicy",
+     "arn:aws:iam::*:role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.AttachRolePolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "AttachRolePolicy",
+    "status": 404,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.AttachRolePolicy"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AttachRolePolicy&Version=2010-05-08&RoleName=corpus-exec&PolicyArn=arn%3Aaws%3Aiam%3A%3Aaws%3Apolicy%2FReadOnlyAccess",
+      "bytes": 124,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.ListAttachedRolePolicies",
+   "access": [
+    [
+     "iam:ListAttachedRolePolicies",
+     "arn:aws:iam::*:role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.ListAttachedRolePolicies",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "ListAttachedRolePolicies",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.ListAttachedRolePolicies"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=ListAttachedRolePolicies&Version=2010-05-08&RoleName=corpus-exec",
+      "bytes": 71,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.ListRoles",
+   "access": [
+    [
+     "iam:ListRoles",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.ListRoles",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "ListRoles",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.ListRoles"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=ListRoles&Version=2010-05-08",
+      "bytes": 35,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.CreateUser",
+   "access": [
+    [
+     "iam:CreateUser",
+     "arn:aws:iam::*:user/corpus-user"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.CreateUser",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "CreateUser",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.CreateUser"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateUser&Version=2010-05-08&UserName=corpus-user",
+      "bytes": 57,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.GetUser",
+   "access": [
+    [
+     "iam:GetUser",
+     "arn:aws:iam::*:user/corpus-user"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.GetUser",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "GetUser",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.GetUser"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetUser&Version=2010-05-08&UserName=corpus-user",
+      "bytes": 54,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.CreatePolicy",
+   "access": [
+    [
+     "iam:CreatePolicy",
+     "arn:aws:iam::*:policy/app/corpus-policy"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.CreatePolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "CreatePolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.CreatePolicy"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreatePolicy&Version=2010-05-08&PolicyName=corpus-policy&Path=%2Fapp%2F&PolicyDocument=%7B%22Version%22%3A+%222012-10-17%22%2C+%22Statement%22%3A+%5B%7B%22Effect%22%3A+%22Allow%22%2C+%22Action%22%3A+%22s3%3AListBucket%22%2C+%22Resource%22%3A+%22%2A%22%7D%5D%7D",
+      "bytes": 267,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.GetPolicy",
+   "access": [
+    [
+     "iam:GetPolicy",
+     "arn:aws:iam::*:policy/app/corpus-policy"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.GetPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "GetPolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.GetPolicy"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetPolicy&Version=2010-05-08&PolicyArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2Fapp%2Fcorpus-policy",
+      "bytes": 110,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.CreateGroup",
+   "access": [
+    [
+     "iam:CreateGroup",
+     "arn:aws:iam::*:group/corpus-group"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.CreateGroup",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "CreateGroup",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.CreateGroup"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateGroup&Version=2010-05-08&GroupName=corpus-group",
+      "bytes": 60,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.AddUserToGroup",
+   "note": "authorized on the group, not the user",
+   "access": [
+    [
+     "iam:AddUserToGroup",
+     "arn:aws:iam::*:group/corpus-group"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.AddUserToGroup",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "AddUserToGroup",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.AddUserToGroup"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AddUserToGroup&Version=2010-05-08&GroupName=corpus-group&UserName=corpus-user",
+      "bytes": 84,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.CreateInstanceProfile",
+   "access": [
+    [
+     "iam:CreateInstanceProfile",
+     "arn:aws:iam::*:instance-profile/corpus-profile"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.CreateInstanceProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "CreateInstanceProfile",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.CreateInstanceProfile"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateInstanceProfile&Version=2010-05-08&InstanceProfileName=corpus-profile",
+      "bytes": 82,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "iam.AddRoleToInstanceProfile",
+   "note": "the API also requires iam:PassRole on the role; not derived (iam:PassedToService unknown)",
+   "access": [
+    [
+     "iam:AddRoleToInstanceProfile",
+     "arn:aws:iam::*:instance-profile/corpus-profile"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "iam.AddRoleToInstanceProfile",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "iam",
+    "operation": "AddRoleToInstanceProfile",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "iam.AddRoleToInstanceProfile"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AddRoleToInstanceProfile&Version=2010-05-08&InstanceProfileName=corpus-profile&RoleName=corpus-exec",
+      "bytes": 106,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sts.GetCallerIdentity",
+   "note": "needs no permission",
+   "access": [],
+   "implied": [],
+   "call": {
+    "id": "sts.GetCallerIdentity",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sts",
+    "operation": "GetCallerIdentity",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sts.GetCallerIdentity"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetCallerIdentity&Version=2011-06-15",
+      "bytes": 43,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sts.AssumeRole",
+   "access": [
+    [
+     "sts:AssumeRole",
+     "arn:aws:iam::*:role/service-role/corpus-exec"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sts.AssumeRole",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sts",
+    "operation": "AssumeRole",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sts.AssumeRole"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fservice-role%2Fcorpus-exec&RoleSessionName=corpus",
+      "bytes": 137,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sts.GetSessionToken",
+   "access": [
+    [
+     "sts:GetSessionToken",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sts.GetSessionToken",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sts",
+    "operation": "GetSessionToken",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sts.GetSessionToken"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetSessionToken&Version=2011-06-15",
+      "bytes": 41,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sts.AssumeRoleWithWebIdentity",
+   "note": "authorized by the role trust policy; unsigned",
+   "access": [],
+   "implied": [],
+   "call": {
+    "id": "sts.AssumeRoleWithWebIdentity",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "aws",
+    "operation": "AssumeRoleWithWebIdentity",
+    "status": 200,
+    "ms": 0,
+    "authorization": false,
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sts.AssumeRoleWithWebIdentity"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fcorpus-exec&RoleSessionName=web&WebIdentityToken=eyJhbGciOiJub25lIn0.e30.",
+      "bytes": 176,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sts.AssumeRoleWithSAML",
+   "note": "authorized by the role trust policy; unsigned",
+   "access": [],
+   "implied": [],
+   "call": {
+    "id": "sts.AssumeRoleWithSAML",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "aws",
+    "operation": "AssumeRoleWithSAML",
+    "status": 500,
+    "ms": 0,
+    "authorization": false,
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sts.AssumeRoleWithSAML"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=AssumeRoleWithSAML&Version=2011-06-15&RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fcorpus-exec&PrincipalArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Asaml-provider%2Fcorp&SAMLAssertion=PHNhbWw%2BPC9zYW1sPg%3D%3D",
+      "bytes": 218,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

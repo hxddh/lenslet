@@ -17,7 +17,8 @@ use super::{
 };
 use crate::{
     body::{self, BodyDoc, BodyMode, DocCache, DocKey},
-    fonts, glyph, i18n,
+    fonts, glyph,
+    i18n::{self, Tr},
     model::{
         Access, Body, Exchange, Header, Trace, decode_aws_semantic, decode_sigv4_header,
         decoded_query_params, display_path, format_bytes, format_latency, full_time,
@@ -53,7 +54,7 @@ pub enum InspectorEvent {
     Select(String),
     /// Open the interactive Request Composer for this call & target.
     OpenComposer(Arc<Trace>, ReplayTarget),
-    Toast(String),
+    Toast(Tr),
 }
 
 pub struct Inspector {
@@ -71,7 +72,6 @@ pub struct Inspector {
     docs: DocCache,
     replays: HashMap<String, ReplayState>,
     peers: Vec<Arc<Trace>>,
-    fallback_proxy_url: Option<String>,
     focus: FocusHandle,
     home: std::path::PathBuf,
     _build: Option<Task<()>>,
@@ -91,11 +91,7 @@ impl Inspector {
         let body = cx.new(|cx| BodyView::new("body", cx));
         let subscription = cx.subscribe(&body, |_, _, event, cx| match event {
             BodyViewEvent::Copied(bytes) => {
-                let lang = Ui::of(cx).lang;
-                cx.emit(InspectorEvent::Toast(i18n::copied(
-                    &format_bytes(*bytes),
-                    lang,
-                )));
+                cx.emit(InspectorEvent::Toast(i18n::copied(&format_bytes(*bytes))));
             }
         });
         Inspector {
@@ -113,7 +109,6 @@ impl Inspector {
             docs: DocCache::default(),
             replays: HashMap::new(),
             peers: Vec::new(),
-            fallback_proxy_url: None,
             focus: cx.focus_handle(),
             home,
             _build: None,
@@ -302,15 +297,7 @@ impl Inspector {
 
     // -- Replay & Composer -----------------------------------------------------
 
-    pub fn set_fallback_proxy(&mut self, url: Option<String>, cx: &mut Context<Self>) {
-        if self.fallback_proxy_url != url {
-            self.fallback_proxy_url = url;
-            cx.notify();
-        }
-    }
-
-    /// Through the live proxy when the run is live, else straight to the emulator
-    /// (or the running managed proxy when the run used the built-in sandbox).
+    /// Through the live proxy when the run is live, else straight to the emulator.
     pub fn replay_target(&self, cx: &App) -> Option<ReplayTarget> {
         let session = self.session.read(cx);
         if session.demo {
@@ -321,12 +308,6 @@ impl Inspector {
             return Some(ReplayTarget {
                 url: header.endpoint.clone(),
                 via_proxy: true,
-            });
-        }
-        if header.upstream.starts_with("sandbox://") {
-            return self.fallback_proxy_url.as_ref().map(|url| ReplayTarget {
-                url: url.clone(),
-                via_proxy: false,
             });
         }
         (!header.upstream.is_empty()).then(|| ReplayTarget {
@@ -429,7 +410,6 @@ impl Inspector {
             Side::Replay => format!("{}-replay.bin", call.id),
             Side::Diff => format!("{}-diff.patch", call.id),
         };
-        let lang = Ui::of(cx).lang;
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(dest))) = rx.await {
@@ -465,14 +445,13 @@ impl Inspector {
                     })
                     .await;
                 this.update(cx, |_, cx| {
-                    let msg = match (res, lang) {
-                        (Ok(n), crate::prefs::Lang::En) => {
-                            format!("Saved {} ({})", dest.display(), format_bytes(n))
+                    let path = dest.display();
+                    let msg = match res {
+                        Ok(n) => {
+                            let size = format_bytes(n);
+                            crate::tr!("Saved {path} ({size})", "已保存 {path}（{size}）")
                         }
-                        (Ok(n), crate::prefs::Lang::Zh) => {
-                            format!("已保存 {}（{}）", dest.display(), format_bytes(n))
-                        }
-                        (Err(e), _) => format!("Save error: {e}"),
+                        Err(e) => crate::tr!("Could not save: {e}", "保存失败：{e}"),
                     };
                     cx.emit(InspectorEvent::Toast(msg));
                 })
@@ -492,7 +471,6 @@ impl Inspector {
 
     fn render_header(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let lang = ui.lang;
         let color = ui.service_color(call.service_name());
         let mut top = div()
             .flex()
@@ -583,7 +561,7 @@ impl Inspector {
                     ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(curl.clone()));
-                        cx.emit(InspectorEvent::Toast(i18n::copied("curl", lang)));
+                        cx.emit(InspectorEvent::Toast(i18n::copied("curl")));
                     })),
             );
         }
@@ -603,7 +581,7 @@ impl Inspector {
             ))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                cx.emit(InspectorEvent::Toast(i18n::copied("path", lang)));
+                cx.emit(InspectorEvent::Toast(i18n::copied("path")));
             }))
             .child(
                 div()
@@ -876,7 +854,7 @@ impl Inspector {
                         .child(div().flex_1())
                         .child(dismiss),
                 )
-                .child(widgets::mono(ui, error.clone())),
+                .child(widgets::mono(ui, ui.tr(error).to_string())),
             ReplayState::Done(out) => {
                 let ok = out.status < 400;
                 let color = if ok { t.green } else { t.red };
@@ -1208,7 +1186,6 @@ impl Inspector {
 
     fn render_headers(&self, ui: &Ui, call: &Trace, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let lang = ui.lang;
         let entity = cx.entity();
         let mode_seg = widgets::segmented(
             ui,
@@ -1430,7 +1407,6 @@ impl Inspector {
                         .into_iter()
                         .map(|(name, value)| Header { name, value })
                         .collect::<Vec<_>>(),
-                    lang,
                     cx,
                 ),
             );
@@ -1444,7 +1420,6 @@ impl Inspector {
                     ui.t("REQUEST HEADERS", "请求 Headers"),
                     "req-h",
                     &req.headers,
-                    lang,
                     cx,
                 ));
             }
@@ -1457,7 +1432,6 @@ impl Inspector {
                     ),
                     "req-t",
                     &req.trailers,
-                    lang,
                     cx,
                 ));
             }
@@ -1471,7 +1445,6 @@ impl Inspector {
                     ui.t("RESPONSE HEADERS", "响应 Headers"),
                     "res-h",
                     &res.headers,
-                    lang,
                     cx,
                 ));
             }
@@ -1481,7 +1454,6 @@ impl Inspector {
                     ui.t("RESPONSE TRAILERS (H2 / STREAM)", "响应尾部字段 (Trailers)"),
                     "res-t",
                     &res.trailers,
-                    lang,
                     cx,
                 ));
             }
@@ -1496,7 +1468,6 @@ impl Inspector {
                 ui.t("REPLAY RESPONSE HEADERS", "重放响应 Headers"),
                 "rep-h",
                 &out.headers,
-                lang,
                 cx,
             ));
         }
@@ -1518,7 +1489,6 @@ impl Inspector {
         title: &str,
         prefix: &'static str,
         items: &[Header],
-        lang: crate::prefs::Lang,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = ui.p;
@@ -1553,7 +1523,7 @@ impl Inspector {
                     ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(line.clone()));
-                        cx.emit(InspectorEvent::Toast(i18n::copied(&name_label, lang)));
+                        cx.emit(InspectorEvent::Toast(i18n::copied(&name_label)));
                     }))
                     .child(
                         div()

@@ -1,0 +1,555 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "logs.CreateLogGroup",
+   "access": [
+    [
+     "logs:CreateLogGroup",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.CreateLogGroup",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "CreateLogGroup",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.CreateLogGroup"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.CreateLogGroup"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.CreateLogStream",
+   "access": [
+    [
+     "logs:CreateLogStream",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.CreateLogStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "CreateLogStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.CreateLogStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.CreateLogStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\", \"logStreamName\": \"s1\"}",
+      "bytes": 54,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.PutLogEvents",
+   "access": [
+    [
+     "logs:PutLogEvents",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.PutLogEvents",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "PutLogEvents",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.PutLogEvents"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.PutLogEvents"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\", \"logStreamName\": \"s1\", \"logEvents\": [{\"timestamp\": 1763769600000, \"message\": \"m\"}]}",
+      "bytes": 115,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.DescribeLogGroups",
+   "access": [
+    [
+     "logs:DescribeLogGroups",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.DescribeLogGroups",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "DescribeLogGroups",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.DescribeLogGroups"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.DescribeLogGroups"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupNamePrefix\": \"/corpus\"}",
+      "bytes": 33,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.DescribeLogStreams",
+   "access": [
+    [
+     "logs:DescribeLogStreams",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.DescribeLogStreams",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "DescribeLogStreams",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.DescribeLogStreams"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.DescribeLogStreams"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.DescribeLogStreams.identifier",
+   "access": [
+    [
+     "logs:DescribeLogStreams",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.DescribeLogStreams.identifier",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "DescribeLogStreams",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.DescribeLogStreams"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.DescribeLogStreams.identifier"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupIdentifier\": \"/corpus/app\"}",
+      "bytes": 37,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.GetLogEvents",
+   "access": [
+    [
+     "logs:GetLogEvents",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.GetLogEvents",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "GetLogEvents",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.GetLogEvents"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.GetLogEvents"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\", \"logStreamName\": \"s1\"}",
+      "bytes": 54,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.GetLogEvents.identifierArn",
+   "access": [
+    [
+     "logs:GetLogEvents",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.GetLogEvents.identifierArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "GetLogEvents",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.GetLogEvents"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.GetLogEvents.identifierArn"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupIdentifier\": \"arn:aws:logs:us-east-1:123456789012:log-group:/corpus/app\", \"logStreamName\": \"s1\"}",
+      "bytes": 106,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.FilterLogEvents.identifier",
+   "access": [
+    [
+     "logs:FilterLogEvents",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.FilterLogEvents.identifier",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "FilterLogEvents",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.FilterLogEvents"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.FilterLogEvents.identifier"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupIdentifier\": \"/corpus/app\"}",
+      "bytes": 37,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.PutRetentionPolicy",
+   "access": [
+    [
+     "logs:PutRetentionPolicy",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.PutRetentionPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "PutRetentionPolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.PutRetentionPolicy"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.PutRetentionPolicy"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\", \"retentionInDays\": 7}",
+      "bytes": 53,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "logs.DeleteLogGroup",
+   "access": [
+    [
+     "logs:DeleteLogGroup",
+     "arn:aws:logs:*:*:log-group:/corpus/app:*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "logs.DeleteLogGroup",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "logs",
+    "operation": "DeleteLogGroup",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Logs_20140328.DeleteLogGroup"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "logs.DeleteLogGroup"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"logGroupName\": \"/corpus/app\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

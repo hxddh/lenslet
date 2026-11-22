@@ -90,6 +90,8 @@ impl SearchInput {
         let content: SharedString = initial.into();
         let end = content.len();
         let mut s = Self::new(cx);
+        // Dialog fields take part in Tab / Shift-Tab order.
+        s.focus = s.focus.clone().tab_stop(true);
         s.content = content;
         s.selected_range = end..end;
         s.field_mode = true;

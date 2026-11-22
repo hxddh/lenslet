@@ -1,0 +1,606 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "kinesis.CreateStream",
+   "access": [
+    [
+     "kinesis:CreateStream",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.CreateStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "CreateStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.CreateStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.CreateStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\", \"ShardCount\": 1}",
+      "bytes": 48,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.DescribeStream",
+   "access": [
+    [
+     "kinesis:DescribeStream",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.DescribeStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "DescribeStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.DescribeStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.DescribeStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.DescribeStreamSummary",
+   "access": [
+    [
+     "kinesis:DescribeStreamSummary",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.DescribeStreamSummary",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "DescribeStreamSummary",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.DescribeStreamSummary"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.DescribeStreamSummary"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.PutRecord",
+   "access": [
+    [
+     "kinesis:PutRecord",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.PutRecord",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "PutRecord",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.PutRecord"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.PutRecord"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\", \"Data\": \"eA==\", \"PartitionKey\": \"p\"}",
+      "bytes": 68,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.PutRecords",
+   "access": [
+    [
+     "kinesis:PutRecords",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.PutRecords",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "PutRecords",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.PutRecords"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.PutRecords"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\", \"Records\": [{\"Data\": \"eA==\", \"PartitionKey\": \"p\"}]}",
+      "bytes": 83,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.PutRecord.arn",
+   "access": [
+    [
+     "kinesis:PutRecord",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.PutRecord.arn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "PutRecord",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.PutRecord"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.PutRecord.arn"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamARN\": \"arn:aws:kinesis:us-east-1:123456789012:stream/corpus-events\", \"Data\": \"eQ==\", \"PartitionKey\": \"p\"}",
+      "bytes": 113,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.ListShards",
+   "access": [
+    [
+     "kinesis:ListShards",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.ListShards",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "ListShards",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.ListShards"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.ListShards"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.GetShardIterator",
+   "access": [
+    [
+     "kinesis:GetShardIterator",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.GetShardIterator",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "GetShardIterator",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.GetShardIterator"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.GetShardIterator"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}",
+      "bytes": 103,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.GetRecords",
+   "note": "the shard iterator is opaque",
+   "access": [
+    [
+     "kinesis:GetRecords",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.GetRecords",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "GetRecords",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.GetRecords"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.GetRecords"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"ShardIterator\": \"Y29ycHVzLWV2ZW50czpzaGFyZElkLTAwMDAwMDAwMDAwMDow\\n\"}",
+      "bytes": 71,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.ListStreams",
+   "access": [
+    [
+     "kinesis:ListStreams",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.ListStreams",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "ListStreams",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.ListStreams"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.ListStreams"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.AddTagsToStream",
+   "access": [
+    [
+     "kinesis:AddTagsToStream",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.AddTagsToStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "AddTagsToStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.AddTagsToStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.AddTagsToStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\", \"Tags\": {\"team\": \"corpus\"}}",
+      "bytes": 59,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kinesis.DeleteStream",
+   "access": [
+    [
+     "kinesis:DeleteStream",
+     "arn:aws:kinesis:*:*:stream/corpus-events"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kinesis.DeleteStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kinesis",
+    "operation": "DeleteStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Kinesis_20131202.DeleteStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kinesis.DeleteStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"StreamName\": \"corpus-events\"}",
+      "bytes": 31,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

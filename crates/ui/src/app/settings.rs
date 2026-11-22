@@ -1,11 +1,12 @@
-//! Settings (⌘,): Appearance, Accent, Language, Density and Storage. Renders
+//! Settings (⌘,): Appearance, Accent, Language, Density, the command-line
+//! tool and Storage. Renders
 //! from memory only; storage stats are read in the background when opened.
 
 use gpui::{
     AnyElement, Context, Div, ElementId, FontWeight, IntoElement, div, prelude::*, px, rgb,
 };
 
-use super::{Cmd, LensletApp, widgets};
+use super::{Cmd, LensletApp, PrefCmd, widgets};
 use crate::{
     i18n,
     model::format_bytes,
@@ -65,7 +66,7 @@ impl LensletApp {
                         tooltip: None,
                     })
                     .collect();
-                widgets::segmented(ui, segments, move |index, window, cx| {
+                widgets::segmented_tabbable(ui, segments, move |index, window, cx| {
                     let cmd = cmds[index].clone();
                     entity.update(cx, |app, cx| app.run_cmd(cmd, window, cx));
                 })
@@ -82,13 +83,19 @@ impl LensletApp {
                 .map(|m| i18n::theme_label(*m, ui.lang).to_string())
                 .collect(),
             theme_ix,
-            ThemeMode::ALL.iter().map(|m| Cmd::Theme(*m)).collect(),
+            ThemeMode::ALL
+                .iter()
+                .map(|m| Cmd::Pref(PrefCmd::Theme(*m)))
+                .collect(),
         );
         let lang = segmented(
             &["lang-en", "lang-zh"],
             vec!["English".into(), "中文".into()],
             usize::from(prefs.lang == Lang::Zh),
-            vec![Cmd::Lang(Lang::En), Cmd::Lang(Lang::Zh)],
+            vec![
+                Cmd::Pref(PrefCmd::Lang(Lang::En)),
+                Cmd::Pref(PrefCmd::Lang(Lang::Zh)),
+            ],
         );
         let density = segmented(
             &["density-comfortable", "density-compact"],
@@ -98,8 +105,8 @@ impl LensletApp {
             ],
             usize::from(prefs.density == Density::Compact),
             vec![
-                Cmd::Density(Density::Comfortable),
-                Cmd::Density(Density::Compact),
+                Cmd::Pref(PrefCmd::Density(Density::Comfortable)),
+                Cmd::Pref(PrefCmd::Density(Density::Compact)),
             ],
         );
 
@@ -120,9 +127,11 @@ impl LensletApp {
                     })
                     .p(px(3.0))
                     .cursor_pointer()
+                    .tab_index(0)
+                    .focus(move |s| s.border_color(theme::h(t.accent, 0.9)))
                     .tooltip(widgets::tip(i18n::accent_label(accent, ui.lang), None))
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        app.run_cmd(Cmd::Accent(accent), window, cx)
+                        app.run_cmd(Cmd::Pref(PrefCmd::Accent(accent)), window, cx)
                     }))
                     .child(div().size_full().rounded_full().bg(rgb(swatch))),
             );
@@ -130,11 +139,12 @@ impl LensletApp {
 
         let storage_text = match self.storage {
             Some((count, bytes)) => {
-                if ui.zh() {
-                    format!("{count} 个运行，{}", format_bytes(bytes as usize))
-                } else {
-                    format!("{count} runs, {}", format_bytes(bytes as usize))
-                }
+                let size = format_bytes(bytes as usize);
+                ui.tr(&crate::tr!(
+                    "{count} runs, {size}",
+                    "{count} 个运行，{size}"
+                ))
+                .to_string()
             }
             None if self.session.read(cx).runs_dir().is_some() => {
                 ui.t("Measuring…", "统计中…").into()
@@ -145,15 +155,18 @@ impl LensletApp {
         };
         let session = self.session.clone();
         let clear = self.session.read(cx).runs_dir().is_some().then(|| {
-            widgets::danger_button(
+            widgets::tabbable(
                 ui,
-                "clear-runs",
-                ui.t("Clear finished runs", "清理已结束的运行"),
+                widgets::danger_button(
+                    ui,
+                    "clear-runs",
+                    ui.t("Clear finished runs", "清理已结束的运行"),
+                ),
             )
-            .on_click(cx.listener(move |app, _, _, cx| {
+            .on_click(cx.listener(move |app, _, window, cx| {
                 session.update(cx, |session, cx| session.clear_finished_runs(cx));
                 app.storage = None;
-                app.open_settings(cx);
+                app.open_settings(window, cx);
             }))
         });
 
@@ -167,10 +180,7 @@ impl LensletApp {
             .border_color(rgb(t.border))
             .bg(rgb(t.panel_raised))
             .shadow(ui.elevation())
-            .on_mouse_down_out(cx.listener(|app, _, _, cx| {
-                app.settings_open = false;
-                cx.notify();
-            }))
+            .on_mouse_down_out(cx.listener(|app, _, window, cx| app.close_modal(window, cx)))
             .child(
                 div()
                     .flex()
@@ -187,12 +197,11 @@ impl LensletApp {
                     )
                     .child(div().flex_1())
                     .child(
-                        widgets::button(ui, "close-settings", ui.t("Done", "完成")).on_click(
-                            cx.listener(|app, _, _, cx| {
-                                app.settings_open = false;
-                                cx.notify();
-                            }),
-                        ),
+                        widgets::tabbable(
+                            ui,
+                            widgets::button(ui, "close-settings", ui.t("Done", "完成")),
+                        )
+                        .on_click(cx.listener(|app, _, window, cx| app.close_modal(window, cx))),
                     ),
             )
             .child(
@@ -230,65 +239,20 @@ impl LensletApp {
                     ))
                     .child(row(
                         ui,
-                        ui.t("Local Proxy Gate", "本地代理默认门禁"),
+                        ui.t("Command-line tool", "命令行工具"),
                         ui.t(
-                            "Options used when starting the managed proxy from the Sidebar.",
-                            "从侧栏启动托管本地代理时使用的默认策略。",
+                            "Run lenslet from any terminal.",
+                            "在任意终端中运行 lenslet。",
                         ),
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                widgets::chip(
-                                    ui,
-                                    "set-proxy-enforce",
-                                    "--enforce",
-                                    None,
-                                    prefs.proxy_enforce,
-                                    t.purple,
-                                )
-                                .on_click(cx.listener(
-                                    |app, _, window, cx| {
-                                        let next = !app.prefs.proxy_enforce;
-                                        app.update_prefs(window, cx, |p| p.proxy_enforce = next);
-                                    },
-                                )),
-                            )
-                            .child(
-                                widgets::chip(
-                                    ui,
-                                    "set-proxy-docker",
-                                    "--allow-docker",
-                                    None,
-                                    prefs.proxy_allow_docker,
-                                    t.accent,
-                                )
-                                .on_click(cx.listener(
-                                    |app, _, window, cx| {
-                                        let next = !app.prefs.proxy_allow_docker;
-                                        app.update_prefs(window, cx, |p| {
-                                            p.proxy_allow_docker = next
-                                        });
-                                    },
-                                )),
-                            ),
-                    ))
-                    .child(row(
-                        ui,
-                        ui.t("Command-Line Tool", "命令行工具 (CLI)"),
-                        ui.t(
-                            "Symlink `lenslet` into ~/.local/bin so any terminal can run it.",
-                            "将 `lenslet` 链接到 ~/.local/bin，以便在任意终端直接使用。",
-                        ),
-                        widgets::button(
+                        widgets::tabbable(
                             ui,
-                            "install-cli",
-                            ui.t("Install CLI to PATH", "安装 CLI 到 PATH"),
+                            widgets::button(
+                                ui,
+                                "install-cli",
+                                ui.t("Install command-line tool", "安装命令行工具"),
+                            ),
                         )
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.run_cmd(Cmd::InstallCli, window, cx)
-                        })),
+                        .on_click(cx.listener(|app, _, _, cx| app.install_cli(cx))),
                     ))
                     .child(row(
                         ui,

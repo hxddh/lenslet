@@ -1,0 +1,1653 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "dynamodb.CreateTable",
+   "access": [
+    [
+     "dynamodb:CreateTable",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.CreateTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "CreateTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.CreateTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.CreateTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"AttributeDefinitions\": [{\"AttributeName\": \"pk\", \"AttributeType\": \"S\"}, {\"AttributeName\": \"user\", \"AttributeType\": \"S\"}], \"KeySchema\": [{\"AttributeName\": \"pk\", \"KeyType\": \"HASH\"}], \"GlobalSecondaryIndexes\": [{\"IndexName\": \"byUser\", \"KeySchema\": [{\"AttributeName\": \"user\", \"KeyType\": \"HASH\"}], \"Projection\": {\"ProjectionType\": \"ALL\"}}], \"StreamSpecification\": {\"StreamEnabled\": true, \"StreamViewType\": \"NEW_IMAGE\"}, \"BillingMode\": \"PAY_PER_REQUEST\"}",
+      "bytes": 479,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.CreateTable.audit",
+   "note": "unchanged: AWS may also require kms:CreateGrant (unverified)",
+   "access": [
+    [
+     "dynamodb:CreateTable",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:DescribeKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "call": {
+    "id": "dynamodb.CreateTable.audit",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "CreateTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.CreateTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.CreateTable.audit"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-audit\", \"AttributeDefinitions\": [{\"AttributeName\": \"pk\", \"AttributeType\": \"S\"}], \"KeySchema\": [{\"AttributeName\": \"pk\", \"KeyType\": \"HASH\"}], \"BillingMode\": \"PAY_PER_REQUEST\", \"SSESpecification\": {\"Enabled\": true, \"SSEType\": \"KMS\", \"KMSMasterKeyId\": \"arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f\"}}",
+      "bytes": 349,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.DescribeTable",
+   "access": [
+    [
+     "dynamodb:DescribeTable",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.DescribeTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "DescribeTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.DescribeTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.DescribeTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\"}",
+      "bytes": 30,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ListTables",
+   "access": [
+    [
+     "dynamodb:ListTables",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ListTables",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ListTables",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ListTables"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ListTables"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.UpdateTable",
+   "access": [
+    [
+     "dynamodb:UpdateTable",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.UpdateTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "UpdateTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.UpdateTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.UpdateTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"BillingMode\": \"PAY_PER_REQUEST\"}",
+      "bytes": 64,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.PutItem",
+   "access": [
+    [
+     "dynamodb:PutItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.PutItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "PutItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.PutItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.PutItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"Item\": {\"pk\": {\"S\": \"o1\"}, \"user\": {\"S\": \"u1\"}}}",
+      "bytes": 80,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.GetItem",
+   "access": [
+    [
+     "dynamodb:GetItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "dynamodb:GetItem",
+      "arn:aws:dynamodb:us-east-1:*:table/corpus-orders"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "dynamodb.GetItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "GetItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.GetItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.GetItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o1\"}}}",
+      "bytes": 58,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.UpdateItem",
+   "access": [
+    [
+     "dynamodb:UpdateItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.UpdateItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "UpdateItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.UpdateItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.UpdateItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o1\"}}, \"UpdateExpression\": \"SET n = :n\", \"ExpressionAttributeValues\": {\":n\": {\"N\": \"1\"}}}",
+      "bytes": 141,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.Query.index",
+   "access": [
+    [
+     "dynamodb:Query",
+     "arn:aws:dynamodb:*:*:table/corpus-orders/index/byUser"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.Query.index",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "Query",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.Query"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.Query.index"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"IndexName\": \"byUser\", \"KeyConditionExpression\": \"#u = :u\", \"ExpressionAttributeNames\": {\"#u\": \"user\"}, \"ExpressionAttributeValues\": {\":u\": {\"S\": \"u1\"}}}",
+      "bytes": 184,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.Query",
+   "access": [
+    [
+     "dynamodb:Query",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.Query",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "Query",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.Query"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.Query"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"KeyConditionExpression\": \"pk = :p\", \"ExpressionAttributeValues\": {\":p\": {\"S\": \"o1\"}}}",
+      "bytes": 117,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.Scan",
+   "access": [
+    [
+     "dynamodb:Scan",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.Scan",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "Scan",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.Scan"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.Scan"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\"}",
+      "bytes": 30,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.BatchWriteItem",
+   "access": [
+    [
+     "dynamodb:BatchWriteItem",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ],
+    [
+     "dynamodb:BatchWriteItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.BatchWriteItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "BatchWriteItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.BatchWriteItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.BatchWriteItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"RequestItems\": {\"corpus-orders\": [{\"PutRequest\": {\"Item\": {\"pk\": {\"S\": \"o2\"}}}}], \"corpus-audit\": [{\"PutRequest\": {\"Item\": {\"pk\": {\"S\": \"a1\"}}}}]}}",
+      "bytes": 149,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.BatchGetItem",
+   "access": [
+    [
+     "dynamodb:BatchGetItem",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ],
+    [
+     "dynamodb:BatchGetItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.BatchGetItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "BatchGetItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.BatchGetItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.BatchGetItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"RequestItems\": {\"corpus-orders\": {\"Keys\": [{\"pk\": {\"S\": \"o2\"}}]}, \"corpus-audit\": {\"Keys\": [{\"pk\": {\"S\": \"a1\"}}]}}}",
+      "bytes": 117,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.TransactWriteItems",
+   "access": [
+    [
+     "dynamodb:PutItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ],
+    [
+     "dynamodb:UpdateItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ],
+    [
+     "dynamodb:DeleteItem",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ],
+    [
+     "dynamodb:ConditionCheckItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.TransactWriteItems",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "TransactWriteItems",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.TransactWriteItems"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.TransactWriteItems"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TransactItems\": [{\"Put\": {\"TableName\": \"corpus-orders\", \"Item\": {\"pk\": {\"S\": \"o3\"}}}}, {\"Update\": {\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o1\"}}, \"UpdateExpression\": \"SET n = :n\", \"ExpressionAttributeValues\": {\":n\": {\"N\": \"2\"}}}}, {\"Delete\": {\"TableName\": \"corpus-audit\", \"Key\": {\"pk\": {\"S\": \"a1\"}}}}, {\"ConditionCheck\": {\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o2\"}}, \"ConditionExpression\": \"attribute_exists(pk)\"}}], \"ClientRequestToken\": \"55d2511b-4531-4525-ab03-d32187e063ae\"}",
+      "bytes": 504,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.TransactGetItems",
+   "access": [
+    [
+     "dynamodb:GetItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ],
+    [
+     "dynamodb:GetItem",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.TransactGetItems",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "TransactGetItems",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.TransactGetItems"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.TransactGetItems"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TransactItems\": [{\"Get\": {\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o1\"}}}}, {\"Get\": {\"TableName\": \"corpus-audit\", \"Key\": {\"pk\": {\"S\": \"a1\"}}}}]}",
+      "bytes": 156,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteStatement.select",
+   "access": [
+    [
+     "dynamodb:PartiQLSelect",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteStatement.select",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteStatement",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteStatement.select"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statement\": \"SELECT * FROM \\\"corpus-orders\\\" WHERE pk = ?\", \"Parameters\": [{\"S\": \"o1\"}]}",
+      "bytes": 90,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteStatement.selectIndex",
+   "access": [
+    [
+     "dynamodb:PartiQLSelect",
+     "arn:aws:dynamodb:*:*:table/corpus-orders/index/byUser"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteStatement.selectIndex",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteStatement",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteStatement.selectIndex"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statement\": \"SELECT * FROM \\\"corpus-orders\\\".\\\"byUser\\\" WHERE \\\"user\\\" = ?\", \"Parameters\": [{\"S\": \"u1\"}]}",
+      "bytes": 107,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteStatement.insert",
+   "access": [
+    [
+     "dynamodb:PartiQLInsert",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteStatement.insert",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteStatement",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteStatement.insert"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statement\": \"INSERT INTO \\\"corpus-orders\\\" VALUE {'pk': ?}\", \"Parameters\": [{\"S\": \"o9\"}]}",
+      "bytes": 91,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteStatement.update",
+   "access": [
+    [
+     "dynamodb:PartiQLUpdate",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteStatement.update",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteStatement",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteStatement.update"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statement\": \"UPDATE \\\"corpus-orders\\\" SET n = 3 WHERE pk = ?\", \"Parameters\": [{\"S\": \"o9\"}]}",
+      "bytes": 93,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteStatement.delete",
+   "access": [
+    [
+     "dynamodb:PartiQLDelete",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteStatement.delete",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteStatement",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteStatement.delete"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statement\": \"DELETE FROM \\\"corpus-orders\\\" WHERE pk = ?\", \"Parameters\": [{\"S\": \"o9\"}]}",
+      "bytes": 88,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.BatchExecuteStatement",
+   "access": [
+    [
+     "dynamodb:PartiQLSelect",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ],
+    [
+     "dynamodb:PartiQLUpdate",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.BatchExecuteStatement",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "BatchExecuteStatement",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.BatchExecuteStatement"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.BatchExecuteStatement"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"Statements\": [{\"Statement\": \"SELECT * FROM \\\"corpus-orders\\\" WHERE pk = ?\", \"Parameters\": [{\"S\": \"o1\"}]}, {\"Statement\": \"UPDATE \\\"corpus-audit\\\" SET n = 1 WHERE pk = ?\", \"Parameters\": [{\"S\": \"a1\"}]}]}",
+      "bytes": 202,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ExecuteTransaction",
+   "access": [
+    [
+     "dynamodb:PartiQLInsert",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ],
+    [
+     "dynamodb:PartiQLDelete",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ExecuteTransaction",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ExecuteTransaction",
+    "status": 500,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ExecuteTransaction"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ExecuteTransaction"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TransactStatements\": [{\"Statement\": \"INSERT INTO \\\"corpus-orders\\\" VALUE {'pk': ?}\", \"Parameters\": [{\"S\": \"o10\"}]}, {\"Statement\": \"DELETE FROM \\\"corpus-audit\\\" WHERE pk = ?\", \"Parameters\": [{\"S\": \"a2\"}]}], \"ClientRequestToken\": \"2ab1bd7d-ac65-4727-bd0b-fa5bc3978509\"}",
+      "bytes": 269,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.DeleteItem",
+   "access": [
+    [
+     "dynamodb:DeleteItem",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.DeleteItem",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "DeleteItem",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.DeleteItem"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.DeleteItem"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"Key\": {\"pk\": {\"S\": \"o3\"}}}",
+      "bytes": 58,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.UpdateTimeToLive",
+   "access": [
+    [
+     "dynamodb:UpdateTimeToLive",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.UpdateTimeToLive",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "UpdateTimeToLive",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.UpdateTimeToLive"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.UpdateTimeToLive"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\", \"TimeToLiveSpecification\": {\"Enabled\": true, \"AttributeName\": \"ttl\"}}",
+      "bytes": 100,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.DescribeTimeToLive",
+   "access": [
+    [
+     "dynamodb:DescribeTimeToLive",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.DescribeTimeToLive",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "DescribeTimeToLive",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.DescribeTimeToLive"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.DescribeTimeToLive"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-orders\"}",
+      "bytes": 30,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.TagResource",
+   "access": [
+    [
+     "dynamodb:TagResource",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.TagResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "TagResource",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.TagResource"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.TagResource"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"ResourceArn\": \"arn:aws:dynamodb:us-east-1:123456789012:table/corpus-orders\", \"Tags\": [{\"Key\": \"team\", \"Value\": \"corpus\"}]}",
+      "bytes": 124,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.ListTagsOfResource",
+   "access": [
+    [
+     "dynamodb:ListTagsOfResource",
+     "arn:aws:dynamodb:*:*:table/corpus-orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.ListTagsOfResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ListTagsOfResource",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.ListTagsOfResource"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.ListTagsOfResource"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"ResourceArn\": \"arn:aws:dynamodb:us-east-1:123456789012:table/corpus-orders\"}",
+      "bytes": 78,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodbstreams.ListStreams",
+   "access": [
+    [
+     "dynamodb:ListStreams",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodbstreams.ListStreams",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "ListStreams",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDBStreams_20120810.ListStreams"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodbstreams.ListStreams"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodbstreams.DescribeStream",
+   "access": [
+    [
+     "dynamodb:DescribeStream",
+     "arn:aws:dynamodb:*:*:table/corpus-orders/stream/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodbstreams.DescribeStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "DescribeStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDBStreams_20120810.DescribeStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodbstreams.DescribeStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"StreamArn\": \"arn:aws:dynamodb:us-east-1:123456789012:table/corpus-orders/stream/2026-11-22T08:00:44.365576\"}",
+      "bytes": 110,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodbstreams.GetShardIterator",
+   "access": [
+    [
+     "dynamodb:GetShardIterator",
+     "arn:aws:dynamodb:*:*:table/corpus-orders/stream/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodbstreams.GetShardIterator",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "GetShardIterator",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDBStreams_20120810.GetShardIterator"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodbstreams.GetShardIterator"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"StreamArn\": \"arn:aws:dynamodb:us-east-1:123456789012:table/corpus-orders/stream/2026-11-22T08:00:44.365576\", \"ShardId\": \"shardId-00000001541626099285-f35f62ef\", \"ShardIteratorType\": \"TRIM_HORIZON\"}",
+      "bytes": 199,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodbstreams.GetRecords",
+   "note": "the shard iterator is opaque",
+   "access": [
+    [
+     "dynamodb:GetRecords",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodbstreams.GetRecords",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "GetRecords",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDBStreams_20120810.GetRecords"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodbstreams.GetRecords"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"ShardIterator\": \"arn:aws:dynamodb:us-east-1:123456789012:table/corpus-orders/stream/2026-11-22T08:00:44.365576|1|0Iu8UVIs48a6fL9mwUVp5HfxT18EaFYtM9DxHehBcpaN5ZrEAGcvI9+dR8UESlVuS7F3GZwSG0t5D7wrQ25x4ERNPQxVuCcb7JpVcUzVpPzGys/JCx5L0BKPNVya9Us344MuYfJ8YWjik4/1zMTaywnkS4cbodbcWNYuQ8i3pjCPdEBwRdHX3IqEnNTLo01sJb/jWsiLmwwLZUNtq/opmb9E06PRHp5wPqxzd5UxHWOPjMXNV+7SqjtKFQQpbu3TOuIhJaCcwoy4lGBoeMDrK+aH3yMsSOdSvCL+p1gUhYWQA+jvlwn3D30cJkMVeuZF0BDO5AOBFZgP+ypdSiLKC+6ctLraNscIrtOulUJ3qQbU34ZC56z1UYXqjX1e+mMVCInpStHOaHVYbt+HYeueEMpiRn5CWNV/Ha6L9hq6tNS+pWgKQha6P5ofJMD/DkP0zYpv9PvOqdTHJ0XfktVYvHcbYuMs0683KsKH++RzID0OrtEecYmtXw2aKTvvpFDyFT3+Apw9+EzyJ7Pzb1NgYFI3HgRw6H0lISFr7kP3IKHfGDZRfUsXQ2TZ8H6NWhLPkRPqbZz0U8+RlisISjyBfv4b85CeAd4zfw8S2UQCg1HAj2hqAXFS4A==\"}",
+      "bytes": 749,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "dynamodb.DeleteTable",
+   "access": [
+    [
+     "dynamodb:DeleteTable",
+     "arn:aws:dynamodb:*:*:table/corpus-audit"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "dynamodb.DeleteTable",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "dynamodb",
+    "operation": "DeleteTable",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "DynamoDB_20120810.DeleteTable"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.0"
+      },
+      {
+       "name": "x-corpus",
+       "value": "dynamodb.DeleteTable"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.0",
+     "body": {
+      "text": "{\"TableName\": \"corpus-audit\"}",
+      "bytes": 29,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

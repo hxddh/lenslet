@@ -45,11 +45,8 @@ pub fn density_label(density: Density, lang: Lang) -> &'static str {
     }
 }
 
-pub fn copied(item: &str, lang: Lang) -> String {
-    match lang {
-        Lang::Zh => format!("已复制 {item}"),
-        Lang::En => format!("Copied {item}"),
-    }
+pub fn copied(item: &str) -> Tr {
+    crate::tr!("Copied {item}", "已复制 {item}")
 }
 
 pub fn calls_count(n: usize, lang: Lang) -> String {
@@ -82,10 +79,82 @@ pub fn more_count(n: usize, lang: Lang) -> String {
 }
 
 /// `⌘K` on macOS, `Ctrl+K` elsewhere.
+/// Modifier glyphs in `key` (`⇧`, `⌥`, `⏎`) become `Shift+`, `Alt+` and
+/// `Enter` off macOS, so Linux reads `Ctrl+Shift+N`.
 pub fn shortcut(key: &str) -> String {
     if cfg!(target_os = "macos") {
         format!("⌘{key}")
     } else {
-        format!("Ctrl+{key}")
+        format!("Ctrl+{}", spell_glyphs(key))
+    }
+}
+
+/// A bare key hint (`⏎`, `Esc`) in the platform's spelling.
+pub fn key(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        key.to_string()
+    } else {
+        spell_glyphs(key)
+    }
+}
+
+fn spell_glyphs(key: &str) -> String {
+    key.replace('⇧', "Shift+")
+        .replace('⌥', "Alt+")
+        .replace('⏎', "Enter")
+}
+
+/// A message in both languages, built where the words are known (a daemon or
+/// replay error, a toast) and shown with [`crate::theme::Ui::tr`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tr {
+    pub en: String,
+    pub zh: String,
+}
+
+/// The English text, for logs and test messages.
+impl std::fmt::Display for Tr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.en)
+    }
+}
+
+impl Tr {
+    pub fn new(en: impl Into<String>, zh: impl Into<String>) -> Self {
+        Tr {
+            en: en.into(),
+            zh: zh.into(),
+        }
+    }
+}
+
+/// Two format strings, one per language: `tr!("{n} calls", "{n} 次调用")`.
+#[macro_export]
+macro_rules! tr {
+    ($en:literal, $zh:literal $(,)?) => {
+        $crate::i18n::Tr::new(format!($en), format!($zh))
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_spell_modifiers_off_macos() {
+        if !cfg!(target_os = "macos") {
+            assert_eq!(shortcut("⇧N"), "Ctrl+Shift+N");
+            assert_eq!(shortcut("⇧⏎"), "Ctrl+Shift+Enter");
+            assert_eq!(shortcut("J"), "Ctrl+J");
+            assert_eq!(key("⏎"), "Enter");
+        }
+    }
+
+    #[test]
+    fn tr_formats_both_languages() {
+        let n = 3;
+        let msg = tr!("{n} calls", "{n} 次调用");
+        assert_eq!(msg.en, "3 calls");
+        assert_eq!(msg.zh, "3 次调用");
     }
 }
