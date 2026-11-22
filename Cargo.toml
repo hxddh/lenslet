@@ -1,8 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["crates/core"]
+members = ["crates/core", "crates/app"]
+exclude = ["third_party"]
 
 [workspace.package]
 version = "14.0.0"
 edition = "2024"
 license = "Apache-2.0"
+
+# As AWS Emulator's own workspace: dependencies carry no debug info, which is
+# most of its build's time and disk.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false

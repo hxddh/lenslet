@@ -1,0 +1,54 @@
+[package]
+name = "lenslet"
+description = "A window onto a local AWS: every call your code makes, what it built, and the IAM permissions it needed."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "lenslet"
+
+[[bin]]
+name = "lenslet"
+path = "src/main.rs"
+
+[dependencies]
+lenslet-core = { path = "../core" }
+nsh-core = "=0.6.1"
+nsh-base = "=0.6.1"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+
+# AWS Emulator, embedded: its engine, router and the services Lenslet serves.
+engine = { path = "../../third_party/aws-emulator/vendor/engine", package = "aws-emulator-engine" }
+smithy-server-runtime = { path = "../../third_party/aws-emulator/vendor/smithy-server-runtime", package = "aws-emulator-smithy-server-runtime" }
+emulator-server = { path = "../../third_party/aws-emulator/vendor/server", package = "aws-emulator-server" }
+service-com-amazonaws-s3-amazons3 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-s3-amazons3" }
+service-com-amazonaws-dynamodb-dynamodb-20120810 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-dynamodb-dynamodb-20120810" }
+service-com-amazonaws-sqs-amazonsqs = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-sqs-amazonsqs" }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-sts-awssecuritytokenservicev20110615" }
+service-com-amazonaws-sns-amazonsimplenotificationservice = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-sns-amazonsimplenotificationservice" }
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-iam-awsidentitymanagementv20100508" }
+service-com-amazonaws-kms-trentservice = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-kms-trentservice" }
+service-com-amazonaws-lambda-awsgirapiservice = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-lambda-awsgirapiservice" }
+service-com-amazonaws-secretsmanager-secretsmanager = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-secretsmanager-secretsmanager" }
+service-com-amazonaws-ssm-amazonssm = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-ssm-amazonssm" }
+service-com-amazonaws-eventbridge-awsevents = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-eventbridge-awsevents" }
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-cloudwatchlogs-logs-20140328" }
+service-com-amazonaws-sfn-awsstepfunctions = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-sfn-awsstepfunctions" }
+service-com-amazonaws-kinesis-kinesis-20131202 = { path = "../../third_party/aws-emulator/services/service-com-amazonaws-kinesis-kinesis-20131202" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "=0.6.1", default-features = false, features = ["highlight"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "=0.6.1", default-features = false, features = ["highlight"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "=0.6.1", default-features = false, features = ["highlight"] }
