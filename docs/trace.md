@@ -25,7 +25,8 @@ not compatible with earlier files.
 | `cwd` | where `lenslet run` was started (the default lock is `cwd/lenslet.lock`) |
 | `pid` | Lenslet's process id (to tell a live run from a crashed one) |
 | `endpoint` | what SDKs point at, e.g. `http://127.0.0.1:37505` |
-| `upstream` | the emulator, e.g. `https://127.0.0.1:9298` |
+| `upstream` | the emulator's URL, e.g. `https://127.0.0.1:9298` |
+| `emulator` | what answered the calls: `moto (started by Lenslet)` when Lenslet started moto for the run (`--emulator moto`, or no emulator was running), `moto`, `localstack` or `aws-emulator` when one was found running (recognized by its protocol), or the upstream URL for anything else. Absent in files written before 12.0 |
 | `started` | RFC3339 |
 | `lock` | the lock path (relative to `cwd` when inside it) when the run is compared with one |
 | `policy` | the IAM policy JSON path when `--policy` is used |
@@ -127,6 +128,7 @@ summaries.
 | `regressions` | `{previous_run, previous_exit_code, previous_calls, previous_duration_ms, new_failures, fixed, new_access?}` compared with the previous run of the same command in the same directory, or `null` |
 | `findings` | `[{kind, severity, title, detail?, calls}]`, most severe first, then in call order (omitted when empty); see below |
 | `trace`, `endpoint`, `upstream` | where to look |
+| `emulator` | what answered the calls, as in the `run` header. The terminal report's first line and the Markdown report's counts line end with ` · against <emulator>`, e.g. `3 AWS calls · 0 errors · 1 service · against moto (started by Lenslet)` |
 
 ### Findings
 
@@ -140,8 +142,10 @@ summaries.
 
 ## Live events
 
-While a run is going, the proxy also answers two requests of its own on the
-run's `endpoint`. They never reach the emulator and are never recorded.
+While a run is going, the proxy also answers requests of its own on the
+run's `endpoint`, for loopback clients only (`403` for anyone else, also
+under `--allow-docker`). They never reach the emulator and are never
+recorded.
 
 - `GET /_lenslet/health` → `200 {"run": "<run id>", "pid": <pid>, "endpoint": "...", "upstream": "...", "routes": {...}, "enforce": <bool>, "calls": <n>, "errors": <n>, "blocked": <n>}`.
 - `GET /_lenslet/events` → `200`, `content-type: text/event-stream`: every
@@ -149,10 +153,21 @@ run's `endpoint`. They never reach the emulator and are never recorded.
   new line as it is written, each as one event `data: <the exact JSONL
   line>\n\n`. No line is skipped or repeated. An idle stream gets a
   `: keepalive\n\n` comment every 15 s. The stream ends after the `end` line.
+  HTTP/1.1 and HTTP/2 prior-knowledge (h2c) clients both work.
+- `POST /_lenslet/shutdown` → `200 {"stopping":true}`: ends the run as if
+  the command had been stopped.
 
 A request with `x-lenslet-replay-of: <call id>` is proxied and recorded like
 any call, with `replay_of` set; the header is removed before forwarding and
 is not recorded among the request headers.
+
+## The emulator log
+
+When Lenslet starts moto for a run, moto's own output goes to
+`~/.lenslet/runs/<run>.emulator.log` (owner-only), not the terminal; it is
+removed with its run. moto runs in its own process group on a free loopback
+port and is stopped (`SIGTERM`, then `SIGKILL` after 2 s) when the run ends,
+also on Ctrl-C or an error.
 
 ## `lenslet check`
 

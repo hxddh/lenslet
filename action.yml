@@ -10,10 +10,10 @@ inputs:
     description: The test command, e.g. `npm test`. Runs under bash in working-directory.
     required: true
   upstream:
-    description: The emulator, as a port (HTTPS on 127.0.0.1), an http(s) URL, `auto`, or `sandbox` for Lenslet's built-in stateful AWS sandbox.
+    description: The emulator, as a port (HTTPS on 127.0.0.1), an http(s) URL, `auto` (an emulator already running in the job, found by its protocol, else moto when it is installed), or `moto` (the action installs moto and Lenslet starts and stops it). `sandbox` and `built-in` were removed in 12.0 and mean `moto`.
     default: 'auto'
   emulator:
-    description: Optional command that starts the emulator in the background. The action then waits for `upstream` to accept connections.
+    description: '`moto` (same as `upstream: moto`), or a command that starts the emulator in the background; the action then waits for `upstream` to accept connections.'
     default: ''
   working-directory:
     description: Where to run the command and look for the lock file.
@@ -79,8 +79,43 @@ runs:
         "$bin" --version
         echo "LENSLET_BIN=$bin" >> "$GITHUB_ENV"
 
+    - name: Choose the emulator
+      id: mode
+      shell: bash
+      env:
+        UPSTREAM: ${{ inputs.upstream }}
+        EMULATOR: ${{ inputs.emulator }}
+      run: |
+        set -euo pipefail
+        managed=false
+        case "$UPSTREAM" in
+          moto) managed=true ;;
+          sandbox|built-in)
+            managed=true
+            echo "::notice::upstream: $UPSTREAM was removed in Lenslet 12.0; using moto (started by Lenslet) instead" ;;
+        esac
+        [ "$EMULATOR" = "moto" ] && managed=true
+        echo "managed=$managed" >> "$GITHUB_OUTPUT"
+
+    - name: Install moto
+      if: steps.mode.outputs.managed == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v moto_server >/dev/null 2>&1 || python3 -c 'import moto.server' 2>/dev/null; then
+          echo "moto is installed"
+        elif python3 -m pip install --quiet 'moto[server]'; then
+          echo "installed moto with pip"
+        else
+          # A Python that refuses system-wide installs (PEP 668): use a venv.
+          python3 -m venv "$RUNNER_TEMP/lenslet-moto"
+          "$RUNNER_TEMP/lenslet-moto/bin/pip" install --quiet 'moto[server]'
+          echo "$RUNNER_TEMP/lenslet-moto/bin" >> "$GITHUB_PATH"
+          echo "installed moto in $RUNNER_TEMP/lenslet-moto"
+        fi
+
     - name: Start the emulator
-      if: inputs.emulator != '' && inputs.upstream != 'sandbox' && inputs.upstream != 'built-in'
+      if: inputs.emulator != '' && steps.mode.outputs.managed != 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -89,7 +124,7 @@ runs:
       run: |
         set -euo pipefail
         nohup bash -c "$EMULATOR" > "$RUNNER_TEMP/lenslet-emulator.log" 2>&1 &
-        if [ "$UPSTREAM" = "auto" ] || [ "$UPSTREAM" = "sandbox" ] || [ "$UPSTREAM" = "built-in" ]; then
+        if [ "$UPSTREAM" = "auto" ]; then
           UPSTREAM="9298"
         fi
         address="${UPSTREAM#*://}"
@@ -117,6 +152,7 @@ runs:
         COMMAND: ${{ inputs.command }}
         UPSTREAM: ${{ inputs.upstream }}
         EMULATOR: ${{ inputs.emulator }}
+        MANAGED: ${{ steps.mode.outputs.managed }}
         LOCK: ${{ inputs.lock }}
         POLICY: ${{ inputs.policy }}
         CHECK: ${{ inputs.check }}
@@ -131,8 +167,8 @@ runs:
         dir=$(mktemp -d "$RUNNER_TEMP/lenslet.XXXXXX")
         report="$dir/report.json"
         markdown="$dir/report.md"
-        if [ "$UPSTREAM" = "sandbox" ] || [ "$UPSTREAM" = "built-in" ]; then
-          args=(run --sandbox --json "$report" --markdown "$markdown")
+        if [ "$MANAGED" = "true" ]; then
+          args=(run --emulator moto --json "$report" --markdown "$markdown")
         elif [ "$UPSTREAM" = "auto" ]; then
           if [ -n "$EMULATOR" ]; then
             args=(run --upstream 9298 --json "$report" --markdown "$markdown")
