@@ -328,16 +328,12 @@ pub fn not_in_lock_count(rows: &[AccessRow]) -> usize {
 
 /// The IAM policy for what this run used, minus `# test` lines.
 pub fn policy_json(rows: &[AccessRow]) -> String {
-    let inputs: Vec<lenslet_core::iac::PolicyInput> = rows
+    let access: Vec<Access> = rows
         .iter()
         .filter(|row| row.state != LockState::Unused && !row.test)
-        .map(|row| lenslet_core::iac::PolicyInput {
-            access: row.used.access.clone(),
-            implied: row.used.implied,
-            services: Vec::new(),
-        })
+        .map(|row| row.used.access.clone())
         .collect();
-    lenslet_core::iac::compile(&inputs, &lenslet_core::iac::CompileOptions::default())
+    lenslet_core::policy::compile(&access)
 }
 
 #[cfg(test)]

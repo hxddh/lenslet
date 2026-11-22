@@ -19,9 +19,8 @@ use std::{
 
 pub use lenslet_core::{
     access::Access,
-    findings::{Finding, FindingKind},
     lock::Lock,
-    summary::{FailureKind, Regressions, Report},
+    summary::{FailureKind, Finding, Regressions, Report},
     trace::{BodyTrace as Body, HeaderTrace as Header, Message, RunHeader},
 };
 
@@ -102,7 +101,7 @@ impl RunInfo {
         self.report
             .iter()
             .flat_map(|r| r.findings.iter())
-            .filter(|f| f.kind == FindingKind::Failure)
+            .filter(|f| matches!(f, Finding::Failure(_)))
             .collect()
     }
 
@@ -120,7 +119,7 @@ pub fn emulator_name(header: &RunHeader) -> Option<String> {
 
 fn emulator_full(header: &RunHeader) -> Option<String> {
     // Format 4 makes `emulator` a plain string; empty means unknown.
-    let full: Option<&str> = header.emulator.as_deref();
+    let full: Option<&str> = Some(header.emulator.as_str());
     full.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -162,11 +161,7 @@ pub fn lock_path(header: &RunHeader) -> Option<PathBuf> {
 /// The semantic target of a call (`table/orders · id="1"`). The one place
 /// the window asks the core for it.
 pub fn target_summary(call: &CoreTrace) -> Option<String> {
-    if let Some(target) = call.target.as_deref().filter(|t| !t.is_empty()) {
-        return Some(target.to_string());
-    }
-    let summary = lenslet_core::catalog::target_summary(call);
-    (!summary.is_empty()).then_some(summary)
+    lenslet_core::target::summary(call)
 }
 
 /// One permission a run used, as the Access view lists it.
@@ -418,7 +413,6 @@ impl Trace {
         }
         for extra in [
             self.region.as_deref(),
-            self.caller_role.as_deref(),
             self.target.as_deref(),
             self.error.as_deref(),
         ]
@@ -959,64 +953,6 @@ pub fn to_curl(trace: &Trace, endpoint: Option<&str>) -> Option<String> {
         parts.push(format!("--data-raw {}", posix_single_quote(text)));
     }
     Some(parts.join(" \\\n  "))
-}
-
-/// Render a lowercase hex string (`89504e47...`) as a classic 16-byte-per-row
-/// Hex + ASCII dump (`0000  89 50 4e 47 ...  |.PNG...|`).
-pub fn format_hex_dump(hex_str: &str) -> String {
-    let clean: Vec<u8> = hex_str.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
-    let mut bytes = Vec::with_capacity(clean.len() / 2);
-    for pair in clean.as_chunks::<2>().0 {
-        if let Ok(s) = std::str::from_utf8(pair)
-            && let Ok(val) = u8::from_str_radix(s, 16)
-        {
-            bytes.push(val);
-        }
-    }
-    format_hex_bytes(&bytes)
-}
-
-/// Render raw bytes as a 16-byte-per-row Hex + ASCII dump (up to 256 KiB inline display).
-pub fn format_hex_bytes(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    const MAX_HEX_DISPLAY: usize = 256 * 1024;
-    let shown = &bytes[..bytes.len().min(MAX_HEX_DISPLAY)];
-    let mut out = String::new();
-    for (row_idx, row) in shown.chunks(16).enumerate() {
-        let _ = write!(out, "{:06x}  ", row_idx * 16);
-        for (i, byte) in row.iter().enumerate() {
-            if i == 8 {
-                out.push(' ');
-            }
-            let _ = write!(out, "{byte:02x} ");
-        }
-        for i in row.len()..16 {
-            if i == 8 {
-                out.push(' ');
-            }
-            out.push_str("   ");
-        }
-        out.push_str(" |");
-        for &byte in row {
-            let ch = if (0x20..=0x7e).contains(&byte) {
-                byte as char
-            } else {
-                '.'
-            };
-            out.push(ch);
-        }
-        out.push_str("|\n");
-    }
-    if bytes.len() > MAX_HEX_DISPLAY {
-        let _ = writeln!(
-            out,
-            "# … {} total bytes (Save… writes the complete body)",
-            format_bytes(bytes.len())
-        );
-    }
-    out.trim_end().to_string()
 }
 
 /// Parse an RFC3339 timestamp into epoch milliseconds, for relative waterfall

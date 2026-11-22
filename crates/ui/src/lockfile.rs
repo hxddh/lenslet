@@ -20,17 +20,9 @@ pub fn read(path: &Path) -> anyhow::Result<Option<Lock>> {
 /// Add permissions to the lock (`test` marks them `# test`). Returns how many
 /// were not already in it. The write is `lenslet_core::lock`'s: atomic and
 /// canonical, the same file `lenslet run --update` writes.
-#[cfg(test)]
 pub fn accept(path: &Path, entries: &[(Access, bool)]) -> anyhow::Result<usize> {
     fsguard::assert_io_allowed();
     lenslet_core::lock::accept(path, entries)
-}
-
-/// Add permissions to the lock (`(access, test, implied)`), preserving `# implied`
-/// notes for KMS / `iam:PassRole` entries accepted from the window.
-pub fn accept_with_implied(path: &Path, entries: &[(Access, bool, bool)]) -> anyhow::Result<usize> {
-    fsguard::assert_io_allowed();
-    lenslet_core::lock::accept_with_implied(path, entries)
 }
 
 /// Mark or unmark a permission `# test`. Marking one the lock does not have
@@ -59,12 +51,12 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn accepts_and_marks_permissions_keeping_notes() {
+    fn accepts_and_marks_permissions_keeping_lines() {
         let dir = std::env::temp_dir().join(format!("lenslet-ui-lock-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lenslet.lock");
-        fs::write(&path, "kms:Decrypt  arn:aws:kms:*:*:key/*  # implied\n").unwrap();
+        fs::write(&path, "kms:Decrypt  arn:aws:kms:*:*:key/*\n").unwrap();
 
         let get = Access::new("s3:GetObject", "arn:aws:s3:::b/*");
         let put = Access::new("s3:PutObject", "arn:aws:s3:::b/*");
@@ -75,7 +67,8 @@ mod tests {
         assert_eq!(accept(&path, &[(get.clone(), false)]).unwrap(), 0);
         let lock = read(&path).unwrap().unwrap();
         assert!(lock.access.contains(&get) && lock.test.contains(&put));
-        assert!(fs::read_to_string(&path).unwrap().contains("# implied"));
+        let kms = Access::new("kms:Decrypt", "arn:aws:kms:*:*:key/*");
+        assert!(lock.access.contains(&kms), "existing lines are kept");
 
         assert!(set_test_mark(&path, &get, true).unwrap());
         assert!(!set_test_mark(&path, &get, true).unwrap(), "already marked");

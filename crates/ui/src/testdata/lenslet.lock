@@ -2,10 +2,10 @@ dynamodb:CreateTable  arn:aws:dynamodb:*:*:table/orders
 dynamodb:GetItem  arn:aws:dynamodb:*:*:table/orders
 dynamodb:PutItem  arn:aws:dynamodb:*:*:table/orders
 iam:CreateRole  arn:aws:iam::*:role/shop-lambda
-iam:PassRole  arn:aws:iam::*:role/shop-lambda  # implied
+iam:PassRole  arn:aws:iam::*:role/shop-lambda
 kms:CreateKey  *
-kms:Decrypt  arn:aws:kms:*:*:key/*  # implied
-kms:GenerateDataKey  arn:aws:kms:*:*:key/*  # implied
+kms:Decrypt  arn:aws:kms:*:*:key/*
+kms:GenerateDataKey  arn:aws:kms:*:*:key/*
 lambda:CreateFunction  arn:aws:lambda:*:*:function:send-receipt
 s3:CreateBucket  arn:aws:s3:::shop-assets  # test
 s3:GetObject  arn:aws:s3:::shop-assets/*

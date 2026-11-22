@@ -20,8 +20,7 @@ use crate::{
     i18n::Tr,
     lockfile,
     model::{
-        self, Access, Finding, FindingKind, LockView, RunInfo, Trace, lock_path, project_dir,
-        report_access,
+        self, Access, Finding, LockView, RunInfo, Trace, lock_path, project_dir, report_access,
     },
     store::{AccessRow, CallStore, access_rows, not_in_lock_count},
     tr,
@@ -556,9 +555,15 @@ impl Session {
             let failures = cx
                 .background_executor()
                 .spawn(async move {
-                    lenslet_core::findings::analyze(rows.iter().map(|row| &row.core))
+                    // The CLI's own tally, so live findings match the report.
+                    let mut summary = lenslet_core::summary::Summary::default();
+                    for row in rows.iter() {
+                        summary.observe(&row.core);
+                    }
+                    summary
+                        .findings(lenslet_core::lock::FILE_NAME)
                         .into_iter()
-                        .filter(|f| f.kind == FindingKind::Failure)
+                        .filter(|f| matches!(f, Finding::Failure(_)))
                         .collect::<Vec<_>>()
                 })
                 .await;
@@ -588,13 +593,18 @@ impl Session {
         self.lock.path.clone()
     }
 
-    /// Accept permissions into the lock (`(access, test, implied)`).
+    /// Accept permissions into the lock (`(access, test, implied)`; the lock
+    /// itself records only `# test`).
     pub fn accept(&mut self, entries: Vec<(Access, bool, bool)>, cx: &mut Context<Self>) {
+        let entries: Vec<(Access, bool)> = entries
+            .into_iter()
+            .map(|(access, test, _implied)| (access, test))
+            .collect();
         let (Some(path), false) = (self.lock_target(), entries.is_empty()) else {
             return;
         };
         self.edit_lock(cx, move || {
-            lockfile::accept_with_implied(&path, &entries).map(|added| {
+            lockfile::accept(&path, &entries).map(|added| {
                 tr!(
                     "Added {added} to lenslet.lock",
                     "已向 lenslet.lock 写入 {added} 项权限"

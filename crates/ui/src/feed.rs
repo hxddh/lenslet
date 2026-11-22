@@ -480,7 +480,7 @@ pub fn list_runs(dir: &Path) -> Vec<RunSummary> {
         .map(|path| RunSummary {
             id: lenslet_core::runs::run_id(&path),
             header: crate::model::read_header(&path),
-            report: lenslet_core::runs::report(&path),
+            report: lenslet_core::runs::report(&path).ok().flatten(),
             path,
         })
         .collect()

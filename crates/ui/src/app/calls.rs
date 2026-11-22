@@ -326,7 +326,7 @@ impl CallsList {
 
     /// A finding was clicked: select its first call.
     pub fn show_finding(&mut self, finding: &Finding, cx: &mut Context<Self>) {
-        let Some(first) = finding.calls.first().cloned() else {
+        let Some(first) = finding.calls().first().cloned() else {
             return;
         };
         if !self.view_contains(&first) {
@@ -580,7 +580,7 @@ impl CallsList {
                     title,
                     new,
                 } => {
-                    let calls = finding.calls.len();
+                    let calls = finding.calls().len();
                     item(id, t.red, "●", ui.tr(&title).to_string())
                         .cursor_pointer()
                         .hover(move |s| s.bg(rgb(t.row_hover)))
@@ -784,7 +784,7 @@ impl CallsList {
 pub enum StripItem {
     /// A failure (the first call it names is selected on click).
     Failure {
-        finding: Finding,
+        finding: Box<Finding>,
         title: Tr,
         new: bool,
     },
@@ -813,7 +813,7 @@ pub fn strip_items(
         .take(FINDINGS_SHOWN)
         .map(|finding| {
             let call = finding
-                .calls
+                .calls()
                 .first()
                 .and_then(|id| rows.iter().find(|row| &row.id == id));
             let title = match call {
@@ -826,13 +826,13 @@ pub fn strip_items(
                         "{service} {op} 失败：{code}"
                     )
                 }
-                None => Tr::new(finding.title.clone(), finding.title.clone()),
+                None => Tr::new(finding.title().to_string(), finding.title().to_string()),
             };
             let new = call
                 .and_then(|c| c.failure_kind())
                 .is_some_and(|kind| new_failures.contains(&kind));
             StripItem::Failure {
-                finding: finding.clone(),
+                finding: Box::new(finding.clone()),
                 title,
                 new,
             }
@@ -1029,14 +1029,6 @@ fn call_row(
     }
     if badges.not_in_lock {
         title = title.child(widgets::badge(ui, ui.t("NOT IN LOCK", "未入锁"), t.amber));
-    }
-    if let Some(role) = trace.caller_role.as_deref() {
-        let short_role = role.rsplit('/').next().unwrap_or(role);
-        title = title.child(widgets::badge(
-            ui,
-            format!("role/{}", ellipsize(short_role, 18)),
-            t.text_muted,
-        ));
     }
 
     let line = |s: String, color: u32| {

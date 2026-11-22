@@ -7,7 +7,7 @@ use std::{collections::HashMap, ops::Range, sync::Arc};
 use gpui::HighlightStyle;
 
 use crate::{
-    model::{Body, decode_aws_semantic, format_hex_dump, pretty_body},
+    model::{Body, decode_aws_semantic, pretty_body},
     syntax::{SyntaxKind, find_search_matches, highlight_code},
     theme::Palette,
 };
@@ -288,9 +288,6 @@ pub fn build(
         doc.decoder = decoder;
         doc.decodable = decodable;
         return doc;
-    }
-    if let Some(hex) = body.hex.as_deref().filter(|hex| !hex.is_empty()) {
-        return BodyDoc::from_text(format_hex_dump(hex), SyntaxKind::Hex, tokens, p);
     }
     BodyDoc::default()
 }

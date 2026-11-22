@@ -214,11 +214,7 @@ impl Inspector {
         }
         let message = self.message(&call);
         let source: Option<Body> = message.body.clone();
-        let content_type = message
-            .raw_content_type
-            .clone()
-            .or_else(|| message.content_type.clone())
-            .unwrap_or_default();
+        let content_type = message.content_type.clone().unwrap_or_default();
         let tokens = self.tokens.clone();
         let mode = self.mode;
         let palette = ui.p;
@@ -534,13 +530,6 @@ impl Inspector {
                     .child(widgets::mono(ui, resource)),
             );
         }
-        if let Some(role) = call.caller_role.as_deref() {
-            list = list.child(widgets::meta_row(
-                ui,
-                ui.t("Assumed role", "调用角色"),
-                widgets::mono(ui, role.to_string()),
-            ));
-        }
         div()
             .flex()
             .flex_col()
@@ -831,20 +820,7 @@ impl Inspector {
 fn body_meta(message: &Message, ui: &Ui) -> String {
     let mut parts = Vec::new();
     if let Some(body) = message.body.as_ref() {
-        let size = body_size(body);
-        match body.decoded_bytes.map(|d| d as usize) {
-            Some(decoded) if decoded != size => {
-                let (wire, decoded) = (format_bytes(size), format_bytes(decoded));
-                parts.push(
-                    ui.tr(&tr!(
-                        "{wire} on the wire → {decoded} decoded",
-                        "传输 {wire} → 解码后 {decoded}"
-                    ))
-                    .to_string(),
-                );
-            }
-            _ => parts.push(format_bytes(size)),
-        }
+        parts.push(format_bytes(body_size(body)));
         if let Some(encoding) = body.encoding.as_deref() {
             parts.push(encoding.to_string());
         }
@@ -855,11 +831,7 @@ fn body_meta(message: &Message, ui: &Ui) -> String {
             parts.push(ui.t("binary", "二进制").into());
         }
     }
-    if let Some(ct) = message
-        .raw_content_type
-        .as_deref()
-        .or(message.content_type.as_deref())
-    {
+    if let Some(ct) = message.content_type.as_deref() {
         parts.push(ct.to_string());
     }
     parts.join(" · ")
