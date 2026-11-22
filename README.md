@@ -64,6 +64,10 @@ cd lenslet
 cargo run --release
 ```
 
+On macOS, apply the one-line portability patch to the emulator first
+(`git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch`):
+its Lambda service reads per-thread memory usage, which only Linux reports.
+
 The window uses [Native Shell](https://github.com/longbridge/nsh): AppKit on
 macOS, GTK 4 on Linux. On Linux, install `libgtk-4-dev` first. The first
 build compiles the emulator and takes a while.

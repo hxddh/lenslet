@@ -85,6 +85,8 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           submodules: true
+      - name: Patch AWS Emulator for macOS (see patches/)
+        run: git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
