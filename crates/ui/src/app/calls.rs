@@ -1,4 +1,4 @@
-//! The Calls list: filter chips, findings, the run mini-map and a virtualized
+//! The Calls list: the run's findings first, filter chips, the run mini-map and a virtualized
 //! table. Its view (filtered row indices) is recomputed when inputs change —
 //! incrementally for appends, on the background executor for large searches —
 //! never in render.
@@ -22,13 +22,16 @@ use super::{
     widgets,
 };
 use crate::{
-    fonts, glyph, i18n,
+    daemon::{EmulatorStatus, MOTO_INSTALL},
+    fonts, glyph,
+    i18n::{self, Tr},
     model::{
         CallFilter, ServiceFacet, StatusFilter, Trace, display_path, ellipsize, format_latency,
         format_offset, operation_label, search_tokens, short_clock, status_label,
     },
     store::{BACKGROUND_SEARCH_ROWS, Stats, ViewQuery, filter_rows},
     theme::{self, Ui, text},
+    tr,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -43,14 +46,15 @@ pub enum SortCol {
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(60);
 const PAGE_ROWS: isize = 20;
-const START_COMMAND: &str = "lenslet pytest";
 
 pub enum CallsEvent {
     /// The selected call changed (or was replaced by its finished line).
     Selected(Option<Arc<Trace>>),
     /// Right-click on a row.
     ContextMenu(Point<Pixels>, Arc<Trace>),
-    Toast(String),
+    /// "Review N permissions →": open Access filtered to Not in lock.
+    ReviewNotInLock,
+    Toast(Tr),
 }
 
 pub struct CallsList {
@@ -69,6 +73,8 @@ pub struct CallsList {
     /// The user picked a row; stop following the newest call.
     pinned: bool,
     findings_open: bool,
+    /// What ▶ will talk to (from `lenslet doctor`), for the welcome screen.
+    emulator: EmulatorStatus,
     sort_col: SortCol,
     sort_asc: bool,
     group_retries: bool,
@@ -99,7 +105,7 @@ impl CallsList {
                     cx.notify();
                 }
             }
-            SessionEvent::Runs | SessionEvent::Toast(_) => {}
+            SessionEvent::Runs | SessionEvent::Log | SessionEvent::Toast(_) => {}
         });
         let mut list = CallsList {
             session,
@@ -116,6 +122,7 @@ impl CallsList {
             selected: None,
             pinned: false,
             findings_open: true,
+            emulator: EmulatorStatus::Checking,
             sort_col: SortCol::Time,
             sort_asc: true,
             group_retries: false,
@@ -127,6 +134,13 @@ impl CallsList {
         };
         list.on_run_changed(cx);
         list
+    }
+
+    pub fn set_emulator_status(&mut self, status: EmulatorStatus, cx: &mut Context<Self>) {
+        if self.emulator != status {
+            self.emulator = status;
+            cx.notify();
+        }
     }
 
     pub fn selected(&self) -> Option<Arc<Trace>> {
@@ -644,11 +658,11 @@ impl CallsList {
                 widgets::chip(
                     ui,
                     "load-all-evicted",
-                    if ui.zh() {
-                        format!("+{evicted} 更早调用 · 加载全部")
-                    } else {
-                        format!("+{evicted} earlier · Load all")
-                    },
+                    ui.tr(&tr!(
+                        "+{evicted} earlier · Load all",
+                        "+{evicted} 更早调用 · 加载全部"
+                    ))
+                    .to_string(),
                     None,
                     true,
                     t.amber,
@@ -669,11 +683,8 @@ impl CallsList {
             bar = bar.child(
                 widgets::badge(
                     ui,
-                    if ui.zh() {
-                        format!("{skipped} 行解析跳过")
-                    } else {
-                        format!("{skipped} corrupt lines")
-                    },
+                    ui.tr(&tr!("{skipped} unreadable lines", "{skipped} 行无法解析"))
+                        .to_string(),
                     t.red,
                 )
                 .id("corrupt-lines-badge")
@@ -1053,81 +1064,100 @@ impl CallsList {
     }
 
     fn render_empty(&self, ui: &Ui, health: &Health, cx: &mut Context<Self>) -> AnyElement {
-        let weak = cx.entity().downgrade();
-        let lang = ui.lang;
-        let command = widgets::command_line(ui, START_COMMAND, move |_, cx| {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(START_COMMAND.to_string()));
-            weak.update(cx, |_, cx| {
-                cx.emit(CallsEvent::Toast(i18n::copied("command", lang)))
-            })
-            .ok();
-        });
         match health {
             Health::Loading => widgets::skeleton_rows(ui, 10).into_any_element(),
-            Health::Missing => widgets::empty_state(
-                ui,
-                ui.t("Welcome to Lenslet", "欢迎使用 Lenslet"),
-                ui.t(
-                    "Open your project folder to run tests in 1 click (powered by Lenslet's built-in AWS sandbox — no external emulator required), or explore an interactive demo first.",
-                    "打开你的项目目录即可一键运行测试（内置有状态 AWS 沙盒，无需安装 LocalStack / Moto 等外部模拟器），也可以先一键体验交互示例。",
-                ),
-                Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .justify_center()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    widgets::primary_button(
-                                        ui,
-                                        "empty-open-project",
-                                        ui.t("Open Project Folder…", "打开项目文件夹…"),
+            Health::Missing => {
+                let t = ui.p;
+                let status = &self.emulator;
+                let color = if status.ok() { t.green } else { t.amber };
+                let mut status_row = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(glyph::dot(theme::h(color, 1.0), 7.0))
+                    .child(
+                        div()
+                            .text_size(px(text::MD))
+                            .text_color(rgb(t.text_soft))
+                            .child(ui.tr(&status.message()).to_string()),
+                    );
+                if *status == EmulatorStatus::Missing {
+                    let weak = cx.entity().downgrade();
+                    status_row = status_row.child(
+                        widgets::button(ui, "welcome-copy-install", ui.t("Copy", "复制")).on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    MOTO_INSTALL.to_string(),
+                                ));
+                                weak.update(cx, |_, cx| {
+                                    cx.emit(CallsEvent::Toast(i18n::copied("pip install")))
+                                })
+                                .ok();
+                            },
+                        ),
+                    );
+                }
+                widgets::empty_state(
+                    ui,
+                    ui.t("Welcome to Lenslet", "欢迎使用 Lenslet"),
+                    ui.t(
+                        "Open your project and press ▶ to run its tests against a local AWS emulator. Every call they make shows up here.",
+                        "打开项目并按 ▶，即可针对本地 AWS 模拟器运行测试，所有调用都会显示在这里。",
+                    ),
+                    Some(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        widgets::primary_button(
+                                            ui,
+                                            "empty-open-project",
+                                            ui.t("Open Project Folder…", "打开项目目录…"),
+                                        )
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(super::OpenWorkspace),
+                                                cx,
+                                            );
+                                        }),
                                     )
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(super::OpenWorkspace), cx);
-                                    }),
-                                )
-                                .child(
-                                    widgets::button(
-                                        ui,
-                                        "empty-explore-demo",
-                                        ui.t("Explore Interactive Demo", "浏览交互示例"),
-                                    )
-                                    .on_click(|_, window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(super::ToggleDemoAction), cx);
-                                    }),
-                                )
-                                .child(
-                                    widgets::button(
-                                        ui,
-                                        "empty-open-term",
-                                        ui.t("Open Lenslet Terminal", "打开抓包终端"),
-                                    )
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(super::OpenTerminalAction),
-                                            cx,
-                                        );
-                                    }),
-                                ),
-                        )
-                        .child(command)
-                        .into_any_element(),
-                ),
-            )
-            .into_any_element(),
+                                    .child(
+                                        widgets::button(
+                                            ui,
+                                            "empty-explore-demo",
+                                            ui.t("Explore the Demo", "浏览演示"),
+                                        )
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(super::ToggleDemoAction),
+                                                cx,
+                                            );
+                                        }),
+                                    ),
+                            )
+                            .child(status_row)
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element()
+            }
             Health::Error(error) => widgets::empty_state(
                 ui,
                 ui.t("Can't read the run file", "无法读取运行文件"),
-                format!("{error}. {}", ui.t("Press ⌘R to try again.", "按 ⌘R 重试。")),
+                format!(
+                    "{error}. {}",
+                    ui.t(
+                        "Pick the run again from the run list to retry.",
+                        "请从运行列表中重新选择该运行以重试。"
+                    )
+                ),
                 None,
             )
             .into_any_element(),
@@ -1251,21 +1281,19 @@ impl Render for CallsList {
         let span_ms = session.run_span_ms().max(1);
         let changes = session.changes.clone();
         let is_demo = session.demo;
-        let editable_lock = session.can_edit_lock();
         let has_policy_gate = session
             .run
             .as_ref()
             .is_some_and(|r| r.header.policy.is_some());
         let vs_lock = session.baseline == super::session::Baseline::Lock && !has_policy_gate;
-        let not_in_lock: Vec<(crate::model::Access, bool, bool)> = if !is_demo && vs_lock {
+        let not_in_lock = if vs_lock {
             session
                 .access_rows
                 .iter()
                 .filter(|r| r.used && !r.in_lock)
-                .map(|r| (r.access.clone(), false, r.implied))
-                .collect()
+                .count()
         } else {
-            Vec::new()
+            0
         };
 
         let guided_banner: Option<Div> = if is_demo {
@@ -1312,10 +1340,8 @@ impl Render for CallsList {
                         ),
                     ),
             )
-        } else if !not_in_lock.is_empty() {
-            let n = not_in_lock.len();
-            let sess_ent = self.session.clone();
-            let accept_entries = not_in_lock;
+        } else if not_in_lock > 0 {
+            let n = not_in_lock;
             Some(
                 div()
                     .flex()
@@ -1336,46 +1362,22 @@ impl Render for CallsList {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(if ui.zh() {
-                                format!("本次运行使用了 {n} 项尚未锁定的 AWS 权限")
-                            } else {
-                                format!(
-                                    "This run used {n} unlocked AWS permission{}",
-                                    if n == 1 { "" } else { "s" }
-                                )
-                            }),
+                            .child(
+                                ui.tr(&tr!(
+                                    "This run used {n} permissions that are not in lenslet.lock",
+                                    "本次运行使用了 {n} 项不在 lenslet.lock 中的权限"
+                                ))
+                                .to_string(),
+                            ),
                     )
-                    .child(if editable_lock {
-                        widgets::primary_button(
-                            &ui,
-                            "banner-save-lock",
-                            ui.t("Save to lenslet.lock", "一键保存至 lenslet.lock"),
-                        )
-                        .on_click(move |_, _, cx| {
-                            let entries = accept_entries.clone();
-                            sess_ent.update(cx, |s, cx| s.accept(entries, cx));
-                        })
-                        .into_any_element()
-                    } else {
-                        widgets::primary_button(
-                            &ui,
-                            "banner-pick-ws",
-                            ui.t("Choose Folder for lenslet.lock…", "选择项目目录保存 lock…"),
-                        )
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(super::OpenWorkspace), cx);
-                        })
-                        .into_any_element()
-                    })
                     .child(
-                        widgets::button(
+                        widgets::primary_button(
                             &ui,
-                            "banner-review-access",
-                            ui.t("Review & Export Policy →", "查看并导出 IAM 策略 →"),
+                            "banner-review",
+                            ui.tr(&tr!("Review {n} permissions →", "查看 {n} 项权限 →"))
+                                .to_string(),
                         )
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(super::ShowAccess), cx);
-                        }),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CallsEvent::ReviewNotInLock))),
                     ),
             )
         } else {
@@ -1434,9 +1436,9 @@ impl Render for CallsList {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .bg(rgb(t.panel))
-            .child(self.render_subbar(&ui, cx))
-            .children(guided_banner)
             .children(self.render_findings(&ui, &findings, cx))
+            .children(guided_banner)
+            .child(self.render_subbar(&ui, cx))
             .children(self.render_timeline(&ui, start_ms, span_ms, cx))
             .child(self.render_head(&ui, cx))
             .child(body)

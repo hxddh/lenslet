@@ -1,21 +1,14 @@
-//! Interactive Request Composer & Local SigV4 Re-signer (`Edit & Replay` ⇧⌘⏎ / `New Request` ⇧⌘N).
-//!
-//! Lets developers either mutate a captured AWS call or craft a brand-new AWS
-//! request from scratch using 1-click service templates, edit HTTP method,
-//! path/query, target loopback URL, service/region, multiple header overrides
-//! (`Key: Value; -RemoveHeader`), and payload body, automatically sign with
-//! `AWS4-HMAC-SHA256`, and dispatch strictly over local loopback.
+//! Edit & Replay (⇧⌘⏎): change a captured call (method, path, signing
+//! service/region, headers, body), re-sign it with `AWS4-HMAC-SHA256` and
+//! send it again, strictly over local loopback.
 
 use std::path::PathBuf;
 
-use gpui::{
-    AnyElement, App, Context, ElementId, Entity, EventEmitter, FontWeight, Render, Window, div,
-    prelude::*, px, rgb,
-};
+use gpui::{AnyElement, Context, Entity, EventEmitter, Render, Window, div, prelude::*, px, rgb};
 
 use super::widgets;
 use crate::{
-    fonts,
+    i18n::Tr,
     model::{Header, Trace},
     replay::{self, ComposedRequest, ReplayState, ReplayTarget},
     search::SearchInput,
@@ -25,64 +18,10 @@ use crate::{
 pub enum ComposerEvent {
     Close,
     Sent(String, ReplayState),
-    ScratchResult(String),
 }
-
-struct AwsTemplate {
-    label: &'static str,
-    service: &'static str,
-    method: &'static str,
-    path: &'static str,
-    headers: &'static str,
-    body: &'static str,
-}
-
-const SCRATCH_TEMPLATES: &[AwsTemplate] = &[
-    AwsTemplate {
-        label: "S3 ListBuckets",
-        service: "s3",
-        method: "GET",
-        path: "/",
-        headers: "",
-        body: "",
-    },
-    AwsTemplate {
-        label: "S3 PutObject",
-        service: "s3",
-        method: "PUT",
-        path: "/test-bucket/hello.txt",
-        headers: "content-type: text/plain",
-        body: "hello from lenslet",
-    },
-    AwsTemplate {
-        label: "DynamoDB ListTables",
-        service: "dynamodb",
-        method: "POST",
-        path: "/",
-        headers: "x-amz-target: DynamoDB_20120810.ListTables; content-type: application/x-amz-json-1.0",
-        body: "{\"Limit\": 25}",
-    },
-    AwsTemplate {
-        label: "SQS ListQueues",
-        service: "sqs",
-        method: "POST",
-        path: "/",
-        headers: "x-amz-target: AmazonSQS.ListQueues; content-type: application/x-amz-json-1.0",
-        body: "{}",
-    },
-    AwsTemplate {
-        label: "STS CallerIdentity",
-        service: "sts",
-        method: "POST",
-        path: "/",
-        headers: "content-type: application/x-www-form-urlencoded",
-        body: "Action=GetCallerIdentity&Version=2011-06-15",
-    },
-];
 
 pub struct RequestComposer {
     call_id: String,
-    scratch_mode: bool,
     host: String,
     encoding: Option<String>,
     base_headers: Vec<Header>,
@@ -90,7 +29,7 @@ pub struct RequestComposer {
     home: PathBuf,
     resign_sigv4: bool,
     sending: bool,
-    last_scratch_status: Option<(u16, String)>,
+    error: Option<Tr>,
     target_input: Entity<SearchInput>,
     service_input: Entity<SearchInput>,
     region_input: Entity<SearchInput>,
@@ -128,7 +67,6 @@ impl RequestComposer {
         let body_input = cx.new(|cx| SearchInput::new_field("", "{\"Key\": ...}", true, cx));
         Self {
             call_id: String::new(),
-            scratch_mode: false,
             host: String::new(),
             encoding: None,
             base_headers: Vec::new(),
@@ -136,7 +74,7 @@ impl RequestComposer {
             home,
             resign_sigv4: true,
             sending: false,
-            last_scratch_status: None,
+            error: None,
             target_input,
             service_input,
             region_input,
@@ -155,8 +93,7 @@ impl RequestComposer {
         cx: &mut Context<Self>,
     ) {
         self.call_id = call.id.clone();
-        self.scratch_mode = false;
-        self.last_scratch_status = None;
+        self.error = None;
         self.host = call.host.clone();
         let service = call.service.clone();
         let region = call
@@ -212,43 +149,6 @@ impl RequestComposer {
         cx.notify();
     }
 
-    pub fn load_scratch(
-        &mut self,
-        target: ReplayTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.call_id.clear();
-        self.scratch_mode = true;
-        self.last_scratch_status = None;
-        self.host.clear();
-        self.encoding = None;
-        self.base_headers.clear();
-        self.via_proxy = target.via_proxy;
-        self.resign_sigv4 = true;
-        self.sending = false;
-        self.target_input
-            .update(cx, |i, cx| i.set_text(target.url, cx));
-        self.region_input
-            .update(cx, |i, cx| i.set_text("us-east-1", cx));
-        self.apply_template(&SCRATCH_TEMPLATES[0], cx);
-        let focus = self.path_input.read(cx).handle();
-        window.focus(&focus);
-        cx.notify();
-    }
-
-    fn apply_template(&mut self, tpl: &AwsTemplate, cx: &mut Context<Self>) {
-        self.service_input
-            .update(cx, |i, cx| i.set_text(tpl.service, cx));
-        self.method_input
-            .update(cx, |i, cx| i.set_text(tpl.method, cx));
-        self.path_input.update(cx, |i, cx| i.set_text(tpl.path, cx));
-        self.header_input
-            .update(cx, |i, cx| i.set_text(tpl.headers, cx));
-        self.body_input.update(cx, |i, cx| i.set_text(tpl.body, cx));
-        cx.notify();
-    }
-
     pub fn send(&mut self, cx: &mut Context<Self>) {
         if self.sending {
             return;
@@ -259,16 +159,18 @@ impl RequestComposer {
         }
         let target = ReplayTarget {
             url: target_url,
-            via_proxy: self.via_proxy && !self.call_id.is_empty(),
+            via_proxy: self.via_proxy,
         };
-        let service = {
-            let s = self.service_input.read(cx).query().trim().to_string();
-            if s.is_empty() { "s3".into() } else { s }
-        };
-        let region = {
-            let r = self.region_input.read(cx).query().trim().to_string();
-            if r.is_empty() { "us-east-1".into() } else { r }
-        };
+        let service = self.service_input.read(cx).query().trim().to_string();
+        let region = self.region_input.read(cx).query().trim().to_string();
+        if self.resign_sigv4
+            && let Err(err) = replay::signing_scope(&service, &region)
+        {
+            self.error = Some(err);
+            cx.notify();
+            return;
+        }
+        self.error = None;
         let method = self.method_input.read(cx).query().trim().to_string();
         let path = {
             let p = self.path_input.read(cx).query().trim().to_string();
@@ -320,12 +222,9 @@ impl RequestComposer {
             resign_sigv4: self.resign_sigv4,
         };
         let call_id = self.call_id.clone();
-        let scratch = self.scratch_mode || call_id.is_empty();
         let home = self.home.clone();
         self.sending = true;
-        if !scratch {
-            cx.emit(ComposerEvent::Sent(call_id.clone(), ReplayState::Running));
-        }
+        cx.emit(ComposerEvent::Sent(call_id.clone(), ReplayState::Running));
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -335,37 +234,12 @@ impl RequestComposer {
                 .await;
             this.update(cx, |composer, cx| {
                 composer.sending = false;
-                if scratch {
-                    match outcome {
-                        Ok(done) => {
-                            let preview = done
-                                .body_text
-                                .as_deref()
-                                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-                                .unwrap_or_default();
-                            composer.last_scratch_status = Some((
-                                done.status,
-                                format!("HTTP {} · {} ms · {}", done.status, done.ms, preview),
-                            ));
-                            cx.emit(ComposerEvent::ScratchResult(format!(
-                                "Request completed: HTTP {} ({} ms)",
-                                done.status, done.ms
-                            )));
-                        }
-                        Err(err) => {
-                            composer.last_scratch_status = Some((599, err.clone()));
-                            cx.emit(ComposerEvent::ScratchResult(err));
-                        }
-                    }
-                    cx.notify();
-                } else {
-                    let state = match outcome {
-                        Ok(done) => ReplayState::Done(done),
-                        Err(err) => ReplayState::Failed(err),
-                    };
-                    cx.emit(ComposerEvent::Sent(call_id, state));
-                    cx.emit(ComposerEvent::Close);
-                }
+                let state = match outcome {
+                    Ok(done) => ReplayState::Done(done),
+                    Err(err) => ReplayState::Failed(err),
+                };
+                cx.emit(ComposerEvent::Sent(call_id, state));
+                cx.emit(ComposerEvent::Close);
             })
             .ok();
         })
@@ -387,199 +261,137 @@ impl Render for RequestComposer {
 
         let mut method_chips = div().flex().items_center().gap(px(4.0));
         for m in ["POST", "GET", "PUT", "DELETE", "HEAD"] {
-            let active = cur_method == m;
             method_chips = method_chips.child(
-                widgets::chip(&ui, m, m, None, active, t.accent)
-                    .on_click(cx.listener(move |comp, _, _, cx| comp.set_method(m, cx))),
-            );
-        }
-
-        let mut tpl_bar = div().flex().flex_wrap().items_center().gap(px(5.0));
-        for (ix, tpl) in SCRATCH_TEMPLATES.iter().enumerate() {
-            tpl_bar = tpl_bar.child(
-                widgets::chip(
+                widgets::tabbable(
                     &ui,
-                    ElementId::named_usize("scratch-tpl", ix),
-                    tpl.label,
-                    None,
-                    false,
-                    t.accent,
+                    widgets::chip(&ui, m, m, None, cur_method == m, t.accent),
                 )
-                .on_click(cx.listener(move |comp, _, _, cx| {
-                    comp.apply_template(&SCRATCH_TEMPLATES[ix], cx);
-                })),
+                .on_click(cx.listener(move |comp, _, _, cx| comp.set_method(m, cx))),
             );
         }
 
-        let service_str = self.service_input.read(cx).query().to_string();
-        let region_str = self.region_input.read(cx).query().to_string();
-
-        let card = div()
-            .id("composer-modal")
-            .w(px(680.0))
-            .flex()
-            .flex_col()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgb(t.border))
-            .bg(rgb(t.panel_raised))
-            .shadow(ui.elevation())
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Close)))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(46.0))
-                    .px(px(18.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border_subtle))
-                    .child(
+        let card = widgets::dialog_card(
+            &ui,
+            "composer-modal",
+            680.0,
+            ui.t("Edit & Replay", "编辑并重放"),
+        )
+        .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Close)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .p(px(18.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(div().flex_1().child(field_block(
+                            &ui,
+                            ui.t("SEND TO (LOOPBACK ONLY)", "发送到（仅本机回环）"),
+                            self.target_input.clone(),
+                        )))
+                        .child(div().w(px(120.0)).child(field_block(
+                            &ui,
+                            "SERVICE",
+                            self.service_input.clone(),
+                        )))
+                        .child(div().w(px(120.0)).child(field_block(
+                            &ui,
+                            "REGION",
+                            self.region_input.clone(),
+                        ))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(div().w(px(88.0)).child(self.method_input.clone()))
+                        .child(method_chips),
+                )
+                .child(field_block(
+                    &ui,
+                    ui.t("PATH & QUERY", "路径与查询参数"),
+                    self.path_input.clone(),
+                ))
+                .child(field_block(
+                    &ui,
+                    ui.t(
+                        "HEADERS (Key: Value; Key2: Value2; -RemoveKey)",
+                        "Headers（用 ; 分隔，-Header 表示移除）",
+                    ),
+                    self.header_input.clone(),
+                ))
+                .child(field_block(
+                    &ui,
+                    ui.t("BODY", "请求体"),
+                    self.body_input.clone(),
+                ))
+                .when_some(self.error.as_ref(), |el, err| {
+                    el.child(
                         div()
-                            .text_size(px(text::XL))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text))
-                            .child(if self.scratch_mode {
-                                ui.t("Compose Local AWS Request", "新建本地 AWS 请求")
+                            .p(px(8.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(theme::h(t.red, 0.4))
+                            .bg(theme::h(t.red, 0.08))
+                            .text_size(px(text::SM))
+                            .text_color(rgb(t.red))
+                            .child(ui.tr(err).to_string()),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(18.0))
+                .py(px(12.0))
+                .border_t_1()
+                .border_color(rgb(t.border_subtle))
+                .child(
+                    widgets::checkbox(
+                        &ui,
+                        "toggle-sigv4",
+                        ui.t("Sign with AWS SigV4", "使用 AWS SigV4 签名"),
+                        self.resign_sigv4,
+                    )
+                    .on_click(cx.listener(|comp, _, _, cx| {
+                        comp.resign_sigv4 = !comp.resign_sigv4;
+                        comp.error = None;
+                        cx.notify();
+                    })),
+                )
+                .child(div().flex_1())
+                .child(
+                    widgets::tabbable(
+                        &ui,
+                        widgets::button(&ui, "close-composer", ui.t("Cancel", "取消")),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Close))),
+                )
+                .child(
+                    widgets::tabbable(
+                        &ui,
+                        widgets::primary_button(
+                            &ui,
+                            "composer-send",
+                            if self.sending {
+                                ui.t("Sending…", "发送中…")
                             } else {
-                                ui.t("Edit & Replay Request", "编辑并重放请求")
-                            }),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        widgets::button(&ui, "close-composer", ui.t("Close", "关闭"))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Close))),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .p(px(18.0))
-                    .when(self.scratch_mode, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.0))
-                                .child(widgets::label(&ui, ui.t("QUICK TEMPLATES", "快速请求模板")))
-                                .child(tpl_bar),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().flex_1().child(field_block(
-                                &ui,
-                                ui.t("TARGET LOOPBACK ENDPOINT", "目标本地回环地址"),
-                                self.target_input.clone(),
-                            )))
-                            .child(div().w(px(120.0)).child(field_block(
-                                &ui,
-                                "SERVICE",
-                                self.service_input.clone(),
-                            )))
-                            .child(div().w(px(120.0)).child(field_block(
-                                &ui,
-                                "REGION",
-                                self.region_input.clone(),
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().w(px(88.0)).child(self.method_input.clone()))
-                            .child(method_chips),
-                    )
-                    .child(field_block(
-                        &ui,
-                        ui.t("PATH & QUERY", "请求路径与查询参数"),
-                        self.path_input.clone(),
-                    ))
-                    .child(field_block(
-                        &ui,
-                        ui.t(
-                            "HEADERS (`Key: Val; Key2: Val2; -RemoveKey`)",
-                            "覆盖/增删 Headers（用 `;` 分隔，`-Header` 移除）",
+                                ui.t("Send", "发送")
+                            },
                         ),
-                        self.header_input.clone(),
-                    ))
-                    .child(field_block(
-                        &ui,
-                        ui.t("REQUEST BODY", "请求报文体 (JSON / XML / Form)"),
-                        self.body_input.clone(),
-                    ))
-                    .when_some(self.last_scratch_status.as_ref(), |el, (code, msg)| {
-                        let c = if *code < 400 { t.green } else { t.red };
-                        el.child(
-                            div()
-                                .p(px(8.0))
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(theme::h(c, 0.4))
-                                .bg(theme::h(c, 0.08))
-                                .font(fonts::mono_font())
-                                .text_size(px(text::XS))
-                                .text_color(rgb(c))
-                                .child(msg.clone()),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .pt(px(4.0))
-                            .child(
-                                widgets::chip(
-                                    &ui,
-                                    "toggle-sigv4",
-                                    format!(
-                                        "{} ({}/{})",
-                                        ui.t("Auto sign AWS SigV4", "自动签名 AWS SigV4"),
-                                        service_str,
-                                        region_str
-                                    ),
-                                    None,
-                                    self.resign_sigv4,
-                                    t.green,
-                                )
-                                .on_click(cx.listener(
-                                    |comp, _, _, cx| {
-                                        comp.resign_sigv4 = !comp.resign_sigv4;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                widgets::primary_button(
-                                    &ui,
-                                    "composer-send",
-                                    if self.sending {
-                                        ui.t("Sending…", "发送中…")
-                                    } else {
-                                        ui.t("Send Request", "发送请求")
-                                    },
-                                )
-                                .on_click(cx.listener(|comp, _, _, cx| comp.send(cx))),
-                            ),
-                    ),
-            );
+                    )
+                    .on_click(cx.listener(|comp, _, _, cx| comp.send(cx))),
+                ),
+        );
 
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme::h(0x000000, if ui.dark() { 0.44 } else { 0.20 }))
-            .child(widgets::appear(&ui, "composer-anim", card))
+        widgets::scrim(&ui).child(widgets::appear(&ui, "composer-anim", card))
     }
 }
 
@@ -592,6 +404,6 @@ fn field_block(ui: &Ui, title: &str, input: Entity<SearchInput>) -> gpui::Div {
         .child(input)
 }
 
-pub fn render_composer_overlay(composer: &Entity<RequestComposer>, _cx: &App) -> AnyElement {
+pub fn render_composer_overlay(composer: &Entity<RequestComposer>) -> AnyElement {
     composer.clone().into_any_element()
 }

@@ -19,7 +19,11 @@ use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::ServerName;
 
-use crate::model::{Header, Trace};
+use crate::{
+    i18n::Tr,
+    model::{Header, Trace},
+    tr,
+};
 
 /// The header that tells the proxy a request replays a recorded call.
 pub const REPLAY_OF_HEADER: &str = "x-lenslet-replay-of";
@@ -31,7 +35,7 @@ const MAX_REPLAY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub enum ReplayState {
     Running,
     Done(ReplayOutcome),
-    Failed(String),
+    Failed(Tr),
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +155,7 @@ pub fn replay_call(
     trace: &Trace,
     replay_target: &ReplayTarget,
     home: &Path,
-) -> Result<ReplayOutcome, String> {
+) -> Result<ReplayOutcome, Tr> {
     replay_call_with_trace_path(trace, replay_target, home, None)
 }
 
@@ -160,7 +164,7 @@ pub fn replay_call_with_trace_path(
     replay_target: &ReplayTarget,
     home: &Path,
     trace_path: Option<&Path>,
-) -> Result<ReplayOutcome, String> {
+) -> Result<ReplayOutcome, Tr> {
     crate::fsguard::assert_io_allowed();
     let upstream_url = replay_target.url.as_str();
     let extra: Vec<(&str, &str)> = if replay_target.via_proxy {
@@ -169,7 +173,10 @@ pub fn replay_call_with_trace_path(
         Vec::new()
     };
     let target = parse_loopback_target(upstream_url).ok_or_else(|| {
-        format!("Replay refused: `{upstream_url}` is not a loopback emulator endpoint")
+        tr!(
+            "Replay refused: {upstream_url} is not a loopback emulator endpoint",
+            "已拒绝重放：{upstream_url} 不是本机回环模拟器地址"
+        )
     })?;
 
     let req_wire = build_http_request(trace, &target, &extra, trace_path)?;
@@ -177,28 +184,49 @@ pub fn replay_call_with_trace_path(
     send_wire(&target, &req_wire, is_head, home)
 }
 
+/// The SigV4 service and region to sign with; both must be given.
+pub fn signing_scope<'a>(service: &'a str, region: &'a str) -> Result<(&'a str, &'a str), Tr> {
+    match (service.trim(), region.trim()) {
+        ("", _) => Err(tr!(
+            "Enter the signing service (for example s3 or dynamodb)",
+            "请填写签名服务（例如 s3 或 dynamodb）"
+        )),
+        (_, "") => Err(tr!(
+            "Enter the signing region (for example us-east-1)",
+            "请填写签名区域（例如 us-east-1）"
+        )),
+        (service, region) => Ok((service, region)),
+    }
+}
+
 pub fn send_composed(
     req: &ComposedRequest,
     replay_target: &ReplayTarget,
     home: &Path,
-) -> Result<ReplayOutcome, String> {
+) -> Result<ReplayOutcome, Tr> {
     crate::fsguard::assert_io_allowed();
     let upstream_url = replay_target.url.as_str();
     let target = parse_loopback_target(upstream_url).ok_or_else(|| {
-        format!("Replay refused: `{upstream_url}` is not a loopback emulator endpoint")
+        tr!(
+            "Replay refused: {upstream_url} is not a loopback emulator endpoint",
+            "已拒绝重放：{upstream_url} 不是本机回环模拟器地址"
+        )
     })?;
 
     let method = req.method.trim().to_ascii_uppercase();
     if method.is_empty() || method.bytes().any(|b| !b.is_ascii_alphabetic()) {
-        return Err(format!("Invalid HTTP method `{method}`"));
+        return Err(tr!(
+            "Invalid HTTP method {method}",
+            "无效的 HTTP 方法 {method}"
+        ));
     }
-    let path = if req.path.trim().is_empty() {
+    let path = crate::sigv4::wire_path(&if req.path.trim().is_empty() {
         "/".to_string()
     } else if req.path.trim().starts_with('/') {
         req.path.trim().replace(['\r', '\n'], "")
     } else {
         format!("/{}", req.path.trim().replace(['\r', '\n'], ""))
-    };
+    });
     let host_val = if req.host.trim().is_empty() {
         format!("{}:{}", target.host, target.port)
     } else {
@@ -262,16 +290,7 @@ pub fn send_composed(
     let wire_body = encode_wire_body(&req.body, cbor_wire)?;
 
     if req.resign_sigv4 {
-        let svc = if req.service.trim().is_empty() {
-            "s3"
-        } else {
-            req.service.trim()
-        };
-        let reg = if req.region.trim().is_empty() {
-            "us-east-1"
-        } else {
-            req.region.trim()
-        };
+        let (svc, reg) = signing_scope(&req.service, &req.region)?;
         let existing_ak = clean_headers
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("authorization"))
@@ -329,15 +348,19 @@ fn is_cbor_wire(encoding: Option<&str>, headers: &[Header]) -> bool {
     })
 }
 
-fn encode_wire_body(text: &str, cbor: bool) -> Result<Vec<u8>, String> {
+fn encode_wire_body(text: &str, cbor: bool) -> Result<Vec<u8>, Tr> {
     if !cbor {
         return Ok(text.as_bytes().to_vec());
     }
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let val: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| format!("CBOR request body must be valid JSON: {e}"))?;
+    let val: serde_json::Value = serde_json::from_str(text).map_err(|e| {
+        tr!(
+            "A CBOR request body must be valid JSON: {e}",
+            "CBOR 请求体必须是合法 JSON：{e}"
+        )
+    })?;
     Ok(lenslet_core::cbor::encode_cbor(&val))
 }
 
@@ -365,17 +388,24 @@ fn unframe_aws_chunked_wire(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn decompress_wire_payload(bytes: &[u8], encoding: &str) -> Result<Vec<u8>, String> {
+fn decompress_wire_payload(bytes: &[u8], encoding: &str) -> Result<Vec<u8>, Tr> {
     let low = encoding.to_ascii_lowercase();
     let mut out = Vec::new();
     if low.contains("gzip") {
-        GzDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .map_err(|e| format!("failed to decompress gzip replay body: {e}"))?;
+        GzDecoder::new(bytes).read_to_end(&mut out).map_err(|e| {
+            tr!(
+                "Cannot decompress the gzip body: {e}",
+                "无法解压 gzip 请求体：{e}"
+            )
+        })?;
         Ok(out)
     } else if low.contains("zstd") {
-        zstd::stream::decode_all(bytes)
-            .map_err(|e| format!("failed to decompress zstd replay body: {e}"))
+        zstd::stream::decode_all(bytes).map_err(|e| {
+            tr!(
+                "Cannot decompress the zstd body: {e}",
+                "无法解压 zstd 请求体：{e}"
+            )
+        })
     } else if low.contains("deflate") {
         if ZlibDecoder::new(bytes).read_to_end(&mut out).is_ok() {
             Ok(out)
@@ -383,7 +413,12 @@ fn decompress_wire_payload(bytes: &[u8], encoding: &str) -> Result<Vec<u8>, Stri
             out.clear();
             DeflateDecoder::new(bytes)
                 .read_to_end(&mut out)
-                .map_err(|e| format!("failed to decompress deflate replay body: {e}"))?;
+                .map_err(|e| {
+                    tr!(
+                        "Cannot decompress the deflate body: {e}",
+                        "无法解压 deflate 请求体：{e}"
+                    )
+                })?;
             Ok(out)
         }
     } else {
@@ -483,26 +518,26 @@ fn send_wire(
     req_wire: &[u8],
     is_head: bool,
     home: &Path,
-) -> Result<ReplayOutcome, String> {
+) -> Result<ReplayOutcome, Tr> {
     let started = Instant::now();
     let raw_response = if target.tls {
         let stream = connect_loopback(&target.host, target.port)?;
         let tls_cfg = build_tls_config(target.port, home)?;
-        let server_name =
-            ServerName::try_from("localhost").map_err(|e| format!("TLS server name error: {e}"))?;
+        let server_name = ServerName::try_from("localhost")
+            .map_err(|e| tr!("TLS server name error: {e}", "TLS 服务器名称错误：{e}"))?;
         let conn = ClientConnection::new(Arc::new(tls_cfg), server_name)
-            .map_err(|e| format!("TLS handshake init failed: {e}"))?;
+            .map_err(|e| tr!("TLS handshake failed: {e}", "TLS 握手失败：{e}"))?;
         let mut tls_stream = StreamOwned::new(conn, stream);
         tls_stream
             .write_all(req_wire)
-            .map_err(|e| format!("TLS write failed: {e}"))?;
+            .map_err(|e| tr!("TLS write failed: {e}", "TLS 写入失败：{e}"))?;
         tls_stream.flush().ok();
         read_bounded(&mut tls_stream, is_head)?
     } else {
         let mut stream = connect_loopback(&target.host, target.port)?;
         stream
             .write_all(req_wire)
-            .map_err(|e| format!("HTTP write failed: {e}"))?;
+            .map_err(|e| tr!("HTTP write failed: {e}", "HTTP 写入失败：{e}"))?;
         stream.flush().ok();
         read_bounded(&mut stream, is_head)?
     };
@@ -511,24 +546,35 @@ fn send_wire(
     parse_http_response(&raw_response, is_head, ms)
 }
 
-fn connect_loopback(host: &str, port: u16) -> Result<TcpStream, String> {
+fn connect_loopback(host: &str, port: u16) -> Result<TcpStream, Tr> {
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
-        .map_err(|e| format!("Cannot resolve {host}:{port}: {e}"))?
+        .map_err(|e| {
+            tr!(
+                "Cannot resolve {host}:{port}: {e}",
+                "无法解析 {host}:{port}：{e}"
+            )
+        })?
         .filter(|a| a.ip().is_loopback())
         .collect();
-    let addr = addrs
-        .first()
-        .copied()
-        .ok_or_else(|| format!("No loopback address for {host}:{port}"))?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .map_err(|e| format!("Emulator {host}:{port} unreachable: {e}"))?;
+    let addr = addrs.first().copied().ok_or_else(|| {
+        tr!(
+            "No loopback address for {host}:{port}",
+            "{host}:{port} 没有本机回环地址"
+        )
+    })?;
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| {
+        tr!(
+            "The emulator at {host}:{port} is unreachable: {e}",
+            "无法连接 {host}:{port} 上的模拟器：{e}"
+        )
+    })?;
     let _ = stream.set_read_timeout(Some(REPLAY_TIMEOUT));
     let _ = stream.set_write_timeout(Some(REPLAY_TIMEOUT));
     Ok(stream)
 }
 
-fn build_tls_config(port: u16, home: &Path) -> Result<ClientConfig, String> {
+fn build_tls_config(port: u16, home: &Path) -> Result<ClientConfig, Tr> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = RootCertStore::empty();
     let emu_ca = home
@@ -555,7 +601,7 @@ fn build_http_request(
     target: &LoopbackTarget,
     extra: &[(&str, &str)],
     trace_path: Option<&Path>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Tr> {
     let path = if trace.path.starts_with('/') {
         trace.path.clone()
     } else if let Some((_, rest)) = trace.path.split_once("://") {
@@ -574,15 +620,18 @@ fn build_http_request(
 
     if let Some(b) = req_body {
         if b.blob.is_some() && exact_raw_wire.is_none() {
-            return Err(
-                "Request payload sidecar blob could not be read from blobs/; cannot replay incomplete payload"
-                    .to_string(),
-            );
+            return Err(tr!(
+                "The request body file could not be read from blobs/, so the call cannot be replayed",
+                "无法从 blobs/ 读取请求体文件，无法重放该请求"
+            ));
         }
         if exact_raw_wire.is_none()
             && (b.binary || b.truncated || (b.bytes > 0 && b.text.is_none()))
         {
-            return Err("Complete request payload is unavailable for replay".to_string());
+            return Err(tr!(
+                "The complete request body was not recorded, so the call cannot be replayed",
+                "未记录完整请求体，无法重放该请求"
+            ));
         }
     }
 
@@ -613,7 +662,10 @@ fn build_http_request(
             raw
         } else {
             let unframed = unframe_aws_chunked_wire(&raw).ok_or_else(|| {
-                "Malformed aws-chunked request wire frame cannot be replayed".to_string()
+                tr!(
+                    "The aws-chunked request body is malformed and cannot be replayed",
+                    "aws-chunked 请求体格式错误，无法重放"
+                )
             })?;
             if compressed_wire {
                 decompress_wire_payload(&unframed, body_encoding.unwrap_or_default())?
@@ -694,7 +746,7 @@ fn build_http_request(
     Ok(req)
 }
 
-fn read_bounded(reader: &mut impl Read, is_head: bool) -> Result<Vec<u8>, String> {
+fn read_bounded(reader: &mut impl Read, is_head: bool) -> Result<Vec<u8>, Tr> {
     let mut out = Vec::new();
     let mut chunk = [0u8; 8192];
     while out.len() < MAX_REPLAY_RESPONSE_BYTES {
@@ -712,11 +764,14 @@ fn read_bounded(reader: &mut impl Read, is_head: bool) -> Result<Vec<u8>, String
                 let _ = e;
                 break;
             }
-            Err(e) => return Err(format!("Read response failed: {e}")),
+            Err(e) => return Err(tr!("Reading the response failed: {e}", "读取响应失败：{e}")),
         }
     }
     if out.is_empty() {
-        return Err("Empty HTTP response from emulator".into());
+        return Err(tr!(
+            "The emulator sent an empty response",
+            "模拟器返回了空响应"
+        ));
     }
     Ok(out)
 }
@@ -795,17 +850,19 @@ fn chunked_complete(input: &[u8]) -> bool {
     false
 }
 
-fn parse_http_response(raw: &[u8], is_head: bool, ms: u64) -> Result<ReplayOutcome, String> {
+fn parse_http_response(raw: &[u8], is_head: bool, ms: u64) -> Result<ReplayOutcome, Tr> {
     let mut cursor = 0usize;
     loop {
         let mut hdr_slots = [httparse::EMPTY_HEADER; 128];
         let mut resp = httparse::Response::new(&mut hdr_slots);
         let hdr_len = match resp
             .parse(&raw[cursor..])
-            .map_err(|e| format!("Malformed HTTP response: {e}"))?
+            .map_err(|e| tr!("Malformed HTTP response: {e}", "HTTP 响应格式错误：{e}"))?
         {
             httparse::Status::Complete(offset) => offset,
-            httparse::Status::Partial => return Err("Incomplete HTTP response headers".into()),
+            httparse::Status::Partial => {
+                return Err(tr!("Incomplete HTTP response headers", "HTTP 响应头不完整"));
+            }
         };
         let status = resp.code.unwrap_or(502);
         // Skip any leading 1xx informational responses (e.g. `100 Continue`, `103 Early Hints`)
@@ -813,7 +870,10 @@ fn parse_http_response(raw: &[u8], is_head: bool, ms: u64) -> Result<ReplayOutco
         if (100..200).contains(&status) && status != 101 {
             cursor += hdr_len;
             if cursor >= raw.len() {
-                return Err("Incomplete HTTP response after 1xx informational status".into());
+                return Err(tr!(
+                    "Incomplete HTTP response after a 1xx status",
+                    "1xx 状态后 HTTP 响应不完整"
+                ));
             }
             continue;
         }
@@ -1230,6 +1290,6 @@ mod tests {
             Some(&missing_trace),
         )
         .unwrap_err();
-        assert!(err.contains("sidecar blob"), "{err}");
+        assert!(err.en.contains("blobs/"), "{err}");
     }
 }

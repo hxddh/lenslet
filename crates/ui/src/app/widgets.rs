@@ -226,6 +226,24 @@ pub fn segmented(
     segments: Vec<Segment>,
     on: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
 ) -> Div {
+    segmented_impl(ui, segments, false, on)
+}
+
+/// [`segmented`] for dialogs: each segment is a Tab stop.
+pub fn segmented_tabbable(
+    ui: &Ui,
+    segments: Vec<Segment>,
+    on: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+) -> Div {
+    segmented_impl(ui, segments, true, on)
+}
+
+fn segmented_impl(
+    ui: &Ui,
+    segments: Vec<Segment>,
+    tab: bool,
+    on: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+) -> Div {
     let t = ui.p;
     let mut row = div()
         .flex()
@@ -264,6 +282,11 @@ pub fn segmented(
         };
         if let Some((text, key)) = segment.tooltip {
             item = item.tooltip(tip(text, key));
+        }
+        if tab && !segment.active {
+            item = tabbable(ui, item.border_1().border_color(theme::h(t.border, 0.0)));
+        } else if tab {
+            item = tabbable(ui, item);
         }
         row = row.child(item);
     }
@@ -463,38 +486,6 @@ pub fn empty_state(
         .children(command)
 }
 
-/// A monospace command line with a Copy action.
-pub fn command_line(
-    ui: &Ui,
-    command: &str,
-    on_copy: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let t = ui.p;
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .pl(px(12.0))
-        .pr(px(4.0))
-        .h(px(32.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(t.border))
-        .bg(rgb(t.code))
-        .child(
-            div()
-                .font_family(fonts::mono())
-                .text_size(px(text::MD))
-                .text_color(rgb(t.text_soft))
-                .child(format!("$ {command}")),
-        )
-        .child(
-            button(ui, "copy-command", ui.t("Copy", "复制"))
-                .on_click(move |_, window, cx| on_copy(window, cx)),
-        )
-        .into_any_element()
-}
-
 /// Skeleton rows shown while a run loads, so the first frame is never blank.
 pub fn skeleton_rows(ui: &Ui, count: usize) -> Div {
     let t = ui.p;
@@ -539,4 +530,107 @@ pub fn skeleton_rows(ui: &Ui, count: usize) -> Div {
         );
     }
     col
+}
+
+/// Make a dialog control reachable with Tab / Shift-Tab (Enter or Space
+/// clicks it) and show a focus ring.
+pub fn tabbable(ui: &Ui, el: Stateful<Div>) -> Stateful<Div> {
+    let accent = ui.p.accent;
+    el.tab_index(0)
+        .focus(move |s| s.border_color(theme::h(accent, 0.9)))
+}
+
+/// A labelled checkbox row.
+pub fn checkbox(
+    ui: &Ui,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+) -> Stateful<Div> {
+    let t = ui.p;
+    let el = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .h(px(26.0))
+        .px(px(4.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(theme::h(t.border, 0.0))
+        .cursor_pointer()
+        .hover(move |s| s.bg(theme::h(t.text, 0.04)))
+        .child(
+            div()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(if checked {
+                    theme::h(t.accent, 0.9)
+                } else {
+                    theme::h(t.border, 1.0)
+                })
+                .bg(if checked {
+                    theme::h(t.accent, 0.9)
+                } else {
+                    theme::h(t.text, 0.0)
+                })
+                .text_size(px(10.0))
+                .text_color(rgb(t.canvas))
+                .when(checked, |el| el.child("✓")),
+        )
+        .child(
+            div()
+                .text_size(px(text::MD))
+                .text_color(rgb(t.text))
+                .child(label.into()),
+        );
+    tabbable(ui, el)
+}
+
+/// The dimmed backdrop a dialog sits on.
+pub fn scrim(ui: &Ui) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme::h(0x000000, if ui.dark() { 0.44 } else { 0.20 }))
+}
+
+/// A dialog card with a title row.
+pub fn dialog_card(
+    ui: &Ui,
+    id: &'static str,
+    width: f32,
+    title: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let t = ui.p;
+    div()
+        .id(id)
+        .w(px(width))
+        .flex()
+        .flex_col()
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(rgb(t.border))
+        .bg(rgb(t.panel_raised))
+        .shadow(ui.elevation())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(46.0))
+                .px(px(18.0))
+                .border_b_1()
+                .border_color(rgb(t.border_subtle))
+                .text_size(px(text::XL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(t.text))
+                .child(title.into()),
+        )
 }

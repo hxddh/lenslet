@@ -1,8 +1,8 @@
 //! The Access view: every permission the run needed, compared with the
 //! baseline (the lock by default, or another run), an optional IAM Policy
 //! Simulator (`Check policy…`), and a detail workbench to accept permissions
-//! into `lenslet.lock`, mark `# test`, or compile least-privilege policies into
-//! IAM JSON, Terraform HCL, CloudFormation, AWS SAM, and AWS CDK TypeScript.
+//! into `lenslet.lock`, mark `# test`, or export a least-privilege policy as
+//! IAM JSON or Terraform.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -24,13 +24,10 @@ use super::{
 };
 use crate::{
     body::BodyDoc,
-    fonts, glyph, i18n,
+    fonts, glyph,
+    i18n::{self, Tr},
     model::{Access, Trace, ellipsize, format_bytes, operation_label, service_label, status_label},
-    prefs::Lang,
-    store::{
-        AccessDelta, AccessFilter, AccessRow, compile_policy, compile_single_permission,
-        policy_json,
-    },
+    store::{AccessDelta, AccessFilter, AccessRow, compile_policy, compile_single_permission},
     syntax::SyntaxKind,
     theme::{self, Ui, text},
 };
@@ -43,7 +40,9 @@ pub enum AccessEvent {
     /// Show the calls that need this permission.
     FilterCalls(Access),
     SelectCall(String),
-    Toast(String),
+    /// Ask before accepting every permission not in the lock.
+    AcceptAll(Vec<(Access, bool, bool)>),
+    Toast(Tr),
 }
 
 pub struct AccessView {
@@ -146,6 +145,16 @@ impl AccessView {
         self.recompute(cx);
     }
 
+    /// Show only the permissions this run used that the lock lacks.
+    pub fn show_not_in_lock(&mut self, cx: &mut Context<Self>) {
+        self.filter = AccessFilter::Added;
+        self.recompute(cx);
+        let first = self.view.first().map(|&ix| self.rows[ix].access.clone());
+        if let Some(first) = first {
+            self.select(first, cx);
+        }
+    }
+
     pub fn clear_filter(&mut self, cx: &mut Context<Self>) -> bool {
         if self.filter == AccessFilter::All {
             return false;
@@ -223,7 +232,6 @@ impl AccessView {
 
     fn render_subbar(&self, ui: &Ui, cx: &mut Context<Self>) -> Div {
         let t = ui.p;
-        let lang = ui.lang;
         let count = |f: AccessFilter| self.rows.iter().filter(|row| f.matches(row)).count();
         let added = count(AccessFilter::Added);
         let removed = count(AccessFilter::Removed);
@@ -338,30 +346,25 @@ impl AccessView {
             .filter(|row| row.used && !row.in_lock)
             .map(|row| (row.access.clone(), false, row.implied))
             .collect();
-        if editable && !not_in_lock.is_empty() {
-            let session = self.session.clone();
+        if editable && !not_in_lock.is_empty() && self.filter == AccessFilter::Added {
             let n = not_in_lock.len();
             bar = bar.child(
                 widgets::primary_button(
                     ui,
                     "accept-all",
-                    if ui.zh() {
-                        format!("全部写入 lock（{n}）")
-                    } else {
-                        format!("Accept {n} into lock")
-                    },
+                    ui.tr(&crate::tr!("Accept all {n}…", "全部写入（{n}）…"))
+                        .to_string(),
                 )
                 .tooltip(widgets::tip(
                     ui.t(
-                        "Add every permission this run used that the lock lacks",
-                        "将本次运行使用但 lock 中缺少的权限全部写入",
+                        "Review the list, then add every permission this run used that the lock lacks",
+                        "确认列表后，将本次运行使用但 lock 中缺少的权限全部写入",
                     ),
                     None,
                 ))
-                .on_click(move |_, _, cx| {
-                    let entries = not_in_lock.clone();
-                    session.update(cx, |session, cx| session.accept(entries, cx));
-                }),
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(AccessEvent::AcceptAll(not_in_lock.clone()));
+                })),
             );
         }
         let unused_in_lock: Vec<Access> = self
@@ -377,11 +380,8 @@ impl AccessView {
                 widgets::danger_button(
                     ui,
                     "prune-unused",
-                    if ui.zh() {
-                        format!("移除未使用（{n}）")
-                    } else {
-                        format!("Prune {n} unused")
-                    },
+                    ui.tr(&crate::tr!("Remove {n} unused", "移除未使用（{n}）"))
+                        .to_string(),
                 )
                 .on_click(move |_, _, cx| {
                     let entries = unused_in_lock.clone();
@@ -389,21 +389,7 @@ impl AccessView {
                 }),
             );
         }
-        let rows = self.rows.clone();
-        bar.child(
-            widgets::button(ui, "copy-policy", ui.t("Copy policy", "复制策略"))
-                .tooltip(widgets::tip(
-                    ui.t(
-                        "IAM policy JSON for what this run used (without # test)",
-                        "本次运行所用权限的 IAM 策略 JSON（不含 # test）",
-                    ),
-                    Some(i18n::shortcut("⇧E")),
-                ))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(policy_json(&rows)));
-                    cx.emit(AccessEvent::Toast(i18n::copied("policy JSON", lang)));
-                })),
-        )
+        bar
     }
 
     fn render_head(&self, ui: &Ui) -> Div {
@@ -664,7 +650,7 @@ fn access_row(
 }
 
 /// The right-hand workbench of the Access view: permission status, policy
-/// simulation verdict, multi-format IaC compiler + export, and triggering calls.
+/// simulation verdict, the policy (IAM JSON or Terraform) and triggering calls.
 pub struct AccessDetail {
     session: Entity<Session>,
     row: Option<AccessRow>,
@@ -683,11 +669,7 @@ impl AccessDetail {
         let iac_body = cx.new(|cx| BodyView::new("iac-preview", cx));
         let sub_body = cx.subscribe(&iac_body, |_, _, event, cx| match event {
             BodyViewEvent::Copied(bytes) => {
-                let lang = Ui::of(cx).lang;
-                cx.emit(AccessEvent::Toast(i18n::copied(
-                    &format_bytes(*bytes),
-                    lang,
-                )));
+                cx.emit(AccessEvent::Toast(i18n::copied(&format_bytes(*bytes))));
             }
         });
         let sub_sess = cx.subscribe(&session, |this, _, event, cx| {
@@ -752,9 +734,10 @@ impl AccessDetail {
         } else {
             compile_single_permission(row, &opts)
         };
-        let kind = match self.iac_format {
-            PolicyFormat::IamJson => SyntaxKind::Json,
-            _ => SyntaxKind::Iac,
+        let kind = if self.iac_format == PolicyFormat::IamJson {
+            SyntaxKind::Json
+        } else {
+            SyntaxKind::Iac
         };
         let doc = Arc::new(BodyDoc::from_text(code.clone(), kind, &[], &ui.p));
         self.iac_text = code;
@@ -766,12 +749,10 @@ impl AccessDetail {
         if code.is_empty() {
             return;
         }
-        let ext = match self.iac_format {
-            PolicyFormat::IamJson => "lenslet-policy.json",
-            PolicyFormat::Terraform => "lenslet-policy.tf",
-            PolicyFormat::CloudFormation => "lenslet-cfn-policy.yaml",
-            PolicyFormat::Sam => "lenslet-sam-policy.yaml",
-            PolicyFormat::CdkTypeScript => "lenslet-policy.ts",
+        let ext = if self.iac_format == PolicyFormat::Terraform {
+            "lenslet-policy.tf"
+        } else {
+            "lenslet-policy.json"
         };
         let dir = self
             .session
@@ -781,7 +762,6 @@ impl AccessDetail {
             .filter(|r| !r.header.cwd.is_empty())
             .map(|r| std::path::PathBuf::from(&r.header.cwd))
             .unwrap_or_else(super::home);
-        let lang = Ui::of(cx).lang;
         let rx = cx.prompt_for_new_path(&dir, Some(ext));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
@@ -794,10 +774,10 @@ impl AccessDetail {
                     })
                     .await;
                 this.update(cx, |_, cx| {
-                    let msg = match (res, lang) {
-                        (Ok(()), Lang::En) => format!("Exported {}", path.display()),
-                        (Ok(()), Lang::Zh) => format!("已导出 {}", path.display()),
-                        (Err(e), _) => format!("Export error: {e}"),
+                    let p = path.display();
+                    let msg = match res {
+                        Ok(()) => crate::tr!("Exported {p}", "已导出 {p}"),
+                        Err(e) => crate::tr!("Could not export {p}: {e}", "无法导出 {p}：{e}"),
                     };
                     cx.emit(AccessEvent::Toast(msg));
                 })
@@ -813,7 +793,6 @@ impl Render for AccessDetail {
         let _scope = crate::fsguard::RenderScope::enter();
         let ui = Ui::of(cx);
         let t = ui.p;
-        let lang = ui.lang;
         let container = div()
             .id("access-detail")
             .flex()
@@ -878,7 +857,7 @@ impl Render for AccessDetail {
                 widgets::primary_button(
                     &ui,
                     "choose-ws-for-lock",
-                    ui.t("Choose Workspace for lock…", "选择工作区以写入 lock…"),
+                    ui.t("Choose project folder…", "选择项目目录…"),
                 )
                 .tooltip(widgets::tip(
                     ui.t(
@@ -984,9 +963,6 @@ impl Render for AccessDetail {
         let formats = [
             (PolicyFormat::IamJson, "IAM JSON"),
             (PolicyFormat::Terraform, "Terraform"),
-            (PolicyFormat::CloudFormation, "CFN"),
-            (PolicyFormat::Sam, "SAM"),
-            (PolicyFormat::CdkTypeScript, "CDK"),
         ];
         let mut fmt_row = div().flex().flex_wrap().items_center().gap(px(4.0));
         for (fmt, label) in formats {
@@ -1036,10 +1012,7 @@ impl Render for AccessDetail {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(widgets::label(
-                        &ui,
-                        ui.t("LEAST-PRIVILEGE IAC COMPILER", "最小权限 IaC 编译器"),
-                    ))
+                    .child(widgets::label(&ui, ui.t("POLICY", "策略")))
                     .child(div().flex_1())
                     .child(scope_seg),
             )
@@ -1054,7 +1027,7 @@ impl Render for AccessDetail {
                         widgets::button(&ui, "iac-copy", ui.t("Copy", "复制")).on_click(
                             cx.listener(move |_, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(code_copy.clone()));
-                                cx.emit(AccessEvent::Toast(i18n::copied("IaC policy", lang)));
+                                cx.emit(AccessEvent::Toast(i18n::copied("policy")));
                             }),
                         ),
                     )

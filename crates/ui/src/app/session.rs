@@ -25,11 +25,11 @@ use lenslet_core::{
 use crate::{
     demo,
     feed::{self, FeedMode, FeedMsg, LoadResult, Loaded, RunSummary, Source},
+    i18n::Tr,
     lockfile,
     model::{Access, RunInfo, Trace},
-    prefs::Lang,
     store::{AccessBaseline, AccessRow, CallStore, ChangeSet, Delta, access_rows},
-    theme::Ui,
+    tr,
 };
 
 /// Live findings are recomputed at most this often.
@@ -66,8 +66,10 @@ pub enum SessionEvent {
     Derived,
     /// The run list was refreshed.
     Runs,
+    /// The run's stdout/stderr changed.
+    Log,
     /// Something to tell the user.
-    Toast(String),
+    Toast(Tr),
 }
 
 pub struct Session {
@@ -102,6 +104,8 @@ pub struct Session {
     findings_dirty: bool,
     findings_at: Option<Instant>,
     pub runs: Arc<Vec<RunSummary>>,
+    /// `runs` grouped by project, computed with the list (never in render).
+    pub run_groups: Arc<Vec<feed::RunGroup>>,
 }
 
 impl EventEmitter<SessionEvent> for Session {}
@@ -138,6 +142,7 @@ impl Session {
             findings_dirty: false,
             findings_at: None,
             runs: Arc::new(Vec::new()),
+            run_groups: Arc::new(Vec::new()),
         };
         if demo {
             let run = demo::demo_run();
@@ -360,7 +365,6 @@ impl Session {
             return;
         };
         let generation = self.generation;
-        let lang = Ui::of(cx).lang;
         cx.spawn(async move |this, cx| {
             let res = cx
                 .background_executor()
@@ -373,10 +377,10 @@ impl Session {
                 if let LoadResult::Loaded(loaded) = res {
                     let count = loaded.calls.len();
                     session.install_loaded(*loaded, cx);
-                    let msg = match lang {
-                        Lang::En => format!("Loaded all {count} calls from trace"),
-                        Lang::Zh => format!("已加载全部 {count} 条调用记录"),
-                    };
+                    let msg = tr!(
+                        "Loaded all {count} calls from the run file",
+                        "已加载全部 {count} 条调用记录"
+                    );
                     cx.emit(SessionEvent::Toast(msg));
                 }
             })
@@ -404,15 +408,16 @@ impl Session {
         cx.spawn(async move |this, cx| {
             let text = cx
                 .background_executor()
-                .spawn(async move { crate::daemon::read_run_log(&log_path, 512 * 1024) })
+                .spawn(async move {
+                    crate::daemon::read_run_log(&log_path, crate::daemon::MAX_LOG_BYTES)
+                })
                 .await;
             this.update(cx, |session, cx| {
                 if session.generation == generation {
                     let next = text.unwrap_or_default();
                     if session.console_log.as_ref() != next {
                         session.console_log = Arc::from(next);
-                        cx.emit(SessionEvent::Derived);
-                        cx.notify();
+                        cx.emit(SessionEvent::Log);
                     }
                 }
             })
@@ -493,7 +498,8 @@ impl Session {
                         if Some(len) == last_len {
                             return Some((len, None));
                         }
-                        let text = crate::daemon::read_run_log(&log_path, 512 * 1024);
+                        let text =
+                            crate::daemon::read_run_log(&log_path, crate::daemon::MAX_LOG_BYTES);
                         Some((len, text))
                     })
                     .await;
@@ -506,8 +512,7 @@ impl Session {
                                     && session.console_log.as_ref() != next
                                 {
                                     session.console_log = Arc::from(next);
-                                    cx.emit(SessionEvent::Derived);
-                                    cx.notify();
+                                    cx.emit(SessionEvent::Log);
                                 }
                             })
                             .is_err();
@@ -625,10 +630,16 @@ impl Session {
         cx.spawn(async move |this, cx| {
             let runs = cx
                 .background_executor()
-                .spawn(async move { feed::list_runs(&dir) })
+                .spawn(async move {
+                    let runs = feed::list_runs(&dir);
+                    let groups = feed::group_runs(&runs);
+                    (runs, groups)
+                })
                 .await;
+            let (runs, groups) = runs;
             this.update(cx, |session, cx| {
                 session.runs = Arc::new(runs);
+                session.run_groups = Arc::new(groups);
                 cx.emit(SessionEvent::Runs);
                 if session.baseline == Baseline::Previous {
                     session.resolve_baseline(cx);
@@ -869,7 +880,6 @@ impl Session {
 
     /// Load an external IAM policy JSON file to simulate against this run's permissions.
     pub fn load_sim_policy(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let lang = Ui::of(cx).lang;
         let label = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -888,19 +898,13 @@ impl Session {
                 Ok(gate) => {
                     session.sim_policy = Some((label.clone(), Arc::new(gate)));
                     session.recompute_sim_decisions();
-                    let msg = match lang {
-                        Lang::En => format!("Simulated against {label}"),
-                        Lang::Zh => format!("已加载策略模拟：{label}"),
-                    };
+                    let msg = tr!("Simulated against {label}", "已加载策略模拟：{label}");
                     cx.emit(SessionEvent::Toast(msg));
                     cx.emit(SessionEvent::Derived);
                     cx.notify();
                 }
                 Err(error) => {
-                    let msg = match lang {
-                        Lang::En => format!("Invalid IAM policy: {error}"),
-                        Lang::Zh => format!("无效的 IAM 策略：{error}"),
-                    };
+                    let msg = tr!("Invalid IAM policy: {error}", "无效的 IAM 策略：{error}");
                     cx.emit(SessionEvent::Toast(msg));
                 }
             })
@@ -919,7 +923,12 @@ impl Session {
     /// Findings: the report's when the run ended, else computed from the calls
     /// off the main thread, at most every [`FINDINGS_THROTTLE`] while live.
     pub fn schedule_findings(&mut self, cx: &mut Context<Self>) {
-        if let Some(report) = self.run.as_ref().and_then(|run| run.report.as_ref()) {
+        if let Some(report) = self
+            .run
+            .as_ref()
+            .and_then(|run| run.report.as_ref())
+            .filter(|report| !report.findings.is_empty())
+        {
             self.findings = Arc::new(report.findings.clone());
             cx.emit(SessionEvent::Derived);
             return;
@@ -982,17 +991,18 @@ impl Session {
         if entries.is_empty() {
             return;
         }
-        let lang = Ui::of(cx).lang;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { lockfile::accept_with_implied(&path, &entries) })
                 .await;
             this.update(cx, |session, cx| {
-                let message = match (result, lang) {
-                    (Ok(added), Lang::En) => format!("Added {added} to lenslet.lock"),
-                    (Ok(added), Lang::Zh) => format!("已向 lenslet.lock 写入 {added} 项权限"),
-                    (Err(error), _) => format!("lenslet.lock: {error}"),
+                let message = match result {
+                    Ok(added) => tr!(
+                        "Added {added} to lenslet.lock",
+                        "已向 lenslet.lock 写入 {added} 项权限"
+                    ),
+                    Err(error) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
                 };
                 cx.emit(SessionEvent::Toast(message));
                 session.refresh_lock(cx);
@@ -1010,17 +1020,18 @@ impl Session {
         if entries.is_empty() {
             return;
         }
-        let lang = Ui::of(cx).lang;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { lockfile::remove(&path, &entries) })
                 .await;
             this.update(cx, |session, cx| {
-                let message = match (result, lang) {
-                    (Ok(removed), Lang::En) => format!("Removed {removed} from lenslet.lock"),
-                    (Ok(removed), Lang::Zh) => format!("已从 lenslet.lock 移除 {removed} 项权限"),
-                    (Err(error), _) => format!("lenslet.lock: {error}"),
+                let message = match result {
+                    Ok(removed) => tr!(
+                        "Removed {removed} from lenslet.lock",
+                        "已从 lenslet.lock 移除 {removed} 项权限"
+                    ),
+                    Err(error) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
                 };
                 cx.emit(SessionEvent::Toast(message));
                 session.refresh_lock(cx);
@@ -1034,19 +1045,22 @@ impl Session {
         let Some(path) = self.lock_path.clone() else {
             return;
         };
-        let lang = Ui::of(cx).lang;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { lockfile::set_test_mark(&path, &access, test) })
                 .await;
             this.update(cx, |session, cx| {
-                let message = match (result, test, lang) {
-                    (Ok(_), true, Lang::En) => "Marked `# test` in lenslet.lock".to_string(),
-                    (Ok(_), true, Lang::Zh) => "已在 lenslet.lock 标记 `# test`".to_string(),
-                    (Ok(_), false, Lang::En) => "Removed `# test` in lenslet.lock".to_string(),
-                    (Ok(_), false, Lang::Zh) => "已取消 lenslet.lock 中的 `# test`".to_string(),
-                    (Err(error), _, _) => format!("lenslet.lock: {error}"),
+                let message = match (result, test) {
+                    (Ok(_), true) => tr!(
+                        "Marked `# test` in lenslet.lock",
+                        "已在 lenslet.lock 标记 `# test`"
+                    ),
+                    (Ok(_), false) => tr!(
+                        "Removed `# test` in lenslet.lock",
+                        "已取消 lenslet.lock 中的 `# test`"
+                    ),
+                    (Err(error), _) => tr!("lenslet.lock: {error}", "lenslet.lock：{error}"),
                 };
                 cx.emit(SessionEvent::Toast(message));
                 session.refresh_lock(cx);
@@ -1061,7 +1075,6 @@ impl Session {
         let Some(dir) = self.runs_dir() else {
             return;
         };
-        let lang = Ui::of(cx).lang;
         let id_for_io = run_id.clone();
         cx.spawn(async move |this, cx| {
             let res = cx
@@ -1069,12 +1082,10 @@ impl Session {
                 .spawn(async move { feed::set_run_pinned(&dir, &id_for_io, pinned) })
                 .await;
             this.update(cx, |session, cx| {
-                let msg = match (res, pinned, lang) {
-                    (Ok(_), true, Lang::En) => format!("Pinned run {run_id}"),
-                    (Ok(_), true, Lang::Zh) => format!("已置顶保留运行 {run_id}"),
-                    (Ok(_), false, Lang::En) => format!("Unpinned run {run_id}"),
-                    (Ok(_), false, Lang::Zh) => format!("已取消置顶 {run_id}"),
-                    (Err(e), _, _) => e.to_string(),
+                let msg = match (res, pinned) {
+                    (Ok(_), true) => tr!("Pinned run {run_id}", "已置顶保留运行 {run_id}"),
+                    (Ok(_), false) => tr!("Unpinned run {run_id}", "已取消置顶 {run_id}"),
+                    (Err(e), _) => tr!("Cannot pin the run: {e}", "无法置顶运行：{e}"),
                 };
                 cx.emit(SessionEvent::Toast(msg));
                 session.refresh_runs(cx);
@@ -1089,7 +1100,6 @@ impl Session {
         let Some(dir) = self.runs_dir() else {
             return;
         };
-        let lang = Ui::of(cx).lang;
         let keep = self.path.clone();
         cx.spawn(async move |this, cx| {
             let removed = cx
@@ -1097,10 +1107,10 @@ impl Session {
                 .spawn(async move { feed::clear_finished_runs(&dir, keep.as_deref()) })
                 .await;
             this.update(cx, |session, cx| {
-                let msg = match lang {
-                    Lang::En => format!("Cleared {removed} finished runs"),
-                    Lang::Zh => format!("已清理 {removed} 个已结束运行"),
-                };
+                let msg = tr!(
+                    "Cleared {removed} finished runs",
+                    "已清理 {removed} 个已结束运行"
+                );
                 cx.emit(SessionEvent::Toast(msg));
                 session.refresh_runs(cx);
             })
