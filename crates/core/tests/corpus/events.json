@@ -1,0 +1,664 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "events.CreateEventBus",
+   "access": [
+    [
+     "events:CreateEventBus",
+     "arn:aws:events:*:*:event-bus/corpus-bus"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.CreateEventBus",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "CreateEventBus",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.CreateEventBus"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.CreateEventBus"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-bus\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.PutRule",
+   "access": [
+    [
+     "events:PutRule",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.PutRule",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "PutRule",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.PutRule"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.PutRule"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-rule\", \"EventPattern\": \"{\\\"source\\\": [\\\"corpus\\\"]}\"}",
+      "bytes": 69,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.PutRule.bus",
+   "access": [
+    [
+     "events:PutRule",
+     "arn:aws:events:*:*:rule/corpus-bus/corpus-bus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.PutRule.bus",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "PutRule",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.PutRule"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.PutRule.bus"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-bus-rule\", \"EventBusName\": \"corpus-bus\", \"EventPattern\": \"{\\\"source\\\": [\\\"corpus\\\"]}\"}",
+      "bytes": 103,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.PutTargets",
+   "access": [
+    [
+     "events:PutTargets",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/events-to-sfn"
+    ]
+   ],
+   "call": {
+    "id": "events.PutTargets",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "PutTargets",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.PutTargets"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.PutTargets"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Rule\": \"corpus-rule\", \"Targets\": [{\"Id\": \"q\", \"Arn\": \"arn:aws:sqs:us-east-1:123456789012:corpus-jobs\"}, {\"Id\": \"sfn\", \"Arn\": \"arn:aws:states:us-east-1:123456789012:stateMachine:corpus-flow\", \"RoleArn\": \"arn:aws:iam::123456789012:role/events-to-sfn\"}]}",
+      "bytes": 253,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.PutTargets.bus",
+   "access": [
+    [
+     "events:PutTargets",
+     "arn:aws:events:*:*:rule/corpus-bus/corpus-bus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.PutTargets.bus",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "PutTargets",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.PutTargets"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.PutTargets.bus"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Rule\": \"corpus-bus-rule\", \"EventBusName\": \"corpus-bus\", \"Targets\": [{\"Id\": \"q\", \"Arn\": \"arn:aws:sqs:us-east-1:123456789012:corpus-jobs\"}]}",
+      "bytes": 140,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.ListTargetsByRule",
+   "access": [
+    [
+     "events:ListTargetsByRule",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.ListTargetsByRule",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "ListTargetsByRule",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.ListTargetsByRule"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.ListTargetsByRule"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Rule\": \"corpus-rule\"}",
+      "bytes": 23,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.DescribeRule",
+   "access": [
+    [
+     "events:DescribeRule",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.DescribeRule",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "DescribeRule",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.DescribeRule"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.DescribeRule"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-rule\"}",
+      "bytes": 23,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.ListRules",
+   "access": [
+    [
+     "events:ListRules",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.ListRules",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "ListRules",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.ListRules"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.ListRules"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.PutEvents",
+   "access": [
+    [
+     "events:PutEvents",
+     "arn:aws:events:*:*:event-bus/corpus-bus"
+    ],
+    [
+     "events:PutEvents",
+     "arn:aws:events:*:*:event-bus/default"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.PutEvents",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "PutEvents",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.PutEvents"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.PutEvents"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Entries\": [{\"Source\": \"corpus\", \"DetailType\": \"t\", \"Detail\": \"{}\"}, {\"Source\": \"corpus\", \"DetailType\": \"t\", \"Detail\": \"{}\", \"EventBusName\": \"corpus-bus\"}]}",
+      "bytes": 157,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.RemoveTargets",
+   "access": [
+    [
+     "events:RemoveTargets",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.RemoveTargets",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "RemoveTargets",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.RemoveTargets"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.RemoveTargets"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Rule\": \"corpus-rule\", \"Ids\": [\"q\", \"sfn\"]}",
+      "bytes": 44,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.DeleteRule",
+   "access": [
+    [
+     "events:DeleteRule",
+     "arn:aws:events:*:*:rule/corpus-rule"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.DeleteRule",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "DeleteRule",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.DeleteRule"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.DeleteRule"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-rule\"}",
+      "bytes": 23,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.DescribeEventBus",
+   "access": [
+    [
+     "events:DescribeEventBus",
+     "arn:aws:events:*:*:event-bus/corpus-bus"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.DescribeEventBus",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "DescribeEventBus",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.DescribeEventBus"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.DescribeEventBus"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-bus\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "events.DeleteEventBus",
+   "access": [
+    [
+     "events:DeleteEventBus",
+     "arn:aws:events:*:*:event-bus/corpus-bus"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "events.DeleteEventBus",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "events",
+    "operation": "DeleteEventBus",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AWSEvents.DeleteEventBus"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "events.DeleteEventBus"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"corpus-bus\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

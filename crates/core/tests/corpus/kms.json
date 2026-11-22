@@ -1,0 +1,993 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "kms.CreateKey",
+   "access": [
+    [
+     "kms:CreateKey",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.CreateKey",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "CreateKey",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.CreateKey"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.CreateKey"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Description\": \"corpus\"}",
+      "bytes": 25,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.CreateAlias",
+   "note": "authorized on the alias and on the target key",
+   "access": [
+    [
+     "kms:CreateAlias",
+     "arn:aws:kms:*:*:alias/corpus"
+    ],
+    [
+     "kms:CreateAlias",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:CreateAlias",
+      "arn:aws:kms:us-east-1:*:alias/corpus"
+     ],
+     [
+      "kms:CreateAlias",
+      "arn:aws:kms:us-east-1:*:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.CreateAlias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "CreateAlias",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.CreateAlias"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.CreateAlias"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"AliasName\": \"alias/corpus\", \"TargetKeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\"}",
+      "bytes": 84,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.DescribeKey.alias",
+   "note": "an alias is authorized on its key",
+   "access": [
+    [
+     "kms:DescribeKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:DescribeKey",
+      "arn:aws:kms:us-east-1:*:key/*"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.DescribeKey.alias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "DescribeKey",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.DescribeKey"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.DescribeKey.alias"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"alias/corpus\"}",
+      "bytes": 25,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.DescribeKey.id",
+   "access": [
+    [
+     "kms:DescribeKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:DescribeKey",
+      "arn:aws:kms:us-east-1:*:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.DescribeKey.id",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "DescribeKey",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.DescribeKey"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.DescribeKey.id"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\"}",
+      "bytes": 49,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.Encrypt.alias",
+   "access": [
+    [
+     "kms:Encrypt",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:Encrypt",
+      "arn:aws:kms:us-east-1:*:key/*"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.Encrypt.alias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "Encrypt",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.Encrypt"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.Encrypt.alias"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"alias/corpus\", \"Plaintext\": \"aGVsbG8=\"}",
+      "bytes": 50,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.Encrypt.aliasArn",
+   "access": [
+    [
+     "kms:Encrypt",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:Encrypt",
+      "arn:aws:kms:us-east-1:*:key/*"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.Encrypt.aliasArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "Encrypt",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.Encrypt"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.Encrypt.aliasArn"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"arn:aws:kms:us-east-1:123456789012:alias/corpus\", \"Plaintext\": \"aGk=\"}",
+      "bytes": 81,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.Decrypt.nokey",
+   "note": "the key is only inside the ciphertext",
+   "access": [
+    [
+     "kms:Decrypt",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.Decrypt.nokey",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "Decrypt",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.Decrypt"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.Decrypt.nokey"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"CiphertextBlob\": \"OWJkNTFmM2ItYjkxMS00MDU2LWFjNWEtMjU1OTI4NDFiNDRmpwxfPL1n9LbcYGSWe9nWJxlMikftOF3uRhG/91Zthp7A\"}",
+      "bytes": 114,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.Decrypt.keyArn",
+   "access": [
+    [
+     "kms:Decrypt",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:Decrypt",
+      "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.Decrypt.keyArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "Decrypt",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.Decrypt"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.Decrypt.keyArn"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"CiphertextBlob\": \"OWJkNTFmM2ItYjkxMS00MDU2LWFjNWEtMjU1OTI4NDFiNDRmpwxfPL1n9LbcYGSWe9nWJxlMikftOF3uRhG/91Zthp7A\", \"KeyId\": \"arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f\"}",
+      "bytes": 202,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.GenerateDataKey.id",
+   "access": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.GenerateDataKey.id",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "GenerateDataKey",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.GenerateDataKey"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.GenerateDataKey.id"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\", \"KeySpec\": \"AES_256\"}",
+      "bytes": 71,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.GenerateDataKey.alias",
+   "access": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.GenerateDataKey.alias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "GenerateDataKey",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.GenerateDataKey"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.GenerateDataKey.alias"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"alias/corpus\", \"NumberOfBytes\": 32}",
+      "bytes": 46,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.GenerateDataKeyWithoutPlaintext",
+   "access": [
+    [
+     "kms:GenerateDataKeyWithoutPlaintext",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.GenerateDataKeyWithoutPlaintext",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "GenerateDataKeyWithoutPlaintext",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.GenerateDataKeyWithoutPlaintext"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.GenerateDataKeyWithoutPlaintext"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f\", \"KeySpec\": \"AES_256\"}",
+      "bytes": 110,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.ReEncrypt",
+   "note": "ReEncrypt is authorized as ReEncryptFrom (source) and ReEncryptTo (destination)",
+   "access": [
+    [
+     "kms:ReEncryptFrom",
+     "arn:aws:kms:*:*:key/*"
+    ],
+    [
+     "kms:ReEncryptTo",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "kms:ReEncryptFrom",
+      "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ],
+     [
+      "kms:ReEncryptTo",
+      "arn:aws:kms:us-east-1:*:key/*"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "kms.ReEncrypt",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "ReEncrypt",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.ReEncrypt"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.ReEncrypt"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"CiphertextBlob\": \"OWJkNTFmM2ItYjkxMS00MDU2LWFjNWEtMjU1OTI4NDFiNDRmpwxfPL1n9LbcYGSWe9nWJxlMikftOF3uRhG/91Zthp7A\", \"SourceKeyId\": \"arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f\", \"DestinationKeyId\": \"alias/corpus\"}",
+      "bytes": 244,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.ListKeys",
+   "access": [
+    [
+     "kms:ListKeys",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.ListKeys",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "ListKeys",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.ListKeys"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.ListKeys"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.ListAliases",
+   "access": [
+    [
+     "kms:ListAliases",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.ListAliases",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "ListAliases",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.ListAliases"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.ListAliases"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.EnableKeyRotation",
+   "access": [
+    [
+     "kms:EnableKeyRotation",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.EnableKeyRotation",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "EnableKeyRotation",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.EnableKeyRotation"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.EnableKeyRotation"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\"}",
+      "bytes": 49,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.GetKeyPolicy",
+   "access": [
+    [
+     "kms:GetKeyPolicy",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.GetKeyPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "GetKeyPolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.GetKeyPolicy"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.GetKeyPolicy"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\", \"PolicyName\": \"default\"}",
+      "bytes": 74,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.TagResource",
+   "access": [
+    [
+     "kms:TagResource",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.TagResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "TagResource",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.TagResource"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.TagResource"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"KeyId\": \"9bd51f3b-b911-4056-ac5a-25592841b44f\", \"Tags\": [{\"TagKey\": \"team\", \"TagValue\": \"corpus\"}]}",
+      "bytes": 101,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "kms.DeleteAlias",
+   "note": "authorized on the alias and its key (not in the request)",
+   "access": [
+    [
+     "kms:DeleteAlias",
+     "arn:aws:kms:*:*:alias/corpus-old"
+    ],
+    [
+     "kms:DeleteAlias",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "kms.DeleteAlias",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "kms",
+    "operation": "DeleteAlias",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "TrentService.DeleteAlias"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "kms.DeleteAlias"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"AliasName\": \"alias/corpus-old\"}",
+      "bytes": 33,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

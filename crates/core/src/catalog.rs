@@ -39,10 +39,18 @@ pub fn resolve_rest_operation(
             }
             ("POST", ["restapis", _, "deployments"]) => "CreateDeployment",
             ("GET", ["restapis", _, "stages"]) => "GetStages",
+            ("GET", ["restapis", _, "stages", _]) => "GetStage",
+            ("PATCH", ["restapis", _, "stages", _]) => "UpdateStage",
+            ("DELETE", ["restapis", _, "stages", _]) => "DeleteStage",
+            ("PATCH", ["restapis", _]) => "UpdateRestApi",
             ("POST", ["apikeys"]) => "CreateApiKey",
             ("GET", ["apikeys"]) => "GetApiKeys",
             ("POST", ["domainnames"]) => "CreateDomainName",
             ("GET", ["domainnames"]) => "GetDomainNames",
+            // HTTP and WebSocket APIs (v2) sign as `apigateway` too.
+            _ if segs.first() == Some(&"v2") => {
+                return resolve_rest_operation("apigatewayv2", method, path, _headers);
+            }
             _ => return None,
         },
         // API Gateway v2 (`apigatewayv2`)
@@ -341,25 +349,7 @@ pub fn derive_extra_resources(
             }
             None
         }
-        "glue" => {
-            if let Some(job) = field("JobName").or_else(|| {
-                (operation == "CreateJob" || operation == "GetJob").then(|| field("Name"))?
-            }) {
-                return single(arn("glue", &format!("job/{}", norm(&job))));
-            }
-            if let Some(db) = field("DatabaseName") {
-                if let Some(tbl) = field("TableName").or_else(|| {
-                    json.and_then(|v| v.get("TableInput"))
-                        .and_then(|t| t.get("Name"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                }) {
-                    return single(arn("glue", &format!("table/{}/{}", norm(&db), norm(&tbl))));
-                }
-                return single(arn("glue", &format!("database/{}", norm(&db))));
-            }
-            None
-        }
+        "glue" => glue_resources(operation, json, &field, &arn, &norm),
         "athena" => {
             let wg = field("WorkGroup").unwrap_or_else(|| "primary".into());
             single(arn("athena", &format!("workgroup/{}", norm(&wg))))
@@ -471,6 +461,72 @@ pub fn derive_extra_resources(
             None
         }
         _ => None,
+    }
+}
+
+/// Glue Data Catalog calls are authorized on the catalog, the database and
+/// the table together (`catalog`, `database/{db}`, `table/{db}/{table}`);
+/// jobs on `job/{name}`.
+fn glue_resources(
+    operation: &str,
+    json: Option<&Value>,
+    field: &dyn Fn(&str) -> Option<String>,
+    arn: &dyn Fn(&str, &str) -> String,
+    norm: &dyn Fn(&str) -> String,
+) -> Option<Vec<String>> {
+    let nested = |outer: &str, key: &str| {
+        json.and_then(|v| v.get(outer))
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let catalog = || arn("glue", "catalog");
+    let database = |db: &str| arn("glue", &format!("database/{}", norm(db)));
+    let table = |db: &str, tbl: &str| arn("glue", &format!("table/{}/{}", norm(db), norm(tbl)));
+    match operation {
+        "CreateDatabase" => {
+            let db = nested("DatabaseInput", "Name")?;
+            Some(vec![catalog(), database(&db)])
+        }
+        "GetDatabase" | "UpdateDatabase" | "DeleteDatabase" => {
+            let db = field("Name")?;
+            Some(vec![catalog(), database(&db)])
+        }
+        "GetDatabases" => Some(vec![catalog(), arn("glue", "database/*")]),
+        "CreateTable" | "UpdateTable" => {
+            let db = field("DatabaseName")?;
+            let tbl = nested("TableInput", "Name")?;
+            Some(vec![catalog(), database(&db), table(&db, &tbl)])
+        }
+        "GetTable" | "DeleteTable" => {
+            let db = field("DatabaseName")?;
+            let tbl = field("Name")?;
+            Some(vec![catalog(), database(&db), table(&db, &tbl)])
+        }
+        "GetTables" => {
+            let db = field("DatabaseName")?;
+            Some(vec![
+                catalog(),
+                database(&db),
+                arn("glue", &format!("table/{}/*", norm(&db))),
+            ])
+        }
+        _ if field("DatabaseName").is_some() => {
+            let db = field("DatabaseName")?;
+            Some(match field("TableName") {
+                Some(tbl) => vec![catalog(), database(&db), table(&db, &tbl)],
+                None => vec![catalog(), database(&db)],
+            })
+        }
+        _ => {
+            let job = field("JobName").or_else(|| {
+                matches!(operation, "CreateJob" | "GetJob" | "DeleteJob")
+                    .then(|| field("Name"))
+                    .flatten()
+            })?;
+            Some(vec![arn("glue", &format!("job/{}", norm(&job)))])
+        }
     }
 }
 

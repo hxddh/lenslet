@@ -1,0 +1,92 @@
+{
+ "source": "hand-crafted: invoking deployed APIs",
+ "cases": [
+  {
+   "name": "execute-api.Invoke.host",
+   "note": "execute-api:Invoke on api-id/stage/METHOD/path; the generated api id is * in the footprint",
+   "access": [
+    [
+     "execute-api:Invoke",
+     "arn:aws:execute-api:*:*:*/prod/GET/orders/42"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "execute-api:Invoke",
+      "arn:aws:execute-api:us-east-1:*:a1b2c3d4e5/prod/GET/orders/42"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "execute-api.Invoke.host",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/prod/orders/42",
+    "host": "a1b2c3d4e5.execute-api.us-east-1.amazonaws.com",
+    "service": "execute-api",
+    "operation": "Invoke",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json"
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "execute-api.Invoke.emulatorPath",
+   "access": [
+    [
+     "execute-api:Invoke",
+     "arn:aws:execute-api:*:*:*/prod/POST/orders"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "execute-api.Invoke.emulatorPath",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/restapis/a1b2c3d4e5/prod/_user_request_/orders",
+    "host": "127.0.0.1:4566",
+    "service": "execute-api",
+    "operation": "Invoke",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

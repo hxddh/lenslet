@@ -1,0 +1,836 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "apigateway.CreateRestApi",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/restapis"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.CreateRestApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/restapis",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "CreateRestApi",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.CreateRestApi"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"name\": \"corpus-api\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.GetRestApis",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/restapis"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.GetRestApis",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/restapis",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GetRestApis",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigateway.GetRestApis"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.GetRestApi",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/restapis/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "apigateway:GET",
+      "arn:aws:apigateway:us-east-1::/restapis/xzmnosujtt"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "apigateway.GetRestApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/restapis/xzmnosujtt",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GetRestApi",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigateway.GetRestApi"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.GetResources",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/restapis/*/resources"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.GetResources",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/restapis/xzmnosujtt/resources",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GetResources",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigateway.GetResources"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.CreateResource",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/restapis/*/resources/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.CreateResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/restapis/xzmnosujtt/resources/hegbf0798b",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "CreateResource",
+    "status": 201,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.CreateResource"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"pathPart\": \"orders\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.PutMethod",
+   "access": [
+    [
+     "apigateway:PUT",
+     "arn:aws:apigateway:*::/restapis/*/resources/*/methods/GET"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.PutMethod",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/restapis/xzmnosujtt/resources/mcprrtg2zv/methods/GET",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "PutMethod",
+    "status": 201,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.PutMethod"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"authorizationType\": \"NONE\"}",
+      "bytes": 29,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.PutIntegration",
+   "access": [
+    [
+     "apigateway:PUT",
+     "arn:aws:apigateway:*::/restapis/*/resources/*/methods/GET/integration"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.PutIntegration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/restapis/xzmnosujtt/resources/mcprrtg2zv/methods/GET/integration",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "PutIntegration",
+    "status": 201,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.PutIntegration"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"type\": \"MOCK\"}",
+      "bytes": 16,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.CreateDeployment",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/restapis/*/deployments"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.CreateDeployment",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/restapis/xzmnosujtt/deployments",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "CreateDeployment",
+    "status": 201,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.CreateDeployment"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"stageName\": \"prod\"}",
+      "bytes": 21,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.GetStages",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/restapis/*/stages"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.GetStages",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/restapis/xzmnosujtt/stages",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GetStages",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigateway.GetStages"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.UpdateStage",
+   "access": [
+    [
+     "apigateway:PATCH",
+     "arn:aws:apigateway:*::/restapis/*/stages/prod"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.UpdateStage",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PATCH",
+    "path": "/restapis/xzmnosujtt/stages/prod",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "PATCH",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.UpdateStage"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"patchOperations\": [{\"op\": \"replace\", \"path\": \"/description\", \"value\": \"d\"}]}",
+      "bytes": 78,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.CreateApiKey",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/apikeys"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.CreateApiKey",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/apikeys",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "CreateApiKey",
+    "status": 201,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigateway.CreateApiKey"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"name\": \"corpus-key\"}",
+      "bytes": 22,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigateway.DeleteRestApi",
+   "access": [
+    [
+     "apigateway:DELETE",
+     "arn:aws:apigateway:*::/restapis/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigateway.DeleteRestApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/restapis/xzmnosujtt",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "DeleteRestApi",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigateway.DeleteRestApi"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.CreateApi",
+   "note": "v2 uses the apigateway prefix; no /v2 in the ARN",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/apis"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.CreateApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/v2/apis",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "POST",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.CreateApi"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"name\": \"corpus-http\", \"protocolType\": \"HTTP\"}",
+      "bytes": 47,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.GetApis",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/apis"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.GetApis",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/v2/apis",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GET",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.GetApis"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.GetApi",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/apis/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "apigateway:GET",
+      "arn:aws:apigateway:us-east-1::/apis/tqifudgg"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "apigatewayv2.GetApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/v2/apis/tqifudgg",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GET",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.GetApi"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.CreateIntegration",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/apis/*/integrations"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.CreateIntegration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/v2/apis/tqifudgg/integrations",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "POST",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.CreateIntegration"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"integrationType\": \"HTTP_PROXY\", \"integrationUri\": \"https://example.com\", \"integrationMethod\": \"ANY\", \"payloadFormatVersion\": \"1.0\"}",
+      "bytes": 133,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.CreateRoute",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/apis/*/routes"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.CreateRoute",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/v2/apis/tqifudgg/routes",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "POST",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.CreateRoute"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"routeKey\": \"GET /orders\", \"target\": \"integrations/ruzhdhys\"}",
+      "bytes": 62,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.GetRoutes",
+   "access": [
+    [
+     "apigateway:GET",
+     "arn:aws:apigateway:*::/apis/*/routes"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.GetRoutes",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/v2/apis/tqifudgg/routes",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "GET",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.GetRoutes"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.CreateStage",
+   "access": [
+    [
+     "apigateway:POST",
+     "arn:aws:apigateway:*::/apis/*/stages"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.CreateStage",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/v2/apis/tqifudgg/stages",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "POST",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/json"
+      },
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.CreateStage"
+      }
+     ],
+     "content_type": "application/json",
+     "body": {
+      "text": "{\"stageName\": \"prod\"}",
+      "bytes": 21,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "apigatewayv2.DeleteApi",
+   "access": [
+    [
+     "apigateway:DELETE",
+     "arn:aws:apigateway:*::/apis/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "apigatewayv2.DeleteApi",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/v2/apis/tqifudgg",
+    "host": "127.0.0.1:4566",
+    "service": "apigateway",
+    "operation": "DELETE",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "apigatewayv2.DeleteApi"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

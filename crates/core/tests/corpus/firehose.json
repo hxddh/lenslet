@@ -1,0 +1,310 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "firehose.CreateDeliveryStream",
+   "access": [
+    [
+     "firehose:CreateDeliveryStream",
+     "arn:aws:firehose:*:*:deliverystream/corpus-delivery"
+    ]
+   ],
+   "implied": [
+    [
+     "iam:PassRole",
+     "arn:aws:iam::*:role/firehose-s3"
+    ]
+   ],
+   "call": {
+    "id": "firehose.CreateDeliveryStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "CreateDeliveryStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.CreateDeliveryStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.CreateDeliveryStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DeliveryStreamName\": \"corpus-delivery\", \"ExtendedS3DestinationConfiguration\": {\"RoleARN\": \"arn:aws:iam::123456789012:role/firehose-s3\", \"BucketARN\": \"arn:aws:s3:::corpus-bucket\"}}",
+      "bytes": 181,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "firehose.DescribeDeliveryStream",
+   "access": [
+    [
+     "firehose:DescribeDeliveryStream",
+     "arn:aws:firehose:*:*:deliverystream/corpus-delivery"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "firehose.DescribeDeliveryStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "DescribeDeliveryStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.DescribeDeliveryStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.DescribeDeliveryStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DeliveryStreamName\": \"corpus-delivery\"}",
+      "bytes": 41,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "firehose.PutRecord",
+   "access": [
+    [
+     "firehose:PutRecord",
+     "arn:aws:firehose:*:*:deliverystream/corpus-delivery"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "firehose.PutRecord",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "PutRecord",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.PutRecord"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.PutRecord"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DeliveryStreamName\": \"corpus-delivery\", \"Record\": {\"Data\": \"eA==\"}}",
+      "bytes": 69,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "firehose.PutRecordBatch",
+   "access": [
+    [
+     "firehose:PutRecordBatch",
+     "arn:aws:firehose:*:*:deliverystream/corpus-delivery"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "firehose.PutRecordBatch",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "PutRecordBatch",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.PutRecordBatch"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.PutRecordBatch"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DeliveryStreamName\": \"corpus-delivery\", \"Records\": [{\"Data\": \"eA==\"}]}",
+      "bytes": 72,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "firehose.ListDeliveryStreams",
+   "access": [
+    [
+     "firehose:ListDeliveryStreams",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "firehose.ListDeliveryStreams",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "ListDeliveryStreams",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.ListDeliveryStreams"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.ListDeliveryStreams"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "firehose.DeleteDeliveryStream",
+   "access": [
+    [
+     "firehose:DeleteDeliveryStream",
+     "arn:aws:firehose:*:*:deliverystream/corpus-delivery"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "firehose.DeleteDeliveryStream",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "firehose",
+    "operation": "DeleteDeliveryStream",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "Firehose_20150804.DeleteDeliveryStream"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "firehose.DeleteDeliveryStream"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"DeliveryStreamName\": \"corpus-delivery\"}",
+      "bytes": 41,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

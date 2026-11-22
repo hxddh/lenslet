@@ -1,0 +1,2146 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "s3.CreateBucket",
+   "access": [
+    [
+     "s3:CreateBucket",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.CreateBucket",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CreateBucket",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.CreateBucket"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.HeadBucket",
+   "access": [
+    [
+     "s3:ListBucket",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.HeadBucket",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "HEAD",
+    "path": "/corpus-bucket",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "HeadBucket",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.HeadBucket"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListBuckets",
+   "access": [
+    [
+     "s3:ListAllMyBuckets",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListBuckets",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListBuckets",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListBuckets"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketLocation",
+   "access": [
+    [
+     "s3:GetBucketLocation",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketLocation",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?location",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketLocation",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketLocation"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketVersioning",
+   "access": [
+    [
+     "s3:PutBucketVersioning",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketVersioning",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?versioning",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketVersioning",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketVersioning"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketVersioning",
+   "access": [
+    [
+     "s3:GetBucketVersioning",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketVersioning",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?versioning",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketVersioning",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketVersioning"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutObject",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "s3:PutObject",
+      "arn:aws:s3:::corpus-bucket/docs/a.txt"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "s3.PutObject",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/docs/a.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutObject"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutObject.ssekms",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "call": {
+    "id": "s3.PutObject.ssekms",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/vault/s.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "aws:kms"
+      },
+      {
+       "name": "x-amz-server-side-encryption-aws-kms-key-id",
+       "value": "alias/corpus"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.PutObject.ssekms"
+      }
+     ]
+    },
+    "response": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "aws:kms"
+      },
+      {
+       "name": "x-amz-server-side-encryption-aws-kms-key-id",
+       "value": "alias/corpus"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "s3.PutObject.ssekmsArn",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "concrete": {
+    "access": [
+     [
+      "s3:PutObject",
+      "arn:aws:s3:::corpus-bucket/vault/t.txt"
+     ]
+    ],
+    "implied": [
+     [
+      "kms:GenerateDataKey",
+      "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ]
+    ]
+   },
+   "call": {
+    "id": "s3.PutObject.ssekmsArn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/vault/t.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "aws:kms"
+      },
+      {
+       "name": "x-amz-server-side-encryption-aws-kms-key-id",
+       "value": "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.PutObject.ssekmsArn"
+      }
+     ]
+    },
+    "response": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "aws:kms"
+      },
+      {
+       "name": "x-amz-server-side-encryption-aws-kms-key-id",
+       "value": "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "s3.GetObject",
+   "access": [
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObject",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObject"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObject.version",
+   "access": [
+    [
+     "s3:GetObjectVersion",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObject.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt?versionId=f44b12e2-572c-436e-8270-80f288fd15d1",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObject.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.HeadObject",
+   "access": [
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.HeadObject",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "HEAD",
+    "path": "/corpus-bucket/docs/a.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "HeadObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.HeadObject"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.HeadObject.version",
+   "access": [
+    [
+     "s3:GetObjectVersion",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.HeadObject.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "HEAD",
+    "path": "/corpus-bucket/docs/a.txt?versionId=f44b12e2-572c-436e-8270-80f288fd15d1",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "HeadObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.HeadObject.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListObjectsV2",
+   "access": [
+    [
+     "s3:ListBucket",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListObjectsV2",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?list-type=2&prefix=docs%2F&encoding-type=url",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListObjectsV2",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListObjectsV2"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListObjects",
+   "access": [
+    [
+     "s3:ListBucket",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListObjects",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?encoding-type=url",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListObjects",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListObjects"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListObjectVersions",
+   "access": [
+    [
+     "s3:ListBucketVersions",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListObjectVersions",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?versions&encoding-type=url",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListObjectVersions",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListObjectVersions"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.CopyObject",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ],
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "s3:PutObject",
+      "arn:aws:s3:::corpus-bucket/docs/b.txt"
+     ],
+     [
+      "s3:GetObject",
+      "arn:aws:s3:::corpus-bucket/docs/a.txt"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "s3.CopyObject",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/docs/b.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CopyObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-copy-source",
+       "value": "corpus-bucket/docs/a.txt"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.CopyObject"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.CopyObject.version",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ],
+    [
+     "s3:GetObjectVersion",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.CopyObject.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/docs/c.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CopyObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-copy-source",
+       "value": "corpus-bucket/docs/a.txt?versionId=f44b12e2-572c-436e-8270-80f288fd15d1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.CopyObject.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutObjectTagging",
+   "access": [
+    [
+     "s3:PutObjectTagging",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutObjectTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/docs/a.txt?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutObjectTagging",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutObjectTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObjectTagging",
+   "access": [
+    [
+     "s3:GetObjectTagging",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObjectTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObjectTagging",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObjectTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObjectTagging.version",
+   "access": [
+    [
+     "s3:GetObjectVersionTagging",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObjectTagging.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt?tagging&versionId=f44b12e2-572c-436e-8270-80f288fd15d1",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObjectTagging",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObjectTagging.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteObjectTagging",
+   "access": [
+    [
+     "s3:DeleteObjectTagging",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteObjectTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket/docs/a.txt?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteObjectTagging",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteObjectTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutObjectAcl",
+   "access": [
+    [
+     "s3:PutObjectAcl",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutObjectAcl",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/docs/a.txt?acl",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutObjectAcl",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-acl",
+       "value": "private"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.PutObjectAcl"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObjectAcl",
+   "access": [
+    [
+     "s3:GetObjectAcl",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObjectAcl",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt?acl",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObjectAcl",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObjectAcl"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketAcl",
+   "access": [
+    [
+     "s3:PutBucketAcl",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketAcl",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?acl",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketAcl",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-acl",
+       "value": "private"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketAcl"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketAcl",
+   "access": [
+    [
+     "s3:GetBucketAcl",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketAcl",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?acl",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketAcl",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketAcl"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketTagging",
+   "access": [
+    [
+     "s3:PutBucketTagging",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketTagging",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketTagging",
+   "access": [
+    [
+     "s3:GetBucketTagging",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketTagging",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteBucketTagging",
+   "access": [
+    [
+     "s3:PutBucketTagging",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteBucketTagging",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket?tagging",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteBucketTagging",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteBucketTagging"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketPolicy",
+   "access": [
+    [
+     "s3:PutBucketPolicy",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?policy",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketPolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketPolicy"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketPolicy",
+   "access": [
+    [
+     "s3:GetBucketPolicy",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?policy",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketPolicy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketPolicy"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteBucketPolicy",
+   "access": [
+    [
+     "s3:DeleteBucketPolicy",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteBucketPolicy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket?policy",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteBucketPolicy",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteBucketPolicy"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketCors",
+   "access": [
+    [
+     "s3:PutBucketCORS",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketCors",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?cors",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketCors",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketCors"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketCors",
+   "access": [
+    [
+     "s3:GetBucketCORS",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketCors",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?cors",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketCors",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketCors"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteBucketCors",
+   "access": [
+    [
+     "s3:PutBucketCORS",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteBucketCors",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket?cors",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteBucketCors",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteBucketCors"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketLifecycleConfiguration",
+   "access": [
+    [
+     "s3:PutLifecycleConfiguration",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketLifecycleConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?lifecycle",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketLifecycleConfiguration",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketLifecycleConfiguration"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketLifecycleConfiguration",
+   "access": [
+    [
+     "s3:GetLifecycleConfiguration",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketLifecycleConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?lifecycle",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketLifecycleConfiguration",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketLifecycleConfiguration"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteBucketLifecycle",
+   "access": [
+    [
+     "s3:PutLifecycleConfiguration",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteBucketLifecycle",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket?lifecycle",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteBucketLifecycleConfiguration",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteBucketLifecycle"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketEncryption",
+   "access": [
+    [
+     "s3:PutEncryptionConfiguration",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketEncryption",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?encryption",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketEncryption",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketEncryption"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketEncryption",
+   "access": [
+    [
+     "s3:GetEncryptionConfiguration",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketEncryption",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?encryption",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketEncryption",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketEncryption"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutPublicAccessBlock",
+   "access": [
+    [
+     "s3:PutBucketPublicAccessBlock",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutPublicAccessBlock",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?publicAccessBlock",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutPublicAccessBlock",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutPublicAccessBlock"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetPublicAccessBlock",
+   "access": [
+    [
+     "s3:GetBucketPublicAccessBlock",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetPublicAccessBlock",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?publicAccessBlock",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetPublicAccessBlock",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetPublicAccessBlock"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeletePublicAccessBlock",
+   "access": [
+    [
+     "s3:PutBucketPublicAccessBlock",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeletePublicAccessBlock",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket?publicAccessBlock",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeletePublicAccessBlock",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeletePublicAccessBlock"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.PutBucketNotificationConfiguration",
+   "access": [
+    [
+     "s3:PutBucketNotification",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.PutBucketNotificationConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket?notification",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "PutBucketNotificationConfiguration",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.PutBucketNotificationConfiguration"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetBucketNotificationConfiguration",
+   "access": [
+    [
+     "s3:GetBucketNotification",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetBucketNotificationConfiguration",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?notification",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetBucketNotificationConfiguration",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetBucketNotificationConfiguration"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.CreateMultipartUpload",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.CreateMultipartUpload",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/corpus-bucket/big/file.bin?uploads",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CreateMultipartUpload",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.CreateMultipartUpload"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.UploadPart",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.UploadPart",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/big/file.bin?uploadId=4p9s9DcwEis2l62ocPaQdptBaB8GHFZLmeNxHjxVhVafMUVZijsUlCPDQ&partNumber=1",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "UploadPart",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.UploadPart"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.UploadPartCopy",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ],
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.UploadPartCopy",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "PUT",
+    "path": "/corpus-bucket/big/file.bin?uploadId=4p9s9DcwEis2l62ocPaQdptBaB8GHFZLmeNxHjxVhVafMUVZijsUlCPDQ&partNumber=2",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "UploadPartCopy",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-copy-source",
+       "value": "corpus-bucket/docs/a.txt"
+      },
+      {
+       "name": "x-corpus",
+       "value": "s3.UploadPartCopy"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListParts",
+   "access": [
+    [
+     "s3:ListMultipartUploadParts",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListParts",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/big/file.bin?uploadId=4p9s9DcwEis2l62ocPaQdptBaB8GHFZLmeNxHjxVhVafMUVZijsUlCPDQ",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListParts",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListParts"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.ListMultipartUploads",
+   "access": [
+    [
+     "s3:ListBucketMultipartUploads",
+     "arn:aws:s3:::corpus-bucket"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.ListMultipartUploads",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket?uploads",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "ListMultipartUploads",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.ListMultipartUploads"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.CompleteMultipartUpload",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.CompleteMultipartUpload",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/corpus-bucket/big/file.bin?uploadId=4p9s9DcwEis2l62ocPaQdptBaB8GHFZLmeNxHjxVhVafMUVZijsUlCPDQ",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CompleteMultipartUpload",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.CompleteMultipartUpload"
+      }
+     ]
+    },
+    "response": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "AES256"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "s3.CreateMultipartUpload.abort",
+   "access": [
+    [
+     "s3:PutObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.CreateMultipartUpload.abort",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/corpus-bucket/big/aborted.bin?uploads",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "CreateMultipartUpload",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.CreateMultipartUpload.abort"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.AbortMultipartUpload",
+   "access": [
+    [
+     "s3:AbortMultipartUpload",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.AbortMultipartUpload",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket/big/aborted.bin?uploadId=KKOfVITqfqs4GeIJ9yX2lSAxykD5RYscSAY76RWK3CydUTzthIxkNRvg",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "AbortMultipartUpload",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.AbortMultipartUpload"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObjectAttributes",
+   "access": [
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ],
+    [
+     "s3:GetObjectAttributes",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.GetObjectAttributes",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/docs/a.txt?attributes",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObjectAttributes",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObjectAttributes"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteObjects",
+   "access": [
+    [
+     "s3:DeleteObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "concrete": {
+    "access": [
+     [
+      "s3:DeleteObject",
+      "arn:aws:s3:::corpus-bucket/docs/b.txt"
+     ],
+     [
+      "s3:DeleteObject",
+      "arn:aws:s3:::corpus-bucket/docs/c.txt"
+     ]
+    ],
+    "implied": []
+   },
+   "call": {
+    "id": "s3.DeleteObjects",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/corpus-bucket?delete",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteObjects",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteObjects"
+      }
+     ],
+     "body": {
+      "text": "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>docs/b.txt</Key></Object><Object><Key>docs/c.txt</Key></Object></Delete>",
+      "bytes": 141,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteObject.version",
+   "access": [
+    [
+     "s3:DeleteObjectVersion",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteObject.version",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket/docs/a.txt?versionId=f44b12e2-572c-436e-8270-80f288fd15d1",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteObject",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteObject.version"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.DeleteObject",
+   "access": [
+    [
+     "s3:DeleteObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "s3.DeleteObject",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "DELETE",
+    "path": "/corpus-bucket/docs/a.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "DeleteObject",
+    "status": 204,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.DeleteObject"
+      }
+     ]
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "s3.GetObject.presigned",
+   "note": "SigV2 presigned URL; the response names the SSE-KMS key",
+   "access": [
+    [
+     "s3:GetObject",
+     "arn:aws:s3:::corpus-bucket/*"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:Decrypt",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "concrete": {
+    "access": [
+     [
+      "s3:GetObject",
+      "arn:aws:s3:::corpus-bucket/vault/t.txt"
+     ]
+    ],
+    "implied": [
+     [
+      "kms:Decrypt",
+      "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+     ]
+    ]
+   },
+   "call": {
+    "id": "s3.GetObject.presigned",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "GET",
+    "path": "/corpus-bucket/vault/t.txt",
+    "host": "127.0.0.1:4566",
+    "service": "s3",
+    "operation": "GetObject",
+    "status": 200,
+    "ms": 0,
+    "authorization": false,
+    "request": {
+     "headers": [
+      {
+       "name": "x-corpus",
+       "value": "s3.GetObject.presigned"
+      }
+     ]
+    },
+    "response": {
+     "headers": [
+      {
+       "name": "x-amz-server-side-encryption",
+       "value": "aws:kms"
+      },
+      {
+       "name": "x-amz-server-side-encryption-aws-kms-key-id",
+       "value": "arn:aws:kms:us-east-1:123456789012:key/9bd51f3b-b911-4056-ac5a-25592841b44f"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,516 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "sns.CreateTopic",
+   "access": [
+    [
+     "sns:CreateTopic",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.CreateTopic",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "CreateTopic",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.CreateTopic"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateTopic&Version=2010-03-31&Name=corpus-alerts",
+      "bytes": 56,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.CreateTopic.kms",
+   "access": [
+    [
+     "sns:CreateTopic",
+     "arn:aws:sns:*:*:corpus-secure"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:GenerateDataKey",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "call": {
+    "id": "sns.CreateTopic.kms",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "CreateTopic",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.CreateTopic.kms"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=CreateTopic&Version=2010-03-31&Name=corpus-secure&Attributes.entry.1.key=KmsMasterKeyId&Attributes.entry.1.value=alias%2Fcorpus",
+      "bytes": 134,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.Subscribe",
+   "access": [
+    [
+     "sns:Subscribe",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.Subscribe",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "Subscribe",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.Subscribe"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=Subscribe&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts&Protocol=sqs&Endpoint=arn%3Aaws%3Asqs%3Aus-east-1%3A123456789012%3Acorpus-jobs",
+      "bytes": 182,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.ListSubscriptionsByTopic",
+   "access": [
+    [
+     "sns:ListSubscriptionsByTopic",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.ListSubscriptionsByTopic",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "ListSubscriptionsByTopic",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.ListSubscriptionsByTopic"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=ListSubscriptionsByTopic&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts",
+      "bytes": 118,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.Publish",
+   "access": [
+    [
+     "sns:Publish",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.Publish",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "Publish",
+    "status": 400,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.Publish"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=Publish&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts&Message=hi",
+      "bytes": 112,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.PublishBatch",
+   "access": [
+    [
+     "sns:Publish",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.PublishBatch",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "PublishBatch",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.PublishBatch"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=PublishBatch&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts&PublishBatchRequestEntries.member.1.Id=1&PublishBatchRequestEntries.member.1.Message=a",
+      "bytes": 193,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.GetTopicAttributes",
+   "access": [
+    [
+     "sns:GetTopicAttributes",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.GetTopicAttributes",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "GetTopicAttributes",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.GetTopicAttributes"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=GetTopicAttributes&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts",
+      "bytes": 112,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.SetTopicAttributes",
+   "access": [
+    [
+     "sns:SetTopicAttributes",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.SetTopicAttributes",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "SetTopicAttributes",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.SetTopicAttributes"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=SetTopicAttributes&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts&AttributeName=DisplayName&AttributeValue=Corpus",
+      "bytes": 160,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.ListTopics",
+   "access": [
+    [
+     "sns:ListTopics",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.ListTopics",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "ListTopics",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.ListTopics"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=ListTopics&Version=2010-03-31",
+      "bytes": 36,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.TagResource",
+   "access": [
+    [
+     "sns:TagResource",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.TagResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "TagResource",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.TagResource"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=TagResource&Version=2010-03-31&ResourceArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts&Tags.member.1.Key=team&Tags.member.1.Value=corpus",
+      "bytes": 158,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "sns.DeleteTopic",
+   "access": [
+    [
+     "sns:DeleteTopic",
+     "arn:aws:sns:*:*:corpus-alerts"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "sns.DeleteTopic",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "sns",
+    "operation": "DeleteTopic",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "content-type",
+       "value": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      {
+       "name": "x-corpus",
+       "value": "sns.DeleteTopic"
+      }
+     ],
+     "content_type": "application/x-www-form-urlencoded",
+     "body": {
+      "text": "Action=DeleteTopic&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3Acorpus-alerts",
+      "bytes": 105,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}

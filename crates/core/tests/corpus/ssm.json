@@ -1,0 +1,519 @@
+{
+ "source": "boto3 1.44.6 via `lenslet run` against moto 5.2.5 (request side; volatile fields stripped)",
+ "cases": [
+  {
+   "name": "ssm.PutParameter",
+   "access": [
+    [
+     "ssm:PutParameter",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.PutParameter",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "PutParameter",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.PutParameter"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.PutParameter"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"/corpus/prod/url\", \"Value\": \"u\", \"Type\": \"String\", \"Overwrite\": true}",
+      "bytes": 79,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.PutParameter.secure",
+   "access": [
+    [
+     "ssm:PutParameter",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/pw"
+    ]
+   ],
+   "implied": [
+    [
+     "kms:Encrypt",
+     "arn:aws:kms:*:*:key/*"
+    ]
+   ],
+   "call": {
+    "id": "ssm.PutParameter.secure",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "PutParameter",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.PutParameter"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.PutParameter.secure"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"/corpus/prod/pw\", \"Value\": \"p\", \"Type\": \"SecureString\", \"KeyId\": \"alias/corpus\", \"Overwrite\": true}",
+      "bytes": 109,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.GetParameter",
+   "access": [
+    [
+     "ssm:GetParameter",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.GetParameter",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "GetParameter",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.GetParameter"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.GetParameter"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"/corpus/prod/url\"}",
+      "bytes": 28,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.GetParameter.arn",
+   "access": [
+    [
+     "ssm:GetParameter",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.GetParameter.arn",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "GetParameter",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.GetParameter"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.GetParameter.arn"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"arn:aws:ssm:us-east-1:123456789012:parameter/corpus/prod/url\"}",
+      "bytes": 72,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.GetParameters",
+   "access": [
+    [
+     "ssm:GetParameters",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/pw"
+    ],
+    [
+     "ssm:GetParameters",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.GetParameters",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "GetParameters",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.GetParameters"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.GetParameters"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Names\": [\"/corpus/prod/url\", \"/corpus/prod/pw\"], \"WithDecryption\": true}",
+      "bytes": 74,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.GetParametersByPath",
+   "note": "unchanged: whether AWS authorizes the path itself or path/* is unverified",
+   "access": [
+    [
+     "ssm:GetParametersByPath",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.GetParametersByPath",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "GetParametersByPath",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.GetParametersByPath"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.GetParametersByPath"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Path\": \"/corpus/prod\", \"Recursive\": true}",
+      "bytes": 43,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.DescribeParameters",
+   "access": [
+    [
+     "ssm:DescribeParameters",
+     "*"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.DescribeParameters",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "DescribeParameters",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.DescribeParameters"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.DescribeParameters"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{}",
+      "bytes": 2,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.AddTagsToResource",
+   "access": [
+    [
+     "ssm:AddTagsToResource",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.AddTagsToResource",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "AddTagsToResource",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.AddTagsToResource"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.AddTagsToResource"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"ResourceType\": \"Parameter\", \"ResourceId\": \"/corpus/prod/url\", \"Tags\": [{\"Key\": \"team\", \"Value\": \"corpus\"}]}",
+      "bytes": 109,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.DeleteParameter",
+   "access": [
+    [
+     "ssm:DeleteParameter",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/url"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.DeleteParameter",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "DeleteParameter",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.DeleteParameter"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.DeleteParameter"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Name\": \"/corpus/prod/url\"}",
+      "bytes": 28,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  },
+  {
+   "name": "ssm.DeleteParameters",
+   "access": [
+    [
+     "ssm:DeleteParameters",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/pw"
+    ],
+    [
+     "ssm:DeleteParameters",
+     "arn:aws:ssm:*:*:parameter/corpus/prod/x"
+    ]
+   ],
+   "implied": [],
+   "call": {
+    "id": "ssm.DeleteParameters",
+    "at": "2026-11-22T00:00:00Z",
+    "method": "POST",
+    "path": "/",
+    "host": "127.0.0.1:4566",
+    "service": "ssm",
+    "operation": "DeleteParameters",
+    "status": 200,
+    "ms": 0,
+    "authorization": true,
+    "region": "us-east-1",
+    "request": {
+     "headers": [
+      {
+       "name": "x-amz-target",
+       "value": "AmazonSSM.DeleteParameters"
+      },
+      {
+       "name": "content-type",
+       "value": "application/x-amz-json-1.1"
+      },
+      {
+       "name": "x-corpus",
+       "value": "ssm.DeleteParameters"
+      }
+     ],
+     "content_type": "application/x-amz-json-1.1",
+     "body": {
+      "text": "{\"Names\": [\"/corpus/prod/pw\", \"/corpus/prod/x\"]}",
+      "bytes": 48,
+      "truncated": false,
+      "binary": false,
+      "sha256": ""
+     }
+    },
+    "response": {
+     "headers": []
+    }
+   }
+  }
+ ]
+}
