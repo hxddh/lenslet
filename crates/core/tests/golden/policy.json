@@ -1,0 +1,80 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StsAccess",
+      "Effect": "Allow",
+      "Action": "sts:GetSessionToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ApigatewayRestapis",
+      "Effect": "Allow",
+      "Action": "apigateway:GET",
+      "Resource": "arn:aws:apigateway:*::/restapis/*"
+    },
+    {
+      "Sid": "BedrockUsAnthropicClaude3Haiku20240307V10",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": "arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-3-haiku-20240307-v1:0"
+    },
+    {
+      "Sid": "BedrockAnthropicClaude3Haiku20240307V10",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+    },
+    {
+      "Sid": "DynamodbOrders",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/orders"
+    },
+    {
+      "Sid": "IamWorker",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/service-role/worker"
+    },
+    {
+      "Sid": "KmsKey",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:*:*:key/*"
+    },
+    {
+      "Sid": "LambdaFunctionThumbnailerProd",
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:*:*:function:thumbnailer:prod"
+    },
+    {
+      "Sid": "Route53Z123",
+      "Effect": "Allow",
+      "Action": "route53:GetHostedZone",
+      "Resource": "arn:aws:route53:::hostedzone/Z123"
+    },
+    {
+      "Sid": "S3ShopAssets",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::shop-assets"
+    },
+    {
+      "Sid": "S3ShopAssets2",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::shop-assets/*"
+    },
+    {
+      "Sid": "SqsJobs",
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:*:*:jobs"
+    }
+  ]
+}

@@ -376,6 +376,11 @@ pub struct AccessUse {
     /// The calls that needed it, e.g. `DYNAMODB DeleteItem` (first few).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub via: Vec<String>,
+    /// The SigV4 services of every call that needed it, sorted: unlike the
+    /// display list `via`, never cut short, so conditions built from it
+    /// (`iam:PassedToService`, `kms:ViaService`) allow every caller.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
     /// A `*` that stands for a resource some call's request body did not let
     /// Lenslet read (binary or truncated).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -385,7 +390,12 @@ pub struct AccessUse {
 /// Distinct calls kept per permission in `via`.
 const VIA_LIMIT: usize = 3;
 
-fn record_access_use(entry: &mut AccessUse, own: bool, failed: bool, unverified: bool, via: &str) {
+fn record_access_use(entry: &mut AccessUse, call: &Trace, own: bool, unverified: bool) {
+    let failed = call.problem.is_some();
+    let via = format!("{} {}", call.service.to_ascii_uppercase(), call.operation);
+    if let Err(at) = entry.services.binary_search(&call.service) {
+        entry.services.insert(at, call.service.clone());
+    }
     entry.unverified |= unverified;
     entry.calls += 1;
     entry.errors += usize::from(failed);
@@ -394,8 +404,8 @@ fn record_access_use(entry: &mut AccessUse, own: bool, failed: bool, unverified:
     } else {
         entry.implied && !own
     };
-    if entry.via.len() < VIA_LIMIT && !entry.via.iter().any(|v| v == via) {
-        entry.via.push(via.to_string());
+    if entry.via.len() < VIA_LIMIT && !entry.via.contains(&via) {
+        entry.via.push(via);
     }
 }
 
@@ -435,7 +445,6 @@ impl Summary {
         if access::is_unmapped(trace) {
             *self.unmapped.entry(trace.service.clone()).or_default() += 1;
         }
-        let failed = trace.problem.is_some();
         for item in trace.access.iter().chain(trace.implied.iter()) {
             if item.new {
                 self.denied_footprints.insert(item.key());
@@ -443,22 +452,19 @@ impl Summary {
         }
         for (index, item) in trace.access.iter().chain(trace.implied.iter()).enumerate() {
             let own = index < trace.access.len();
-            let via = format!("{} {}", trace.service.to_ascii_uppercase(), trace.operation);
             record_access_use(
                 self.access.entry(item.key()).or_default(),
+                trace,
                 own,
-                failed,
                 item.unverified,
-                &via,
             );
             if let Some(role) = trace.caller_role.as_ref() {
                 let role_map = self.roles.entry(role.clone()).or_default();
                 record_access_use(
                     role_map.entry(item.key()).or_default(),
+                    trace,
                     own,
-                    failed,
                     item.unverified,
-                    &via,
                 );
             }
         }

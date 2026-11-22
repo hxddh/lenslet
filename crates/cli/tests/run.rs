@@ -737,14 +737,40 @@ fn env_iac_formats_and_context_simulation_work_end_to_end() {
     assert!(tf_text.contains("data \"aws_iam_policy_document\" \"lenslet\""));
     assert!(tf_text.contains("\"sqs:SendMessage\""));
 
-    let cfn_out = env.lenslet(&["policy", "--run", "latest", "--format", "cfn"]);
-    assert_eq!(cfn_out.status.code(), Some(0), "{}", stderr(&cfn_out));
-    let cfn_text = String::from_utf8_lossy(&cfn_out.stdout);
-    assert!(cfn_text.contains("PolicyDocument:"), "{cfn_text}");
     assert!(
-        cfn_text.contains("!Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:jobs'"),
-        "{cfn_text}"
+        tf_text.contains(
+            "\"arn:${data.aws_partition.current.partition}:sqs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:jobs\""
+        ),
+        "{tf_text}"
     );
+
+    // The lock and the run it was written from give the same statements.
+    for format in ["iam", "terraform"] {
+        let from_lock = env.lenslet(&["policy", "--format", format]);
+        let from_run = env.lenslet(&["policy", "--run", "latest", "--format", format]);
+        assert_eq!(from_lock.status.code(), Some(0), "{}", stderr(&from_lock));
+        assert_eq!(from_run.status.code(), Some(0), "{}", stderr(&from_run));
+        assert_eq!(
+            String::from_utf8_lossy(&from_lock.stdout),
+            String::from_utf8_lossy(&from_run.stdout),
+            "{format}"
+        );
+    }
+    let iam: serde_json::Value =
+        serde_json::from_slice(&env.lenslet(&["policy", "--run", "latest"]).stdout)
+            .expect("IAM JSON");
+    assert_eq!(iam["Version"], "2012-10-17");
+
+    for removed in ["cfn", "sam", "cdk"] {
+        let out = env.lenslet(&["policy", "--format", removed]);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(
+            stderr(&out).trim(),
+            format!(
+                "lenslet: --format {removed} was removed in 12.0; use --format iam (any IaC tool accepts IAM JSON)"
+            )
+        );
+    }
 
     // Enterprise policy with cloud-runtime `aws:PrincipalOrgID`: `check` reports
     // `needs cloud context` without `--context`, and passes with `--context`.

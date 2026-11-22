@@ -492,6 +492,23 @@ fn copy_source(mode: Mode, trace: &Trace) -> Option<String> {
     })
 }
 
+/// The service principal a role is passed to (`iam:PassedToService`) by a
+/// call signed for `service` (its SigV4 name). The one table for the gate
+/// and the policy compiler.
+pub fn passed_to_service(service: &str) -> String {
+    match service {
+        "ecs" => "ecs-tasks.amazonaws.com".to_string(),
+        other => format!("{}.amazonaws.com", iam_prefix(other)),
+    }
+}
+
+/// The service name in `kms:ViaService` (`{name}.{region}.amazonaws.com`)
+/// for KMS requests a service signed as `service` makes on the caller's
+/// behalf. The one table for the gate and the policy compiler.
+pub fn kms_via_service_name(service: &str) -> &str {
+    iam_prefix(service)
+}
+
 /// SigV4 signing names that differ from the IAM action prefix.
 fn iam_prefix(service: &str) -> &str {
     match service {

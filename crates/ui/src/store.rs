@@ -369,6 +369,7 @@ fn entries_from_map(map: &BTreeMap<Access, AccessAgg>) -> Vec<AccessEntry> {
                 implied: agg.direct == 0,
                 unverified: agg.unverified > 0,
                 via: agg.via.clone(),
+                ..AccessUse::default()
             },
             new: agg.new > 0,
         })
@@ -596,7 +597,9 @@ pub fn compile_policy(rows: &[AccessRow], opts: &lenslet_core::iac::CompileOptio
         .map(|row| lenslet_core::iac::PolicyInput {
             access: row.access.clone(),
             implied: row.implied,
-            via: row.via.clone(),
+            // No conditions, as `lenslet policy` (12.0: the same statements
+            // from the lock and from a run).
+            services: Vec::new(),
         })
         .collect();
     lenslet_core::iac::compile(&inputs, opts)
