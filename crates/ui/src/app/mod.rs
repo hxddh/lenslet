@@ -1916,7 +1916,13 @@ impl LensletApp {
             Modal::Palette => self.palette_confirm(window, cx),
             // A focused dialog button clicks itself on Enter; only act when
             // the dialog itself has focus.
-            Modal::Confirm(_) if self.root_focus.is_focused(window) => self.confirm_yes(window, cx),
+            Modal::Confirm(_)
+                if self.root_focus.is_focused(window)
+                    || self.calls.focus_handle(cx).is_focused(window)
+                    || self.access.focus_handle(cx).is_focused(window) =>
+            {
+                self.confirm_yes(window, cx)
+            }
             Modal::None if self.mode == Mode::Calls && self.prefs.inspector_open => {
                 let focus = self.inspector.read(cx).body().focus_handle(cx);
                 window.focus(&focus);
