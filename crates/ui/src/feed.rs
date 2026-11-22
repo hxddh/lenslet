@@ -177,7 +177,7 @@ pub fn load(path: &Path) -> LoadResult {
         evicted = evicted.max(1);
     }
     // A long run's header is far before the tail that was read.
-    let header = parsed.header.or_else(|| lenslet_core::runs::header(path));
+    let header = parsed.header.or_else(|| crate::model::read_header(path));
     LoadResult::Loaded(Box::new(Loaded {
         path: path.to_path_buf(),
         header,
@@ -509,7 +509,35 @@ pub struct RunSummary {
     pub pinned: bool,
 }
 
+/// Runs of one project, as indices into the run list (newest first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunGroup {
+    pub project: String,
+    pub runs: Vec<usize>,
+}
+
+/// Group runs by project, keeping the order projects first appear in.
+pub fn group_runs(runs: &[RunSummary]) -> Vec<RunGroup> {
+    let mut groups: Vec<RunGroup> = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        let project = run.project_name();
+        match groups.iter_mut().find(|g| g.project == project) {
+            Some(group) => group.runs.push(index),
+            None => groups.push(RunGroup {
+                project,
+                runs: vec![index],
+            }),
+        }
+    }
+    groups
+}
+
 impl RunSummary {
+    /// `moto`, when the run's header names its emulator.
+    pub fn emulator(&self) -> Option<&str> {
+        self.header.as_ref()?.emulator_name()
+    }
+
     pub fn label(&self) -> String {
         match self.header.as_ref() {
             Some(header) if !header.command.is_empty() => format!("$ {}", header.command.join(" ")),
@@ -551,7 +579,7 @@ pub fn list_runs(dir: &Path) -> Vec<RunSummary> {
             let is_pinned = pinned.contains(&id);
             RunSummary {
                 id,
-                header: lenslet_core::runs::header(&path),
+                header: crate::model::read_header(&path),
                 report: lenslet_core::runs::report(&path),
                 bytes: fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
                 pinned: is_pinned,

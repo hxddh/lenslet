@@ -19,9 +19,9 @@ pub use lenslet_core::{
     access::{Access, CallAccess},
     problem::Problem,
     summary::Report,
-    trace::{HeaderTrace as Header, RunHeader},
+    trace::HeaderTrace as Header,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::fsguard;
 
@@ -112,6 +112,63 @@ impl Exchange {
             .iter()
             .find(|header| header.name.eq_ignore_ascii_case(name))
             .map(|header| header.value.as_str())
+    }
+}
+
+/// A run's header line as the window reads it: the core header plus fields
+/// newer CLIs add (absent in older run files, so everything defaults).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RunHeader {
+    #[serde(flatten)]
+    pub base: lenslet_core::trace::RunHeader,
+    /// The emulator the run talked to, e.g. `moto (started by lenslet)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emulator: Option<String>,
+}
+
+impl std::ops::Deref for RunHeader {
+    type Target = lenslet_core::trace::RunHeader;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl std::ops::DerefMut for RunHeader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
+}
+
+impl From<lenslet_core::trace::RunHeader> for RunHeader {
+    fn from(base: lenslet_core::trace::RunHeader) -> Self {
+        RunHeader {
+            base,
+            emulator: None,
+        }
+    }
+}
+
+impl RunHeader {
+    /// `against moto` text for the run: the emulator name without the
+    /// `(started by lenslet)` note.
+    pub fn emulator_name(&self) -> Option<&str> {
+        let full = self.emulator.as_deref()?.trim();
+        let name = full.split(" (").next().unwrap_or(full).trim();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// The first line of a run file, when it is a header.
+pub fn read_header(path: &std::path::Path) -> Option<RunHeader> {
+    use std::io::BufRead;
+    fsguard::assert_io_allowed();
+    let mut line = String::new();
+    std::io::BufReader::new(File::open(path).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    match parse_record(&line)? {
+        Record::Run(header) => Some(*header),
+        _ => None,
     }
 }
 
@@ -597,13 +654,27 @@ pub struct DecodedSigV4 {
     pub signed_headers: String,
 }
 
+/// Decode an `Authorization` header with `lenslet_core::wire` (the same
+/// parser the proxy uses); only the date and `SignedHeaders`, which the wire
+/// summary does not carry, are read here.
 pub fn decode_sigv4_header(auth: &str) -> Option<DecodedSigV4> {
-    let cred = auth.split("Credential=").nth(1)?.split([',', ' ']).next()?;
-    let mut parts = cred.split('/');
-    let access_key_id = parts.next()?.to_string();
-    let date = parts.next()?.to_string();
-    let region = parts.next()?.to_string();
-    let service = parts.next()?.to_string();
+    if !auth.trim_start().starts_with("AWS4-") {
+        return None;
+    }
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_str(auth).ok()?,
+    );
+    let wire = lenslet_core::wire::wire_info(&headers, "/");
+    let region = wire.region?;
+    let date = auth
+        .split("Credential=")
+        .nth(1)?
+        .split('/')
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
     let signed_headers = auth
         .split("SignedHeaders=")
         .nth(1)
@@ -611,10 +682,10 @@ pub fn decode_sigv4_header(auth: &str) -> Option<DecodedSigV4> {
         .unwrap_or("")
         .to_string();
     Some(DecodedSigV4 {
-        access_key_id,
+        access_key_id: wire.access_key_id.unwrap_or_default(),
         date,
         region,
-        service,
+        service: wire.service,
         signed_headers,
     })
 }
@@ -1694,6 +1765,38 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(parse_record(&line), Some(Record::End(r)) if r.calls == 7));
+    }
+
+    #[test]
+    fn run_header_reads_the_emulator_and_defaults_without_it() {
+        let line = r#"{"type":"run","version":3,"run":"r","cwd":"/p","pid":1,"endpoint":"http://127.0.0.1:1","upstream":"http://127.0.0.1:5000","started":"t","emulator":"moto (started by lenslet)"}"#;
+        let Some(Record::Run(header)) = parse_record(line) else {
+            panic!("header line");
+        };
+        assert_eq!(
+            header.emulator.as_deref(),
+            Some("moto (started by lenslet)")
+        );
+        assert_eq!(header.emulator_name(), Some("moto"));
+        assert_eq!(header.upstream, "http://127.0.0.1:5000");
+        let old = line.replace(r#","emulator":"moto (started by lenslet)""#, "");
+        let Some(Record::Run(header)) = parse_record(&old) else {
+            panic!("older header line");
+        };
+        assert_eq!(header.emulator, None);
+        assert_eq!(header.emulator_name(), None);
+    }
+
+    #[test]
+    fn decodes_sigv4_authorization_with_the_core_wire_parser() {
+        let auth = "AWS4-HMAC-SHA256 Credential=AKID/20261115/eu-west-1/sqs/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc";
+        let decoded = decode_sigv4_header(auth).unwrap();
+        assert_eq!(decoded.access_key_id, "AKID");
+        assert_eq!(decoded.date, "20261115");
+        assert_eq!(decoded.region, "eu-west-1");
+        assert_eq!(decoded.service, "sqs");
+        assert_eq!(decoded.signed_headers, "host;x-amz-date");
+        assert_eq!(decode_sigv4_header("AWS AKID:sig"), None);
     }
 
     #[test]

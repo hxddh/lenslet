@@ -1,9 +1,12 @@
-//! Active desktop control plane: local proxy lifecycle, end-to-end command &
-//! test-suite execution, local emulator discovery & launch, CI workflow
-//! generation, multi-shell SDK snippets, and 1-click CLI installation.
+//! The window's control plane: the managed proxy and command runs, the CLI's
+//! `doctor --json` (which emulators are running, whether Lenslet can start
+//! moto), CI workflow generation, shell snippets and CLI installation.
 //!
-//! All network probes and process spawns check [`crate::fsguard::assert_io_allowed`]
-//! and run strictly on GPUI's background executor.
+//! Every function that touches the disk, the network or a process checks
+//! [`crate::fsguard::assert_io_allowed`] and runs on GPUI's background
+//! executor. Children run in their own process group, die with the window on
+//! Linux (`PR_SET_PDEATHSIG`), and are recorded in `~/.lenslet/ui-children.json`
+//! so a window that crashed can clean up after itself on its next start.
 
 use std::{
     ffi::OsString,
@@ -16,9 +19,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::fsguard;
+use serde::{Deserialize, Serialize};
+
+use crate::{fsguard, i18n::Tr, tr};
 
 pub const DEFAULT_PROXY_PORT: u16 = 9297;
+/// The most stdout/stderr the window keeps for a run.
+pub const MAX_LOG_BYTES: usize = 256 * 1024;
+/// The install hint shown when no emulator can be found or started.
+pub const MOTO_INSTALL: &str = "pip install 'moto[server]'";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShellFormat {
@@ -50,104 +59,177 @@ impl ShellFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RunGateMode {
-    #[default]
-    Record,
-    UpdateLock,
-    CheckLock,
-    Enforce,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EmulatorKind {
-    AwsEmulator,
-    Moto,
-    LocalStack,
-    Minio,
-}
-
-impl EmulatorKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            EmulatorKind::AwsEmulator => "AWS Emulator (:9298)",
-            EmulatorKind::Moto => "Moto (:5000)",
-            EmulatorKind::LocalStack => "LocalStack (:4566)",
-            EmulatorKind::Minio => "MinIO (:9000)",
-        }
-    }
-
-    pub fn binary_name(self) -> &'static str {
-        match self {
-            EmulatorKind::AwsEmulator => "aws-emulator",
-            EmulatorKind::Moto => "moto_server",
-            EmulatorKind::LocalStack => "localstack",
-            EmulatorKind::Minio => "minio",
-        }
-    }
-
-    pub fn default_port(self) -> u16 {
-        match self {
-            EmulatorKind::AwsEmulator => 9298,
-            EmulatorKind::Moto => 5000,
-            EmulatorKind::LocalStack => 4566,
-            EmulatorKind::Minio => 9000,
-        }
-    }
-}
-
+/// What `/_lenslet/health` says about the proxy on the managed port.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProxyHealth {
     pub running: bool,
-    pub managed: bool,
     pub port: u16,
     pub pid: Option<u32>,
-    pub run: Option<String>,
     pub upstream: Option<String>,
     pub enforce: bool,
     pub calls: usize,
     pub errors: usize,
-    pub blocked: usize,
-    pub emulators: Vec<DetectedEmulator>,
-    pub installed_emulators: Vec<EmulatorKind>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DetectedEmulator {
-    pub name: &'static str,
-    pub port: u16,
+// -- doctor --------------------------------------------------------------------
+
+/// A running, protocol-verified emulator, as `lenslet doctor --json` lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Emulator {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
     pub url: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProxyLaunchOpts {
-    pub port: u16,
-    pub upstream: Option<String>,
-    pub routes: Vec<String>,
-    pub enforce: bool,
-    pub allow_docker: bool,
-    pub cwd: Option<PathBuf>,
+/// The emulator Lenslet starts itself when none is running.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct ManagedEmulator {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct CommandRunOpts {
-    pub command_line: String,
-    pub cwd: PathBuf,
-    pub upstream: Option<String>,
-    pub routes: Vec<String>,
-    pub gate_mode: RunGateMode,
-    pub allow_docker: bool,
-    pub runs_dir: PathBuf,
+/// The parts of `lenslet doctor --json` the window shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Doctor {
+    #[serde(default)]
+    pub emulators: Vec<Emulator>,
+    #[serde(default)]
+    pub managed: Option<ManagedEmulator>,
 }
 
-pub struct ManagedRun {
-    pub child: Child,
-    pub trace_path: PathBuf,
-    pub command_line: String,
+pub fn parse_doctor(json: &str) -> Option<Doctor> {
+    serde_json::from_str(json.trim()).ok()
 }
 
-/// Resolve a complete developer `PATH` even when `Lenslet.app` was launched
-/// from macOS Finder/Dock/Spotlight (where `launchd` only sets `/usr/bin:/bin`).
+/// What the next run will talk to, in the words the window uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmulatorStatus {
+    /// `doctor` has not answered yet.
+    Checking,
+    /// The CLI could not be run.
+    NoCli,
+    Running {
+        name: String,
+        url: String,
+    },
+    /// Nothing running, but Lenslet will start this one.
+    WillStart(String),
+    /// Nothing running and nothing Lenslet can start.
+    Missing,
+}
+
+impl EmulatorStatus {
+    pub fn from_doctor(doctor: Option<&Result<Doctor, Tr>>) -> Self {
+        match doctor {
+            None => EmulatorStatus::Checking,
+            Some(Err(_)) => EmulatorStatus::NoCli,
+            Some(Ok(doctor)) => {
+                if let Some(emu) = doctor.emulators.first() {
+                    EmulatorStatus::Running {
+                        name: emu.name.clone(),
+                        url: emu.url.clone(),
+                    }
+                } else if let Some(managed) = doctor.managed.as_ref().filter(|m| m.available) {
+                    EmulatorStatus::WillStart(if managed.name.is_empty() {
+                        "moto".into()
+                    } else {
+                        managed.name.clone()
+                    })
+                } else {
+                    EmulatorStatus::Missing
+                }
+            }
+        }
+    }
+
+    pub fn message(&self) -> Tr {
+        match self {
+            EmulatorStatus::Checking => tr!("Looking for an emulator…", "正在查找模拟器…"),
+            EmulatorStatus::NoCli => tr!(
+                "The lenslet CLI was not found next to the window or on PATH",
+                "未在窗口旁或 PATH 中找到 lenslet 命令行工具"
+            ),
+            EmulatorStatus::Running { name, url } => {
+                tr!("{name} running at {url}", "{name} 正在 {url} 运行")
+            }
+            EmulatorStatus::WillStart(name) => tr!(
+                "No emulator — Lenslet will start {name}",
+                "未发现模拟器 — Lenslet 会自动启动 {name}"
+            ),
+            EmulatorStatus::Missing => tr!(
+                "No emulator found — install moto: {MOTO_INSTALL}",
+                "未发现模拟器 — 请安装 moto：{MOTO_INSTALL}"
+            ),
+        }
+    }
+
+    pub fn ok(&self) -> bool {
+        matches!(
+            self,
+            EmulatorStatus::Running { .. } | EmulatorStatus::WillStart(_)
+        )
+    }
+}
+
+/// Run `lenslet doctor --json`, bounded by `timeout`.
+pub fn run_doctor(timeout: Duration) -> Result<Doctor, Tr> {
+    fsguard::assert_io_allowed();
+    let bin = sibling_cli_binary()?;
+    let mut cmd = Command::new(&bin);
+    cmd.env("PATH", augmented_path())
+        .args(["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    configure_child(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| {
+        tr!(
+            "Cannot run lenslet doctor: {e}",
+            "无法运行 lenslet doctor：{e}"
+        )
+    })?;
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        if let Some(pipe) = stdout.as_mut() {
+            let _ = pipe.read_to_string(&mut out);
+        }
+        out
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                signal_group(child.id(), Signal::Kill);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(tr!(
+                    "lenslet doctor did not answer",
+                    "lenslet doctor 没有响应"
+                ));
+            }
+        }
+    }
+    let out = reader.join().unwrap_or_default();
+    parse_doctor(&out).ok_or_else(|| {
+        tr!(
+            "lenslet doctor printed no JSON (is the CLI older than the window?)",
+            "lenslet doctor 没有输出 JSON（命令行工具版本是否过旧？）"
+        )
+    })
+}
+
+// -- paths ---------------------------------------------------------------------
+
+/// A complete developer `PATH` even when `Lenslet.app` was launched from
+/// Finder, where `launchd` only sets `/usr/bin:/bin`.
 pub fn augmented_path() -> OsString {
     static AUGMENTED: OnceLock<OsString> = OnceLock::new();
     AUGMENTED
@@ -247,28 +329,47 @@ pub fn find_in_path(bin_name: &str) -> Option<PathBuf> {
     } else {
         bin_name.to_string()
     };
-    for dir in std::env::split_paths(&augmented_path()) {
-        let candidate = dir.join(&exe_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    std::env::split_paths(&augmented_path())
+        .map(|dir| dir.join(&exe_name))
+        .find(|candidate| candidate.is_file())
 }
 
-/// Probe `127.0.0.1:port/_lenslet/health`, active local emulator ports, and installed emulator CLIs.
-pub fn probe_environment(port: u16, managed: bool) -> ProxyHealth {
+/// The `lenslet` CLI next to `lenslet-ui` (inside `Lenslet.app` or a release
+/// directory), else the one on `PATH`.
+pub fn sibling_cli_binary() -> Result<PathBuf, Tr> {
+    fsguard::assert_io_allowed();
+    let name = if cfg!(windows) {
+        "lenslet.exe"
+    } else {
+        "lenslet"
+    };
+    if let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize())
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    find_in_path("lenslet").ok_or_else(|| {
+        tr!(
+            "The lenslet CLI was not found next to the window or on PATH",
+            "未在窗口旁或 PATH 中找到 lenslet 命令行工具"
+        )
+    })
+}
+
+// -- the managed proxy ------------------------------------------------------------
+
+pub fn probe_proxy(port: u16) -> ProxyHealth {
     fsguard::assert_io_allowed();
     let mut health = ProxyHealth {
         port,
-        managed,
         ..ProxyHealth::default()
     };
-
     if let Some(json) = http_get_json(port, "/_lenslet/health") {
         health.running = true;
         health.pid = json.get("pid").and_then(|v| v.as_u64()).map(|n| n as u32);
-        health.run = json.get("run").and_then(|v| v.as_str()).map(str::to_string);
         health.upstream = json
             .get("upstream")
             .and_then(|v| v.as_str())
@@ -279,44 +380,8 @@ pub fn probe_environment(port: u16, managed: bool) -> ProxyHealth {
             .unwrap_or(false);
         health.calls = json.get("calls").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         health.errors = json.get("errors").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        health.blocked = json.get("blocked").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     }
-
-    for (name, emu_port, tls) in [
-        ("AWS Emulator", 9298u16, true),
-        ("LocalStack", 4566, false),
-        ("Moto", 5000, false),
-        ("MinIO", 9000, false),
-        ("DynamoDB Local", 8000, false),
-        ("ElasticMQ", 9324, false),
-    ] {
-        if tcp_open(emu_port) {
-            let scheme = if tls { "https" } else { "http" };
-            health.emulators.push(DetectedEmulator {
-                name,
-                port: emu_port,
-                url: format!("{scheme}://127.0.0.1:{emu_port}"),
-            });
-        }
-    }
-
-    for kind in [
-        EmulatorKind::AwsEmulator,
-        EmulatorKind::Moto,
-        EmulatorKind::LocalStack,
-        EmulatorKind::Minio,
-    ] {
-        if find_in_path(kind.binary_name()).is_some() {
-            health.installed_emulators.push(kind);
-        }
-    }
-
     health
-}
-
-fn tcp_open(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok()
 }
 
 fn http_get_json(port: u16, path: &str) -> Option<serde_json::Value> {
@@ -336,32 +401,26 @@ fn http_get_json(port: u16, path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(body.trim()).ok()
 }
 
-/// Locate the bundled `lenslet` CLI binary next to `lenslet-ui` (inside `Lenslet.app`
-/// or release directory), falling back to user `PATH`.
-pub fn sibling_cli_binary() -> Result<PathBuf, String> {
-    fsguard::assert_io_allowed();
-    let name = if cfg!(windows) {
-        "lenslet.exe"
-    } else {
-        "lenslet"
-    };
-    if let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize())
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    if let Some(found) = find_in_path("lenslet") {
-        return Ok(found);
-    }
-    Err("CLI binary `lenslet` not found next to Lenslet UI or on PATH".to_string())
+#[derive(Clone, Debug)]
+pub struct ProxyLaunchOpts {
+    pub port: u16,
+    pub upstream: Option<String>,
+    pub routes: Vec<String>,
+    pub enforce: bool,
+    pub allow_docker: bool,
+    pub cwd: Option<PathBuf>,
 }
 
-/// Spawn `lenslet run` as a managed proxy and verify it actually binds & responds
-/// on `/_lenslet/health`, surfacing exact `stderr` diagnostics on failure.
-pub fn spawn_proxy_verified(opts: &ProxyLaunchOpts) -> Result<Child, String> {
+/// Whether a health reply belongs to the proxy we spawned (and not to one
+/// that already held the port).
+pub fn health_is_ours(health_pid: Option<u32>, child_pid: u32) -> bool {
+    health_pid == Some(child_pid)
+}
+
+/// Start `lenslet run` as a managed proxy and wait until *it* answers
+/// `/_lenslet/health`. Fails with the proxy's first stderr line when it
+/// exits, and when another process answers or nothing answers in time.
+pub fn spawn_proxy_verified(opts: &ProxyLaunchOpts) -> Result<Child, Tr> {
     fsguard::assert_io_allowed();
     let bin = sibling_cli_binary()?;
     let err_path = std::env::temp_dir().join(format!(
@@ -369,8 +428,8 @@ pub fn spawn_proxy_verified(opts: &ProxyLaunchOpts) -> Result<Child, String> {
         std::process::id(),
         opts.port
     ));
-    let err_file =
-        fs::File::create(&err_path).map_err(|e| format!("cannot open temporary proxy log: {e}"))?;
+    let err_file = fs::File::create(&err_path)
+        .map_err(|e| tr!("Cannot open the proxy log: {e}", "无法打开代理日志：{e}"))?;
 
     let mut cmd = Command::new(&bin);
     cmd.env("PATH", augmented_path())
@@ -381,78 +440,129 @@ pub fn spawn_proxy_verified(opts: &ProxyLaunchOpts) -> Result<Child, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(err_file));
-    if let Some(up) = opts
-        .upstream
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        cmd.arg("--upstream").arg(up);
-    }
-    for route in &opts.routes {
-        let r = route.trim();
-        if !r.is_empty() {
-            cmd.arg("--route").arg(r);
-        }
-    }
+    push_network_args(
+        &mut cmd,
+        opts.upstream.as_deref(),
+        &opts.routes,
+        opts.allow_docker,
+    );
     if opts.enforce {
         cmd.arg("--enforce");
-    }
-    if opts.allow_docker {
-        cmd.arg("--allow-docker");
     }
     if let Some(dir) = opts.cwd.as_deref().filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    configure_child(&mut cmd);
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to start `lenslet run`: {e}"))?;
+        .map_err(|e| tr!("Could not start the proxy: {e}", "无法启动本地代理：{e}"))?;
+    let pid = child.id();
 
-    let deadline = Instant::now() + Duration::from_millis(600);
-    while Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
         if let Ok(Some(status)) = child.try_wait() {
             let detail = fs::read_to_string(&err_path).unwrap_or_default();
-            let _ = fs::remove_file(&err_path);
-            let msg = detail
+            let line = detail
                 .lines()
                 .find(|l| !l.trim().is_empty())
                 .map(str::trim)
-                .unwrap_or("proxy exited immediately");
-            return Err(format!("{msg} (exit {})", status.code().unwrap_or(1)));
+                .unwrap_or_default()
+                .to_string();
+            let code = status.code().unwrap_or(1);
+            break Err(if line.is_empty() {
+                tr!(
+                    "The proxy exited right away (exit {code})",
+                    "本地代理启动后立即退出 (exit {code})"
+                )
+            } else {
+                tr!("{line} (exit {code})", "{line} (exit {code})")
+            });
         }
-        if http_get_json(opts.port, "/_lenslet/health").is_some() {
-            let _ = fs::remove_file(&err_path);
-            return Ok(child);
+        if let Some(json) = http_get_json(opts.port, "/_lenslet/health") {
+            let health_pid = json.get("pid").and_then(|v| v.as_u64()).map(|n| n as u32);
+            if health_is_ours(health_pid, pid) {
+                break Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            let port = opts.port;
+            break Err(tr!(
+                "The proxy did not answer on port {port} (is another one already using it?)",
+                "本地代理未在端口 {port} 上响应（是否已有其他进程占用？）"
+            ));
         }
         std::thread::sleep(Duration::from_millis(25));
-    }
+    };
     let _ = fs::remove_file(&err_path);
-    Ok(child)
+    match result {
+        Ok(()) => Ok(child),
+        Err(err) => {
+            terminate_and_reap(vec![child], Duration::from_millis(500));
+            Err(err)
+        }
+    }
 }
 
-/// Launch an end-to-end command / test suite under `lenslet run`, streaming trace
-/// events to `<trace_path>` and stdout/stderr to `<log_path>`.
-pub fn spawn_command_run(opts: &CommandRunOpts) -> Result<ManagedRun, String> {
+fn push_network_args(
+    cmd: &mut Command,
+    upstream: Option<&str>,
+    routes: &[String],
+    allow_docker: bool,
+) {
+    if let Some(up) = upstream.map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("--upstream").arg(up);
+    }
+    for route in routes.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
+        cmd.arg("--route").arg(route);
+    }
+    if allow_docker {
+        cmd.arg("--allow-docker");
+    }
+}
+
+// -- command runs --------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct CommandRunOpts {
+    pub command_line: String,
+    pub cwd: PathBuf,
+    pub upstream: Option<String>,
+    pub routes: Vec<String>,
+    /// Block calls outside the lock (`--enforce`).
+    pub enforce: bool,
+    /// Accept calls from Docker containers (`--allow-docker`).
+    pub allow_docker: bool,
+    pub runs_dir: PathBuf,
+}
+
+pub struct ManagedRun {
+    pub child: Child,
+    pub trace_path: PathBuf,
+    pub command_line: String,
+}
+
+/// Launch a command under `lenslet run`, writing the trace to a new run file
+/// and stdout/stderr to its companion `.log`.
+pub fn spawn_command_run(opts: &CommandRunOpts) -> Result<ManagedRun, Tr> {
     fsguard::assert_io_allowed();
-    let command_trimmed = opts.command_line.trim();
-    if command_trimmed.is_empty() {
-        return Err("Please enter a command to run (e.g. `pytest` or `npm test`)".into());
+    let command = opts.command_line.trim();
+    if command.is_empty() {
+        return Err(tr!(
+            "Set a test command first (for example pytest or npm test)",
+            "请先设置测试命令（例如 pytest 或 npm test）"
+        ));
     }
     if !opts.cwd.is_dir() {
-        return Err(format!(
-            "Workspace folder `{}` does not exist",
-            opts.cwd.display()
+        let dir = opts.cwd.display();
+        return Err(tr!(
+            "The project folder {dir} does not exist",
+            "项目目录 {dir} 不存在"
         ));
     }
     let bin = sibling_cli_binary()?;
     let trace_path = lenslet_core::runs::create(&opts.runs_dir)
-        .map_err(|e| format!("cannot create run trace file: {e}"))?;
+        .map_err(|e| tr!("Cannot create the run file: {e}", "无法创建运行文件：{e}"))?;
     let log_path = lenslet_core::runs::log_path_for(&trace_path);
 
     let mut cmd = Command::new(&bin);
@@ -463,133 +573,65 @@ pub fn spawn_command_run(opts: &CommandRunOpts) -> Result<ManagedRun, String> {
         .arg(&trace_path)
         .arg("--log")
         .arg(&log_path);
-
-    if let Some(up) = opts
-        .upstream
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        cmd.arg("--upstream").arg(up);
-    }
-    for route in &opts.routes {
-        let r = route.trim();
-        if !r.is_empty() {
-            cmd.arg("--route").arg(r);
-        }
-    }
-    if opts.allow_docker {
-        cmd.arg("--allow-docker");
-    }
-    match opts.gate_mode {
-        RunGateMode::Record => {}
-        RunGateMode::UpdateLock => {
-            cmd.arg("--update");
-        }
-        RunGateMode::CheckLock => {
-            cmd.arg("--check").arg("--strict");
-        }
-        RunGateMode::Enforce => {
-            cmd.arg("--enforce");
-        }
+    push_network_args(
+        &mut cmd,
+        opts.upstream.as_deref(),
+        &opts.routes,
+        opts.allow_docker,
+    );
+    if opts.enforce {
+        cmd.arg("--enforce");
     }
     cmd.arg("--");
     if cfg!(windows) {
-        cmd.args(["cmd", "/C", command_trimmed]);
+        cmd.args(["cmd", "/C", command]);
     } else {
-        cmd.args(["sh", "-c", command_trimmed]);
+        cmd.args(["sh", "-c", command]);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    configure_child(&mut cmd);
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch `lenslet run`: {e}"))?;
-
+    let child = cmd.spawn().map_err(|e| {
+        tr!(
+            "Could not start lenslet run: {e}",
+            "无法启动 lenslet run：{e}"
+        )
+    })?;
     Ok(ManagedRun {
         child,
         trace_path,
-        command_line: command_trimmed.to_string(),
+        command_line: command.to_string(),
     })
 }
 
-/// Start an installed local emulator directly from the desktop workbench.
-pub fn spawn_local_emulator(kind: EmulatorKind, home: &Path) -> Result<(Child, u16), String> {
+/// The proxy port a run file's header names (`endpoint`), if it has one yet.
+pub fn run_endpoint_port(trace_path: &Path) -> Option<u16> {
     fsguard::assert_io_allowed();
-    let port = kind.default_port();
-    if tcp_open(port) {
-        return Err(format!("Port {port} is already listening"));
-    }
-    let bin = find_in_path(kind.binary_name())
-        .ok_or_else(|| format!("`{}` is not installed on PATH", kind.binary_name()))?;
-    let mut cmd = Command::new(&bin);
-    cmd.env("PATH", augmented_path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    match kind {
-        EmulatorKind::AwsEmulator => {
-            cmd.env("EMULATOR_TELEMETRY", "off")
-                .args(["--telemetry", "off", "--port", "9298"]);
-        }
-        EmulatorKind::Moto => {
-            cmd.args(["-H", "127.0.0.1", "-p", "5000"]);
-        }
-        EmulatorKind::LocalStack => {
-            cmd.args(["start"]);
-        }
-        EmulatorKind::Minio => {
-            let data_dir = home.join(".lenslet/minio-data");
-            let _ = fs::create_dir_all(&data_dir);
-            cmd.arg("server")
-                .arg(&data_dir)
-                .args(["--address", "127.0.0.1:9000"]);
-        }
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", kind.binary_name()))?;
-
-    let deadline = Instant::now() + Duration::from_millis(1_800);
-    while Instant::now() < deadline {
-        if let Ok(Some(st)) = child.try_wait() {
-            return Err(format!(
-                "{} exited early (code {})",
-                kind.binary_name(),
-                st.code().unwrap_or(1)
-            ));
-        }
-        if tcp_open(port) {
-            return Ok((child, port));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok((child, port))
+    let header = lenslet_core::runs::header(trace_path)?;
+    endpoint_port(&header.endpoint)
 }
 
-/// Discover common test/run commands from files in `cwd` (`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Makefile`).
-pub fn detect_project_commands(cwd: &Path) -> Vec<(String, String)> {
+pub fn endpoint_port(endpoint: &str) -> Option<u16> {
+    endpoint
+        .trim_end_matches('/')
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .filter(|p| *p > 0)
+}
+
+/// Discover test commands from files in `cwd`. Empty when nothing matches:
+/// the window then asks for a command instead of guessing one.
+pub fn detect_project_commands(cwd: &Path) -> Vec<String> {
     fsguard::assert_io_allowed();
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut push = |label: &str, cmd: &str| {
-        if !out.iter().any(|(_, c)| c == cmd) {
-            out.push((label.to_string(), cmd.to_string()));
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |cmd: String| {
+        if !out.contains(&cmd) {
+            out.push(cmd);
         }
     };
-
-    let pkg_json = cwd.join("package.json");
-    if let Ok(text) = fs::read_to_string(&pkg_json)
+    if let Ok(text) = fs::read_to_string(cwd.join("package.json"))
         && let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
         && let Some(scripts) = val.get("scripts").and_then(|s| s.as_object())
     {
@@ -602,14 +644,13 @@ pub fn detect_project_commands(cwd: &Path) -> Vec<(String, String)> {
         } else {
             "npm run"
         };
-        for key in ["test", "test:integration", "test:e2e", "dev", "start"] {
+        for key in ["test", "test:integration", "test:e2e"] {
             if scripts.contains_key(key) {
-                let cmd = if key == "test" && runner == "npm run" {
+                push(if key == "test" && runner == "npm run" {
                     "npm test".to_string()
                 } else {
                     format!("{runner} {key}")
-                };
-                push(&cmd, &cmd);
+                });
             }
         }
     }
@@ -618,85 +659,103 @@ pub fn detect_project_commands(cwd: &Path) -> Vec<(String, String)> {
         || cwd.join("requirements.txt").is_file()
     {
         if cwd.join("uv.lock").is_file() {
-            push("uv run pytest", "uv run pytest");
+            push("uv run pytest".into());
         }
-        push("pytest", "pytest");
+        push("pytest".into());
     }
     if cwd.join("Cargo.toml").is_file() {
-        push("cargo test", "cargo test");
+        push("cargo test".into());
     }
     if cwd.join("go.mod").is_file() {
-        push("go test ./...", "go test ./...");
+        push("go test ./...".into());
     }
     if cwd.join("Makefile").is_file() {
-        push("make test", "make test");
-    }
-    if out.is_empty() {
-        out.push(("pytest".into(), "pytest".into()));
-        out.push(("npm test".into(), "npm test".into()));
-        out.push(("cargo test".into(), "cargo test".into()));
+        push("make test".into());
     }
     out
 }
 
-/// Generate `.github/workflows/lenslet.yml` in `cwd` directly from the workbench.
-pub fn generate_ci_workflow(
-    cwd: &Path,
-    command_line: &str,
-    upstream: &str,
-    emulator_cmd: Option<&str>,
-) -> Result<PathBuf, String> {
-    fsguard::assert_io_allowed();
-    if !cwd.is_dir() {
-        return Err(format!("Workspace `{}` is not a directory", cwd.display()));
-    }
-    let wf_path = cwd.join(".github/workflows/lenslet.yml");
-    if let Some(parent) = wf_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
-    let cmd_trimmed = if command_line.trim().is_empty() {
-        "npm test"
-    } else {
-        command_line.trim()
-    };
-    let up_trimmed = upstream.trim();
-    let is_sandbox =
-        up_trimmed.is_empty() || up_trimmed == "sandbox" || up_trimmed.starts_with("sandbox://");
-    let up_yaml_raw = if is_sandbox { "sandbox" } else { up_trimmed };
+// -- CI ------------------------------------------------------------------------
+
+pub enum CiError {
+    /// The workflow file is already there; ask before replacing it.
+    Exists(PathBuf),
+    Failed(Tr),
+}
+
+pub fn ci_workflow_path(cwd: &Path) -> PathBuf {
+    cwd.join(".github/workflows/lenslet.yml")
+}
+
+/// The workflow text. With no upstream the action's `lenslet run` finds or
+/// starts moto, so the job installs it first.
+pub fn ci_workflow_yaml(command_line: &str, upstream: Option<&str>) -> String {
     let yaml_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let emu_val = if is_sandbox {
-        "''".to_string()
-    } else {
-        emulator_cmd
-            .filter(|s| !s.trim().is_empty())
-            .map(yaml_quote)
-            .unwrap_or_else(|| "'moto_server -p 5000'".to_string())
+    let command = match command_line.trim() {
+        "" => "npm test",
+        other => other,
     };
     let version = env!("CARGO_PKG_VERSION");
-    let content = format!(
+    let mut out = String::from(
         "# Lenslet: show the AWS access each pull request needs, and fail when it grows.\n\
          # Docs: https://github.com/hxddh/lenslet#ci\n\
          name: Lenslet\n\
          on:\n  pull_request:\n  push:\n    branches: [main]\n\
          permissions:\n  contents: read\n  pull-requests: write\n\
          jobs:\n  aws-access:\n    runs-on: ubuntu-latest\n    steps:\n\
-         \x20     - uses: actions/checkout@v5\n\
-         \x20     - uses: hxddh/lenslet@lenslet-v{version}\n\
-         \x20       with:\n\
-         \x20         command: {}\n\
-         \x20         upstream: {}\n\
-         \x20         emulator: {emu_val}\n",
-        yaml_quote(cmd_trimmed),
-        yaml_quote(up_yaml_raw),
+         \x20     - uses: actions/checkout@v5\n",
     );
-    fs::write(&wf_path, content).map_err(|e| format!("cannot write {}: {e}", wf_path.display()))?;
-    Ok(wf_path)
+    let upstream = upstream.map(str::trim).filter(|u| !u.is_empty());
+    if upstream.is_none() {
+        out.push_str(&format!("      - run: {MOTO_INSTALL}\n"));
+    }
+    out.push_str(&format!(
+        "      - uses: hxddh/lenslet@lenslet-v{version}\n        with:\n          command: {}\n",
+        yaml_quote(command)
+    ));
+    if let Some(up) = upstream {
+        out.push_str(&format!("          upstream: {}\n", yaml_quote(up)));
+    }
+    out
 }
 
-/// Read up to the last `max_bytes` of a run's companion stdout/stderr `.log` file.
+/// Write `.github/workflows/lenslet.yml`; an existing file is only replaced
+/// with `overwrite`.
+pub fn generate_ci_workflow(
+    cwd: &Path,
+    command_line: &str,
+    upstream: Option<&str>,
+    overwrite: bool,
+) -> Result<PathBuf, CiError> {
+    fsguard::assert_io_allowed();
+    if !cwd.is_dir() {
+        let dir = cwd.display();
+        return Err(CiError::Failed(tr!(
+            "The project folder {dir} does not exist",
+            "项目目录 {dir} 不存在"
+        )));
+    }
+    let path = ci_workflow_path(cwd);
+    if path.exists() && !overwrite {
+        return Err(CiError::Exists(path));
+    }
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, ci_workflow_yaml(command_line, upstream))
+    };
+    write().map_err(|e| {
+        let p = path.display();
+        CiError::Failed(tr!("Cannot write {p}: {e}", "无法写入 {p}：{e}"))
+    })?;
+    Ok(path)
+}
+
+/// The last `max_bytes` (at most [`MAX_LOG_BYTES`]) of a run's stdout/stderr log.
 pub fn read_run_log(log_path: &Path, max_bytes: usize) -> Option<String> {
     fsguard::assert_io_allowed();
+    let max_bytes = max_bytes.min(MAX_LOG_BYTES);
     let mut file = fs::File::open(log_path).ok()?;
     let len = file.metadata().ok()?.len() as usize;
     if len == 0 {
@@ -705,104 +764,278 @@ pub fn read_run_log(log_path: &Path, max_bytes: usize) -> Option<String> {
     let mut buf = Vec::new();
     if len > max_bytes {
         use std::io::{Seek, SeekFrom};
-        let skip = (len - max_bytes) as u64;
-        let _ = file.seek(SeekFrom::Start(skip));
+        let _ = file.seek(SeekFrom::Start((len - max_bytes) as u64));
     }
     file.read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Request a clean shutdown via `POST /_lenslet/shutdown` (or `SIGTERM`) so
-/// `lenslet run` seals the trace and writes its `end` report before exiting;
-/// falls back to `kill()` only if `grace` expires.
-pub fn stop_proxy_gracefully(child: Child, port: u16) {
-    fsguard::assert_io_allowed();
-    stop_proxy_inner(child, Some(port), Duration::from_millis(2_500));
+// -- stopping children ------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    Term,
+    Kill,
 }
 
-/// Stop an active `ManagedRun` cleanly via its proxy endpoint + `SIGTERM`.
-pub fn stop_managed_run(run: ManagedRun, endpoint_port: Option<u16>) {
-    fsguard::assert_io_allowed();
-    stop_proxy_inner(run.child, endpoint_port, Duration::from_millis(2_500));
-}
-
-/// Graceful child shutdown safe to call during window teardown (`Quit` / `Drop`)
-/// without tripping [`fsguard`], bounded so quitting never stalls the UI.
-pub fn stop_proxy_on_exit(child: Child, port: u16) {
-    stop_proxy_inner(child, Some(port), Duration::from_millis(800));
-}
-
-pub fn stop_child_on_exit(mut child: Child) {
-    let pid = child.id();
-    send_group_signal(pid, "TERM");
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() {
-            send_group_signal(pid, "KILL");
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(15));
+/// Put a child in its own process group and, on Linux, have the kernel send
+/// it `SIGTERM` if the window dies first.
+pub fn configure_child(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
-    send_group_signal(pid, "KILL");
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: only async-signal-safe libc calls run between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                if libc::getppid() != parent {
+                    libc::raise(libc::SIGTERM);
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
-fn stop_proxy_inner(mut child: Child, port: Option<u16>, grace: Duration) {
-    if child.try_wait().ok().flatten().is_some() {
+/// Signal a child's process group (falling back to the process itself).
+#[cfg(unix)]
+pub fn signal_group(pid: u32, sig: Signal) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    if pid <= 1 {
         return;
     }
-    let pid = child.id();
-    if let Some(port) = port.filter(|p| *p > 0) {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-            let req = format!(
-                "POST /_lenslet/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            if stream.write_all(req.as_bytes()).is_ok() {
-                let _ = stream.flush();
-                let mut drain = [0u8; 256];
-                let _ = stream.read(&mut drain);
-            }
+    let signo = match sig {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    // SAFETY: plain syscalls on a pid we spawned.
+    unsafe {
+        if libc::kill(-pid, signo) != 0 {
+            libc::kill(pid, signo);
         }
-    }
-    send_group_signal(pid, "TERM");
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() {
-            send_group_signal(pid, "KILL");
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(15));
-    }
-    send_group_signal(pid, "KILL");
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(unix)]
-fn send_group_signal(pid: u32, sig: &str) {
-    if pid > 0 {
-        let _ = Command::new("sh")
-            .args([
-                "-c",
-                &format!("kill -{sig} -{pid} 2>/dev/null || kill -{sig} {pid} 2>/dev/null || true"),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
     }
 }
 
 #[cfg(not(unix))]
-fn send_group_signal(_pid: u32, _sig: &str) {}
+pub fn signal_group(_pid: u32, _sig: Signal) {}
 
-/// Symlink (or copy on Windows) the bundled `lenslet` CLI into `~/.local/bin/lenslet`
-/// (or `/usr/local/bin/lenslet` when already writable).
-pub fn install_cli_to_path(home: &Path) -> Result<PathBuf, String> {
+/// `SIGTERM` every child's group now and return; a background thread reaps
+/// them and sends `SIGKILL` to any still running after `grace`. Safe to call
+/// from the main thread (quit, window close): it never waits.
+pub fn terminate_and_reap(children: Vec<Child>, grace: Duration) {
+    let mut live = Vec::new();
+    for mut child in children {
+        if child.try_wait().ok().flatten().is_none() {
+            signal_group(child.id(), Signal::Term);
+            live.push(child);
+        }
+    }
+    if live.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("lenslet-reaper".into())
+        .spawn(move || reap(live, grace));
+}
+
+fn reap(mut children: Vec<Child>, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    while !children.is_empty() && Instant::now() < deadline {
+        children.retain_mut(|c| c.try_wait().ok().flatten().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for mut child in children {
+        signal_group(child.id(), Signal::Kill);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Ask `lenslet run` on `port` to seal its trace and exit.
+fn request_shutdown(port: u16) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+        let req = format!(
+            "POST /_lenslet/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_ok() {
+            let mut drain = [0u8; 256];
+            let _ = stream.read(&mut drain);
+        }
+    }
+}
+
+/// Stop a managed `lenslet run` cleanly (shutdown request on its own port,
+/// then `SIGTERM`, then `SIGKILL` after `grace`). Blocks: background only.
+pub fn stop_gracefully(mut child: Child, port: Option<u16>, grace: Duration) {
+    fsguard::assert_io_allowed();
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Some(port) = port {
+        request_shutdown(port);
+    }
+    signal_group(child.id(), Signal::Term);
+    reap(vec![child], grace);
+}
+
+/// Stop a command run using *its* proxy port, read from its own run file.
+pub fn stop_managed_run(run: ManagedRun) {
+    let port = run_endpoint_port(&run.trace_path);
+    stop_gracefully(run.child, port, Duration::from_millis(2_500));
+}
+
+// -- the child registry -------------------------------------------------------------
+
+/// One child the window started, recorded so a later window can clean up
+/// after a crash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildEntry {
+    pub pid: u32,
+    /// The `lenslet-ui` process that started it.
+    pub owner: u32,
+}
+
+pub fn registry_path(home: &Path) -> PathBuf {
+    home.join(".lenslet/ui-children.json")
+}
+
+fn read_registry(home: &Path) -> Vec<ChildEntry> {
+    fs::read_to_string(registry_path(home))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_registry(home: &Path, entries: &[ChildEntry]) {
+    let path = registry_path(home);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string(entries) {
+        let tmp = path.with_extension(format!("json.{}", std::process::id()));
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+}
+
+pub fn record_child(home: &Path, pid: u32) {
+    fsguard::assert_io_allowed();
+    let mut entries = read_registry(home);
+    entries.retain(|e| e.pid != pid);
+    entries.push(ChildEntry {
+        pid,
+        owner: std::process::id(),
+    });
+    write_registry(home, &entries);
+}
+
+pub fn forget_children(home: &Path, pids: &[u32]) {
+    fsguard::assert_io_allowed();
+    let mut entries = read_registry(home);
+    let before = entries.len();
+    entries.retain(|e| !pids.contains(&e.pid));
+    if entries.len() != before {
+        write_registry(home, &entries);
+    }
+}
+
+/// Split the registry into children to stop now and entries to keep.
+///
+/// A child is stopped when it is still alive, still looks like a `lenslet`
+/// process (its pid was not reused), and the window that started it is gone.
+/// Children of another live window are kept; dead ones are dropped.
+pub fn plan_cleanup(
+    entries: &[ChildEntry],
+    me: u32,
+    is_lenslet_child: impl Fn(u32) -> bool,
+    is_live_window: impl Fn(u32) -> bool,
+) -> (Vec<u32>, Vec<ChildEntry>) {
+    let mut stop = Vec::new();
+    let mut keep = Vec::new();
+    for entry in entries {
+        if !is_lenslet_child(entry.pid) {
+            continue;
+        }
+        if entry.owner != me && is_live_window(entry.owner) {
+            keep.push(entry.clone());
+        } else if entry.owner != me {
+            stop.push(entry.pid);
+        } else {
+            keep.push(entry.clone());
+        }
+    }
+    (stop, keep)
+}
+
+/// The command line of a live process, or `None` when it is gone.
+fn process_cmdline(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        Some(String::from_utf8_lossy(&raw).replace('\0', " "))
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let out = Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn looks_like_lenslet_child(cmdline: &str) -> bool {
+    let first = cmdline.split_whitespace().next().unwrap_or("");
+    let exe = first.rsplit('/').next().unwrap_or(first);
+    (exe == "lenslet" || exe == "lenslet.exe") && cmdline.contains(" run")
+        || (exe == "lenslet" && cmdline.contains(" doctor"))
+}
+
+/// On startup: stop children a crashed window left behind.
+pub fn cleanup_stale_children(home: &Path) -> usize {
+    fsguard::assert_io_allowed();
+    let entries = read_registry(home);
+    if entries.is_empty() {
+        return 0;
+    }
+    let (stop, keep) = plan_cleanup(
+        &entries,
+        std::process::id(),
+        |pid| process_cmdline(pid).is_some_and(|c| looks_like_lenslet_child(&c)),
+        |owner| process_cmdline(owner).is_some_and(|c| c.contains("lenslet-ui")),
+    );
+    for pid in &stop {
+        signal_group(*pid, Signal::Term);
+    }
+    write_registry(home, &keep);
+    stop.len()
+}
+
+// -- install & shells ------------------------------------------------------------
+
+/// Symlink the bundled `lenslet` CLI into `/usr/local/bin` when writable, else
+/// `~/.local/bin`.
+pub fn install_cli_to_path(home: &Path) -> Result<PathBuf, Tr> {
     fsguard::assert_io_allowed();
     let src = sibling_cli_binary()?;
     let usr_local = Path::new("/usr/local/bin/lenslet");
@@ -814,8 +1047,10 @@ pub fn install_cli_to_path(home: &Path) -> Result<PathBuf, String> {
         return Ok(usr_local.to_path_buf());
     }
     let local_bin = home.join(".local/bin");
-    fs::create_dir_all(&local_bin)
-        .map_err(|e| format!("cannot create {}: {e}", local_bin.display()))?;
+    fs::create_dir_all(&local_bin).map_err(|e| {
+        let d = local_bin.display();
+        tr!("Cannot create {d}: {e}", "无法创建 {d}：{e}")
+    })?;
     let dest = local_bin.join(if cfg!(windows) {
         "lenslet.exe"
     } else {
@@ -825,21 +1060,18 @@ pub fn install_cli_to_path(home: &Path) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-fn try_link_binary(src: &Path, dest: &Path) -> Result<(), String> {
+fn try_link_binary(src: &Path, dest: &Path) -> Result<(), Tr> {
     let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
+    let d = dest.display();
     #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(src, &tmp)
-            .map_err(|e| format!("cannot symlink {}: {e}", dest.display()))?;
-    }
+    std::os::unix::fs::symlink(src, &tmp)
+        .map_err(|e| tr!("Cannot link {d}: {e}", "无法链接 {d}：{e}"))?;
     #[cfg(not(unix))]
-    {
-        fs::copy(src, &tmp).map_err(|e| format!("cannot copy {}: {e}", dest.display()))?;
-    }
+    fs::copy(src, &tmp).map_err(|e| tr!("Cannot copy {d}: {e}", "无法复制 {d}：{e}"))?;
     fs::rename(&tmp, dest).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("cannot install {}: {e}", dest.display())
+        tr!("Cannot install {d}: {e}", "无法安装 {d}：{e}")
     })
 }
 
@@ -863,9 +1095,9 @@ pub fn shell_env_snippet_for(port: u16, fmt: ShellFormat) -> String {
     }
 }
 
-/// Write an owner-only shell launcher script pre-configured with `AWS_ENDPOINT_URL`
-/// and local placeholder credentials, then open the user's native OS terminal in `cwd`.
-pub fn open_configured_terminal(home: &Path, cwd: &Path, port: u16) -> Result<(), String> {
+/// Write this window's terminal launcher (pre-configured with
+/// `AWS_ENDPOINT_URL`) and open the platform terminal in `cwd`.
+pub fn open_configured_terminal(home: &Path, cwd: &Path, port: u16) -> Result<(), Tr> {
     fsguard::assert_io_allowed();
     let script_path = write_terminal_launcher_script(home, cwd, port)?;
 
@@ -878,13 +1110,13 @@ pub fn open_configured_terminal(home: &Path, cwd: &Path, port: u16) -> Result<()
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("failed to open Terminal.app: {e}"))?;
+            .map_err(|e| tr!("Cannot open Terminal: {e}", "无法打开终端：{e}"))?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     {
-        let script_str = script_path.to_string_lossy().into_owned();
+        let script = script_path.to_string_lossy().into_owned();
         let candidates: &[(&str, &[&str])] = &[
             ("x-terminal-emulator", &["-e"]),
             ("gnome-terminal", &["--"]),
@@ -897,36 +1129,51 @@ pub fn open_configured_terminal(home: &Path, cwd: &Path, port: u16) -> Result<()
         ];
         for (bin, prefix_args) in candidates {
             if let Some(exe) = find_in_path(bin) {
-                let mut cmd = Command::new(exe);
-                cmd.env("PATH", augmented_path())
+                let spawned = Command::new(exe)
+                    .env("PATH", augmented_path())
                     .args(*prefix_args)
-                    .arg(&script_str)
+                    .arg(&script)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                if cmd.spawn().is_ok() {
+                    .stderr(Stdio::null())
+                    .spawn();
+                if spawned.is_ok() {
                     return Ok(());
                 }
             }
         }
-        Err("No desktop terminal emulator found; run `lenslet shell` in your terminal".into())
+        Err(tr!(
+            "No terminal app found; run lenslet shell in your terminal",
+            "未找到终端程序；请在终端中运行 lenslet shell"
+        ))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = script_path;
-        Err("Run `lenslet shell` in your terminal".into())
+        Err(tr!(
+            "Run lenslet shell in your terminal",
+            "请在终端中运行 lenslet shell"
+        ))
     }
 }
 
-pub fn write_terminal_launcher_script(
-    home: &Path,
-    cwd: &Path,
-    port: u16,
-) -> Result<PathBuf, String> {
-    let dir = home.join(".lenslet");
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let script_path = dir.join("lenslet-terminal.command");
+/// This window's own launcher script, so two windows never overwrite each
+/// other's.
+pub fn terminal_script_path(home: &Path) -> PathBuf {
+    home.join(".lenslet")
+        .join(format!("lenslet-terminal-{}.command", std::process::id()))
+}
+
+pub fn write_terminal_launcher_script(home: &Path, cwd: &Path, port: u16) -> Result<PathBuf, Tr> {
+    let script_path = terminal_script_path(home);
+    let fail = |e: std::io::Error| {
+        let p = script_path.display();
+        tr!("Cannot write {p}: {e}", "无法写入 {p}：{e}")
+    };
+    if let Some(dir) = script_path.parent() {
+        fs::create_dir_all(dir).map_err(fail)?;
+    }
     let escaped_cwd = cwd.to_string_lossy().replace('\'', r"'\''");
     let content = format!(
         "#!/bin/sh\n\
@@ -948,11 +1195,8 @@ pub fn write_terminal_launcher_script(
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o700);
     }
-    let mut file = opts
-        .open(&script_path)
-        .map_err(|e| format!("cannot write {}: {e}", script_path.display()))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", script_path.display()))?;
+    let mut file = opts.open(&script_path).map_err(fail)?;
+    file.write_all(content.as_bytes()).map_err(fail)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -969,47 +1213,144 @@ mod tests {
     fn shell_snippets_cover_all_supported_formats() {
         for fmt in ShellFormat::ALL {
             let text = shell_env_snippet_for(9297, fmt);
-            assert!(text.contains("9297"), "missing port in {:?}", fmt);
-            assert!(
-                text.contains("AWS_ENDPOINT_URL"),
-                "missing endpoint in {:?}",
-                fmt
-            );
+            assert!(text.contains("9297"), "missing port in {fmt:?}");
+            assert!(text.contains("AWS_ENDPOINT_URL"), "{fmt:?}");
         }
         assert!(shell_env_snippet_for(9297, ShellFormat::Docker).contains("host.docker.internal"));
-        assert!(shell_env_snippet_for(9297, ShellFormat::Fish).contains("set -gx"));
     }
 
     #[test]
-    fn detects_project_commands_and_generates_ci_workflow() {
+    fn parses_doctor_json_and_derives_the_status() {
+        let running = parse_doctor(
+            r#"{"cli":"12.0.0","emulators":[{"name":"moto","url":"http://127.0.0.1:5000"}],
+                "managed":{"name":"moto","available":true,"command":["moto_server","-p","0"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(running.emulators[0].url, "http://127.0.0.1:5000");
+        assert_eq!(
+            EmulatorStatus::from_doctor(Some(&Ok(running))),
+            EmulatorStatus::Running {
+                name: "moto".into(),
+                url: "http://127.0.0.1:5000".into()
+            }
+        );
+
+        let startable =
+            parse_doctor(r#"{"emulators":[],"managed":{"name":"moto","available":true}}"#).unwrap();
+        assert_eq!(
+            EmulatorStatus::from_doctor(Some(&Ok(startable))),
+            EmulatorStatus::WillStart("moto".into())
+        );
+
+        let missing = parse_doctor(
+            r#"{"emulators":[],"managed":{"name":"moto","available":false,"command":null}}"#,
+        )
+        .unwrap();
+        let status = EmulatorStatus::from_doctor(Some(&Ok(missing)));
+        assert_eq!(status, EmulatorStatus::Missing);
+        assert!(status.message().en.contains(MOTO_INSTALL));
+        assert!(!status.ok());
+
+        // Older CLIs without the fields, and garbage.
+        assert_eq!(parse_doctor("{}"), Some(Doctor::default()));
+        assert_eq!(parse_doctor("not json"), None);
+        assert_eq!(EmulatorStatus::from_doctor(None), EmulatorStatus::Checking);
+        assert_eq!(
+            EmulatorStatus::from_doctor(Some(&Err(Tr::default()))),
+            EmulatorStatus::NoCli
+        );
+    }
+
+    #[test]
+    fn plans_cleanup_of_children_left_by_a_crashed_window() {
+        let me = 100;
+        let entries = vec![
+            ChildEntry { pid: 1, owner: 50 }, // owner crashed: stop
+            ChildEntry { pid: 2, owner: 60 }, // owner is another live window: keep
+            ChildEntry { pid: 3, owner: 50 }, // already gone: drop
+            ChildEntry { pid: 4, owner: 50 }, // pid reused by something else: drop
+            ChildEntry { pid: 5, owner: me }, // mine: keep
+        ];
+        let (stop, keep) = plan_cleanup(
+            &entries,
+            me,
+            |pid| matches!(pid, 1 | 2 | 5),
+            |owner| owner == 60,
+        );
+        assert_eq!(stop, vec![1]);
+        assert_eq!(keep.iter().map(|e| e.pid).collect::<Vec<_>>(), vec![2, 5]);
+        assert!(looks_like_lenslet_child(
+            "/usr/local/bin/lenslet run --trace x -- sh -c pytest"
+        ));
+        assert!(!looks_like_lenslet_child("/usr/bin/python3 -m http.server"));
+        assert!(!looks_like_lenslet_child("/opt/lenslet-ui"));
+    }
+
+    #[test]
+    fn registry_round_trips() {
+        let dir = std::env::temp_dir().join(format!("lenslet-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        record_child(&dir, 4242);
+        record_child(&dir, 4343);
+        assert_eq!(read_registry(&dir).len(), 2);
+        forget_children(&dir, &[4242]);
+        let left = read_registry(&dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].pid, 4343);
+        assert_eq!(left[0].owner, std::process::id());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn health_must_come_from_the_spawned_child() {
+        assert!(health_is_ours(Some(7), 7));
+        assert!(!health_is_ours(Some(8), 7));
+        assert!(!health_is_ours(None, 7));
+        assert_eq!(endpoint_port("http://127.0.0.1:43761"), Some(43761));
+        assert_eq!(endpoint_port(""), None);
+    }
+
+    #[test]
+    fn detects_commands_without_guessing_and_guards_ci_overwrite() {
         let dir = std::env::temp_dir().join(format!("lenslet-daemon-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        assert!(detect_project_commands(&dir).is_empty());
         fs::write(
             dir.join("package.json"),
             r#"{"scripts":{"test":"vitest","test:e2e":"playwright test"}}"#,
         )
         .unwrap();
         fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
-
         let cmds = detect_project_commands(&dir);
-        assert!(cmds.iter().any(|(_, c)| c == "pnpm test"));
-        assert!(cmds.iter().any(|(_, c)| c == "pnpm test:e2e"));
+        assert_eq!(cmds, vec!["pnpm test", "pnpm test:e2e"]);
 
-        let wf = generate_ci_workflow(&dir, "pnpm test", "http://127.0.0.1:4566", None).unwrap();
+        let wf = generate_ci_workflow(&dir, "pnpm test", None, false)
+            .ok()
+            .unwrap();
         let yaml = fs::read_to_string(&wf).unwrap();
         assert!(yaml.contains("command: 'pnpm test'"));
+        assert!(yaml.contains(MOTO_INSTALL));
+        assert!(!yaml.contains("sandbox"));
+        assert!(matches!(
+            generate_ci_workflow(&dir, "pnpm test", Some("http://127.0.0.1:4566"), false),
+            Err(CiError::Exists(_))
+        ));
+        let wf = generate_ci_workflow(&dir, "pnpm test", Some("http://127.0.0.1:4566"), true)
+            .ok()
+            .unwrap();
+        let yaml = fs::read_to_string(&wf).unwrap();
         assert!(yaml.contains("upstream: 'http://127.0.0.1:4566'"));
+        assert!(!yaml.contains("pip install"));
 
-        let wf_sandbox = generate_ci_workflow(&dir, "pnpm test", "sandbox", None).unwrap();
-        let yaml_sb = fs::read_to_string(&wf_sandbox).unwrap();
-        assert!(yaml_sb.contains("upstream: 'sandbox'"), "{yaml_sb}");
-        assert!(yaml_sb.contains("emulator: ''"), "{yaml_sb}");
-
-        let term_script = write_terminal_launcher_script(&dir, &dir, 9297).unwrap();
-        let script_body = fs::read_to_string(&term_script).unwrap();
-        assert!(script_body.contains("AWS_ENDPOINT_URL=\"http://127.0.0.1:9297\""));
-        assert!(script_body.contains("AWS_ACCESS_KEY_ID=\"lenslet-local\""));
+        let script = write_terminal_launcher_script(&dir, &dir, 9297).unwrap();
+        assert!(
+            script
+                .to_string_lossy()
+                .contains(&std::process::id().to_string())
+        );
+        let body = fs::read_to_string(&script).unwrap();
+        assert!(body.contains("AWS_ENDPOINT_URL=\"http://127.0.0.1:9297\""));
 
         let log_path = dir.join("sample.log");
         fs::write(&log_path, "line1\nline2\n").unwrap();
@@ -1017,7 +1358,7 @@ mod tests {
             read_run_log(&log_path, 64).as_deref(),
             Some("line1\nline2\n")
         );
-
+        assert_eq!(read_run_log(&log_path, 6).as_deref(), Some("line2\n"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
