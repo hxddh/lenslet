@@ -1,11 +1,22 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/ui"]
+members = ["crates/core", "crates/app"]
+exclude = ["third_party"]
 
 [workspace.package]
-version = "13.0.0"
+version = "14.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
-[patch.crates-io]
-xattr = { path = "vendor/xattr" }
+# As AWS Emulator's own workspace: dependencies carry no debug info, which is
+# most of its build's time and disk.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+# The embedded emulator is large; symbols would add another 110 MB.
+strip = true

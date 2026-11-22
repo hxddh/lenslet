@@ -1,0 +1,4 @@
+[submodule "third_party/aws-emulator"]
+	path = third_party/aws-emulator
+	url = https://github.com/aws/aws-emulator
+	shallow = true

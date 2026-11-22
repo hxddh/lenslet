@@ -1,80 +1,13 @@
-//! The run-file schema: the records `lenslet run` writes and every reader
-//! parses. See `docs/trace.md`.
+//! One recorded call: the request, the response, and the facts derived from
+//! them (the IAM access it needs, why it failed).
 
-use std::path::Path;
-
-use anyhow::Result;
 use http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     access::{Access, CallAccess},
     problem::Problem,
-    summary::Report,
 };
-
-/// The run-file format this Lenslet writes and reads. Any other is refused.
-pub const VERSION: u32 = 4;
-
-/// The first line of a run file.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct RunHeader {
-    pub version: u32,
-    /// The file stem, e.g. `20261115-054628-15569`.
-    pub run: String,
-    /// The test command run under Lenslet.
-    pub command: Vec<String>,
-    pub cwd: String,
-    /// The `lenslet run` process: signal its process group to stop the run.
-    pub pid: u32,
-    /// What SDKs point at, e.g. `http://127.0.0.1:43761`.
-    pub endpoint: String,
-    pub upstream: String,
-    /// What answered the calls: `moto (started by Lenslet)`, `moto`,
-    /// `localstack`, `aws-emulator`, or the upstream URL for anything else.
-    pub emulator: String,
-    pub started: String,
-    /// The lock file this run is compared with, when one exists.
-    pub lock: Option<String>,
-    /// The test command's combined stdout and stderr.
-    pub log: Option<String>,
-    /// Calls from Docker networks were accepted (`--allow-docker`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_docker: bool,
-}
-
-/// One line of a run file, for readers.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Record {
-    Run(Box<RunHeader>),
-    Call(Box<Trace>),
-    End(Box<Report>),
-}
-
-/// Write `value` as `{"type": kind, ...value}`.
-#[derive(Serialize)]
-pub struct Tagged<'a, T: Serialize> {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    #[serde(flatten)]
-    pub value: &'a T,
-}
-
-/// Refuse a run-file line (a header or a report) written in another format.
-pub fn check_version(path: &Path, line: &serde_json::Value) -> Result<()> {
-    let version = line
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if version != u64::from(VERSION) {
-        anyhow::bail!(
-            "run file {} is format {version}; this Lenslet reads format {VERSION} — re-run your tests",
-            path.display()
-        );
-    }
-    Ok(())
-}
 
 /// One finished call.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -212,20 +145,6 @@ pub fn trace_access(trace: &Trace) -> impl Iterator<Item = Access> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn other_formats_are_refused_with_what_to_do() {
-        let path = Path::new("/r/x.jsonl");
-        assert!(check_version(path, &serde_json::json!({"version": 4})).is_ok());
-        let error = check_version(path, &serde_json::json!({"version": 3}))
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            error,
-            "run file /r/x.jsonl is format 3; this Lenslet reads format 4 — re-run your tests"
-        );
-        assert!(check_version(path, &serde_json::json!({})).is_err());
-    }
 
     #[test]
     fn capping_keeps_whole_characters() {
