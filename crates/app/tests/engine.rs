@@ -115,7 +115,7 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     assert_eq!(ddb(port, "PutItem", item).0, 400);
     let failed = engine.snapshot().calls.last().cloned().unwrap();
     assert_eq!(
-        failed.failure.unwrap().code,
+        failed.failure.clone().unwrap().code,
         "ConditionalCheckFailedException"
     );
     assert!(!failed.unsupported);
