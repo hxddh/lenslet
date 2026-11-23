@@ -161,7 +161,7 @@ mod tests {
         let call = json_call(r#"{"TableName":"orders","ConsistentRead":true,"X":null}"#);
         assert_eq!(
             aws_cli(&call).unwrap(),
-            r#"aws dynamodb put-item --cli-input-json '{"ConsistentRead":true,"TableName":"orders","X":null}'"#
+            r#"aws dynamodb put-item --cli-input-json '{"TableName":"orders","ConsistentRead":true,"X":null}'"#
         );
         let py = boto3(&call).unwrap();
         assert!(py.starts_with("boto3.client(\"dynamodb\").put_item(**{"), "{py}");
