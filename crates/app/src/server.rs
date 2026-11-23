@@ -176,9 +176,18 @@ fn record(
         path,
         status,
         ms,
+        region: info.region.clone(),
         target,
         failure,
         unsupported,
+        client: header(&request.headers, "user-agent")
+            .and_then(|ua| crate::session::client_of(&ua)),
+        attempt: info.attempt,
+        max_attempts: info.max_attempts,
+        invocation: info.invocation_id.clone(),
+        request_id: ["x-amzn-requestid", "x-amz-request-id", "x-amz-id-2"]
+            .iter()
+            .find_map(|name| header(&response.headers, name)),
         access: own.into_iter().chain(implied).collect(),
         request: exchange(
             &trace.request.headers,

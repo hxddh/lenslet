@@ -91,7 +91,7 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
             .snapshot()
             .resources
             .iter()
-            .any(|g| g.service == "SQS" && g.items.iter().any(|(n, _)| n == "orders"))
+            .any(|g| g.service == "sqs" && g.items.iter().any(|r| r.name == "orders"))
     });
     let (_, body) = sqs(port, "GetQueueUrl", r#"{"QueueName":"orders"}"#);
     assert!(
@@ -115,7 +115,7 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     assert_eq!(ddb(port, "PutItem", item).0, 400);
     let failed = engine.snapshot().calls.last().cloned().unwrap();
     assert_eq!(
-        failed.failure.unwrap().code,
+        failed.failure.clone().unwrap().code,
         "ConditionalCheckFailedException"
     );
     assert!(!failed.unsupported);
@@ -147,4 +147,53 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     wait_for("the resources to empty", || {
         engine.snapshot().resources.is_empty()
     });
+}
+
+#[test]
+fn opens_a_resource_and_counts_what_it_holds() {
+    let engine = Engine::start(0).expect("start the engine");
+    let port = engine.port;
+    let (status, _) = sqs(port, "CreateQueue", r#"{"QueueName":"jobs"}"#);
+    assert_eq!(status, 200);
+    let url = format!("http://127.0.0.1:{port}/000000000000/jobs");
+    let (status, _) = sqs(
+        port,
+        "SendMessage",
+        &format!(r#"{{"QueueUrl":"{url}","MessageBody":"hi"}}"#),
+    );
+    assert_eq!(status, 200);
+    engine.refresh();
+    wait_for("the queue's waiting message", || {
+        engine.snapshot().resources.iter().any(|g| {
+            g.service == "sqs"
+                && g.items
+                    .iter()
+                    .any(|r| r.name == "jobs" && r.count == Some(1))
+        })
+    });
+    let queue = engine
+        .snapshot()
+        .resources
+        .iter()
+        .find(|g| g.service == "sqs")
+        .unwrap()
+        .items[0]
+        .clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let contents = runtime.block_on(engine.contents("sqs", queue));
+    assert!(
+        contents
+            .fields
+            .iter()
+            .any(|(k, v)| k == "ApproximateNumberOfMessages" && v == "1"),
+        "{:?}",
+        contents.fields
+    );
+    // Each call knows what sent it.
+    let call = engine.snapshot().calls.last().cloned().unwrap();
+    assert_eq!(call.operation, "SendMessage");
+    assert!(call.touches("sqs", "jobs"));
 }

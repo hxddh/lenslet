@@ -1,43 +1,75 @@
-# Lenslet 14.0.0
+# Lenslet 15.0.0
 
-Lenslet 14 is a new product: **a local AWS account in a window.**
+Lenslet 15 rebuilds the window to work the way each platform's apps work,
+puts a terminal inside it, and shows far more of what your code does.
 
-Earlier versions recorded your tests' AWS calls against an emulator you ran
-yourself and checked IAM access in pull requests. Lenslet 14 has the
-emulator inside it. Open the app and you have an empty AWS account on
-`http://127.0.0.1:4510`, emulated in-process by
-[AWS Emulator](https://github.com/aws/aws-emulator). Point an SDK or the AWS
-CLI at it and Lenslet shows what your code does.
+## Run your code right here
 
-## What you see
+- **A terminal in the window.** It is your own shell, started in the folder
+  you opened Lenslet from, with `AWS_ENDPOINT_URL`, the region and
+  placeholder keys already set. Type `pytest` or `aws s3 mb s3://demo` and
+  watch the calls arrive. `` Ctrl+` `` shows and hides it; the folder button
+  starts it somewhere else.
+- **One-click examples.** A new account's overview runs a first command for
+  you.
+- **A free port when 4510 is taken**, instead of refusing to start.
+- **Your own credentials stay out.** The terminal drops `AWS_PROFILE`,
+  `AWS_SESSION_TOKEN` and the other credential variables, so nothing it runs
+  can sign with your real account.
 
-- **Calls, live.** Every call with its service, operation, status and time;
-  the request and response bodies, pretty-printed and selectable.
-- **Resources.** S3 buckets with object counts, DynamoDB tables with item
-  counts, SQS queues with waiting messages, and SNS topics, Lambda
-  functions, secrets, parameters, rules, state machines, streams, log
-  groups, keys and roles. New ones are marked as they appear.
-- **Failures, explained.** The first failing call is selected for you, with
-  the error in plain words. Calls the emulator does not support are marked
-  "not emulated", so a gap in the emulator does not look like a bug in your
-  code.
-- **The IAM policy.** Every permission the session used, as one
-  least-privilege policy, one click to copy.
-- **Fresh start.** A new, empty account at once.
-- English and Chinese.
+## Native on each platform
 
-## Services
+- **A full-height sidebar with the system's sidebar material** (macOS,
+  Windows 11), and a toolbar over the content.
+- **A menu bar on macOS, a main menu (☰) elsewhere.** Every command is
+  there with its shortcut, using ⌘ on macOS and Ctrl elsewhere:
+  - Find (⌘F)
+  - Clear Calls (⌘K)
+  - New Empty Account (⇧⌘N)
+  - Copy as AWS CLI (⇧⌘C)
+  - Export Session (⌘E)
+  - Save IAM Policy (⇧⌘S)
+  - the views (⌘1 to ⌘3)
+- **Context menus** on calls, the endpoint, and everything else that has
+  actions.
+- **The system's fonts, accent and semantic colors**, following light and
+  dark mode.
+- **The window remembers** its size and place, and you can drag the panes
+  to resize them.
+- **A confirmation** before a new empty account replaces the old one.
+- **A Dock badge** that counts failed calls.
 
-S3, DynamoDB, SQS, SNS, STS, IAM, KMS, Lambda, Secrets Manager, SSM,
-EventBridge, CloudWatch Logs, Step Functions and Kinesis.
+## See much more
 
-## Gone
+- **Calls are a real table.**
+  - Sort by any column, resize and reorder the columns.
+  - Move the selection with the arrow keys.
+  - Search across operation, resource, error, client and request ID.
+  - Filter to failed or not-emulated calls, or to one service.
+- **The inspector** has tabs for the summary, the request, the response and
+  the permissions. It shows:
+  - the client (boto3, AWS CLI, any SDK, with its version);
+  - the SDK's retry attempt, the request ID, the sizes and the region;
+  - copy as AWS CLI, curl or boto3.
+- **Open any resource** to see what it holds, and every call that touched it:
+  - S3 objects (double-click one for its text);
+  - DynamoDB items;
+  - SQS attributes;
+  - CloudWatch Logs events;
+  - secret and parameter values;
+  - EventBridge rules and targets;
+  - Step Functions executions;
+  - Lambda configuration;
+  - IAM roles and their policies.
+- **The overview** shows calls, failures, median and 95th-percentile latency
+  and retries, broken down by service and by client, with the latest
+  failures one click from their details.
+- **The permissions view** shows the calls that needed each permission, next
+  to the policy, which you can copy or save.
+- **Export Session** writes every call (headers, bodies, permissions) to
+  JSON.
 
-The `lenslet` CLI, `lenslet.lock`, the GitHub Action, PR comments, run
-files and `install.sh` are gone, along with support for LocalStack and moto
-as upstreams. Lenslet 13 remains available for pull-request checks.
+## Faster
 
-## Install
-
-macOS: open the DMG and drag Lenslet to Applications.
-Linux: unpack the tar.gz and run `bin/lenslet` (GTK 4.14 or newer).
+The window takes the session only when it changed, and shares calls rather
+than copying their bodies, so it stays fast with thousands of calls.
