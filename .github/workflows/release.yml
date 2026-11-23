@@ -48,6 +48,7 @@ jobs:
   linux:
     needs: resolve
     strategy:
+      fail-fast: false
       matrix:
         # 24.04: GTK 4.14, which Native Shell needs.
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
@@ -63,8 +64,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y $GTK_DEPS
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # CI ran the tests on this commit; building them again here doubled
+      # the emulator build and ran the arm64 runner out of resources.
       - run: cargo build --release --locked -p lenslet
+      - run: df -h . && free -m
       - name: Package
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
@@ -91,7 +94,6 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
       - run: cargo build --release --locked --target aarch64-apple-darwin -p lenslet
       - run: cargo build --release --locked --target x86_64-apple-darwin -p lenslet
       - name: Package
