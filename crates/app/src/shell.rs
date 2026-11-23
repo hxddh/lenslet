@@ -70,7 +70,12 @@ impl Shell {
     ) -> Result<Shell, String> {
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| e.to_string())?;
         let program = program();
         let (mut command, integrated) = integrate(&program, env).unwrap_or_else(|| {
@@ -91,7 +96,10 @@ impl Shell {
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = pair.slave.spawn_command(command).map_err(|e| e.to_string())?;
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -112,7 +120,10 @@ impl Shell {
                                 for mark in found {
                                     on_mark(mark);
                                 }
-                                output.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&text);
+                                output
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .extend_from_slice(&text);
                             }
                         }
                     }
@@ -156,7 +167,12 @@ impl Shell {
             .master
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
     }
 
     pub fn exited(&self) -> bool {
@@ -178,13 +194,20 @@ fn program() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh".into() } else { "/bin/bash".into() })
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".into()
+            } else {
+                "/bin/bash".into()
+            }
+        })
 }
 
 /// The folder the shell starts in: the one Lenslet was started in when that
 /// is a project (not `/`), else the home folder.
 pub fn default_folder() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
     match std::env::current_dir() {
         Ok(dir) if dir.parent().is_some() && Some(&dir) != home.as_ref() => dir,
         _ => home.unwrap_or_else(|| PathBuf::from(".")),
@@ -213,7 +236,10 @@ fn integrate(program: &str, env: &[(&str, String)]) -> Option<(CommandBuilder, b
         ours.push_str(&format!("unset {name}\n"));
     }
     for (name, value) in env {
-        ours.push_str(&format!("export {name}='{}'\n", value.replace('\'', r"'\''")));
+        ours.push_str(&format!(
+            "export {name}='{}'\n",
+            value.replace('\'', r"'\''")
+        ));
     }
     match name {
         "bash" => {
@@ -330,7 +356,9 @@ fn parse(mark: &[u8]) -> Option<Mark> {
             let bytes: Option<Vec<u8>> = (0..value.len() / 2)
                 .map(|i| u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).ok())
                 .collect();
-            Some(Mark::Start(String::from_utf8_lossy(&bytes?).trim().to_string()))
+            Some(Mark::Start(
+                String::from_utf8_lossy(&bytes?).trim().to_string(),
+            ))
         }
         "E" => Some(Mark::End(value.trim().parse().unwrap_or(0))),
         _ => None,
@@ -366,12 +394,22 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = seen.clone();
         let dir = std::env::temp_dir();
-        let (mut command, integrated) = integrate("/bin/bash", &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())])
-            .expect("bash integrates");
+        let (mut command, integrated) = integrate(
+            "/bin/bash",
+            &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())],
+        )
+        .expect("bash integrates");
         assert!(integrated);
         command.cwd(&dir);
         let pty = native_pty_system();
-        let pair = pty.openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let pair = pty
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
         let mut child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -388,7 +426,9 @@ mod tests {
             }
         });
         std::thread::sleep(Duration::from_millis(500));
-        writer.write_all(b"echo \"$AWS_ENDPOINT_URL\" && false\r").unwrap();
+        writer
+            .write_all(b"echo \"$AWS_ENDPOINT_URL\" && false\r")
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             let marks = seen.lock().unwrap().clone();
@@ -396,7 +436,10 @@ mod tests {
             if let Some(i) = start
                 && marks[i + 1..].contains(&Mark::End(1))
             {
-                assert_eq!(marks[i], Mark::Start("echo \"$AWS_ENDPOINT_URL\" && false".into()));
+                assert_eq!(
+                    marks[i],
+                    Mark::Start("echo \"$AWS_ENDPOINT_URL\" && false".into())
+                );
                 let _ = child.kill();
                 return;
             }

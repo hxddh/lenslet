@@ -219,7 +219,14 @@ impl Session {
         let mut inner = self.lock();
         let id = inner.runs.last().map_or(1, |r| r.id + 1);
         let generation = inner.generation;
-        inner.runs.push(Run { id, command, started_ms: now_ms(), ended_ms: None, exit: None, generation });
+        inner.runs.push(Run {
+            id,
+            command,
+            started_ms: now_ms(),
+            ended_ms: None,
+            exit: None,
+            generation,
+        });
         inner.current = Some(id);
         inner.version += 1;
         id
@@ -228,7 +235,9 @@ impl Session {
     /// The command running now ended with `exit`.
     pub fn end_run(&self, exit: i32) {
         let mut inner = self.lock();
-        let Some(id) = inner.current.take() else { return };
+        let Some(id) = inner.current.take() else {
+            return;
+        };
         if let Some(run) = inner.runs.iter_mut().find(|r| r.id == id) {
             run.ended_ms = Some(now_ms());
             run.exit = Some(exit);

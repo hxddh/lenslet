@@ -11,7 +11,7 @@ index 43f7aafbb..43e37c174 100644
  pub mod pre_dispatch;
  pub mod router;
 diff --git a/vendor/smithy-server-runtime/src/multi_service_router.rs b/vendor/smithy-server-runtime/src/multi_service_router.rs
-index 32f266d97..45238b9e9 100644
+index 32f266d97..c660a029b 100644
 --- a/vendor/smithy-server-runtime/src/multi_service_router.rs
 +++ b/vendor/smithy-server-runtime/src/multi_service_router.rs
 @@ -138,6 +138,39 @@ impl MultiServiceRouter {
@@ -32,7 +32,7 @@ index 32f266d97..45238b9e9 100644
 +            request.headers().clone(),
 +            request.body().clone(),
 +        );
-+        let token = observer.begin(depth);
++        let token = observer.begin(depth, &headers);
 +        let response = self.dispatch_unobserved(request).await;
 +        observer.end(
 +            token,
@@ -56,10 +56,10 @@ index 32f266d97..45238b9e9 100644
              let (parts, body) = request.into_parts();
 diff --git a/vendor/smithy-server-runtime/src/observer.rs b/vendor/smithy-server-runtime/src/observer.rs
 new file mode 100644
-index 000000000..1b2258840
+index 000000000..6c7a0167d
 --- /dev/null
 +++ b/vendor/smithy-server-runtime/src/observer.rs
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,39 @@
 +//! A host's view of every call the router serves, including the calls one
 +//! service makes to another in-process (an S3 notification invoking a
 +//! function, a function's own SDK calls, a topic delivering to a queue).
@@ -82,8 +82,9 @@ index 000000000..1b2258840
 +}
 +
 +pub trait CallObserver: Send + Sync {
-+    /// A call begins at `depth` (0 from outside, 1 and more for a callback).
-+    fn begin(&self, depth: u8) -> u64;
++    /// A call begins at `depth` (0 from outside, 1 and more for a callback),
++    /// with these headers (its tracing header names the chain it is on).
++    fn begin(&self, depth: u8, headers: &http::HeaderMap) -> u64;
 +    /// The call `token` ended.
 +    fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>);
 +}

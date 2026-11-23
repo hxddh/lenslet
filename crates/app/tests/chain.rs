@@ -15,16 +15,21 @@ fn records_what_aws_does_inside_under_what_caused_it() {
         .env("AWS_ENDPOINT_URL", engine.endpoint())
         .output()
         .expect("run the app");
-    println!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.status.success());
 
     let calls = engine.snapshot().calls;
-    let by_id: std::collections::HashMap<u64, _> = calls.iter().map(|c| (c.id, c.clone())).collect();
-    let depth = |mut c: &std::sync::Arc<lenslet::session::Call>| {
-        let mut d = 0;
-        while let Some(p) = c.parent.and_then(|p| by_id.get(&p)) {
+    let parent_of: std::collections::HashMap<u64, Option<u64>> =
+        calls.iter().map(|c| (c.id, c.parent)).collect();
+    let depth = |c: &lenslet::session::Call| {
+        let (mut d, mut at) = (0, c.parent);
+        while let Some(p) = at {
             d += 1;
-            c = p;
+            at = parent_of.get(&p).copied().flatten();
         }
         d
     };
@@ -42,14 +47,33 @@ fn records_what_aws_does_inside_under_what_caused_it() {
     }
     // The upload's notification invoked the function, and the function's own
     // write to DynamoDB hangs under it.
-    let put = calls.iter().find(|c| c.operation == "PutObject" && !c.internal).expect("the upload");
+    let put = calls
+        .iter()
+        .find(|c| c.operation == "PutObject" && !c.internal)
+        .expect("the upload");
     let invoke = calls
         .iter()
-        .find(|c| c.internal && c.service == "lambda")
+        .find(|c| c.internal && c.service == "lambda" && c.operation == "Invoke")
         .expect("the function's invocation");
     let write = calls
         .iter()
         .find(|c| c.internal && c.service == "dynamodb" && c.operation == "PutItem")
         .expect("the function's write");
-    println!("invoke parent {:?} (put {}), write parent {:?} (invoke {})", invoke.parent, put.id, write.parent, invoke.id);
+    // Up the chain from the invocation, the upload.
+    let mut at = invoke.parent;
+    let mut found = false;
+    while let Some(p) = at {
+        if p == put.id {
+            found = true;
+            break;
+        }
+        at = parent_of.get(&p).copied().flatten();
+    }
+    assert!(found, "the invocation hangs under the upload");
+    assert_eq!(
+        write.parent,
+        Some(invoke.id),
+        "the function's write hangs under its invocation"
+    );
+    println!("write: {:?} {:?}", write.failure, write.access);
 }

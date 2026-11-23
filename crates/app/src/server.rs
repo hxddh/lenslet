@@ -83,15 +83,30 @@ async fn handle(
         .await
         .map(|b| b.to_bytes())
         .unwrap_or_default();
-    let request = http::Request::from_parts(parts.clone(), body.clone());
-    // The calls this one causes inside the emulator hang under its id.
+    // The calls this one causes inside the emulator hang under its id: on its
+    // task, and through the tracing header AWS carries onto its deliveries.
     let id = crate::observe::next_id();
+    let mut sent = parts.clone();
+    if !sent.headers.contains_key("x-amzn-trace-id")
+        && let Ok(value) = http::HeaderValue::from_str(&crate::observe::trace_header(id))
+    {
+        sent.headers.insert("x-amzn-trace-id", value);
+    }
+    crate::observe::chain_started(&sent.headers, id);
+    let request = http::Request::from_parts(sent, body.clone());
     let response = emulator.handle_traced(request, id).await;
     let (rparts, rbody) = response.into_parts();
     let mut call = record(
-        Sent { method: &parts.method, uri: &parts.uri, headers: &parts.headers },
+        Sent {
+            method: &parts.method,
+            uri: &parts.uri,
+            headers: &parts.headers,
+        },
         &body,
-        Answered { status: rparts.status, headers: &rparts.headers },
+        Answered {
+            status: rparts.status,
+            headers: &rparts.headers,
+        },
         &rbody,
         at_ms,
         started.elapsed().as_millis() as u64,
@@ -118,7 +133,14 @@ pub struct Answered<'a> {
 }
 
 /// The call as lenslet-core sees it, and the facts it derives.
-pub fn record(request: Sent<'_>, body: &Bytes, response: Answered<'_>, rbody: &Bytes, at_ms: u64, ms: u64) -> Call {
+pub fn record(
+    request: Sent<'_>,
+    body: &Bytes,
+    response: Answered<'_>,
+    rbody: &Bytes,
+    at_ms: u64,
+    ms: u64,
+) -> Call {
     let path = request
         .uri
         .path_and_query()

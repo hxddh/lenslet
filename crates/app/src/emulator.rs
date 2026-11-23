@@ -59,7 +59,11 @@ impl Emulator {
 
     /// Serve a call from outside with id `id`: the calls it causes inside the
     /// emulator are recorded under it.
-    pub async fn handle_traced(&self, request: http::Request<Bytes>, id: u64) -> http::Response<Bytes> {
+    pub async fn handle_traced(
+        &self,
+        request: http::Request<Bytes>,
+        id: u64,
+    ) -> http::Response<Bytes> {
         self.serve(request, Some(id)).await
     }
 
