@@ -254,8 +254,24 @@ fi
 {ours}
 __lenslet_end() {{ local s=$?; printf '\033]6973;L;E;%s\007' "$s"; return $s; }}
 __lenslet_start() {{ HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]*[* ] *//' | tr -d '\n' | {HEX}; }}
-PROMPT_COMMAND="__lenslet_end${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
-PS0='\[\033]6973;L;S;$(__lenslet_start)\007\]'"$PS0"
+if [ -z "$__LENSLET_DEBUG_TRAP" ] && {{ [ "${{BASH_VERSINFO[0]}}" -gt 4 ] || {{ [ "${{BASH_VERSINFO[0]}}" -eq 4 ] && [ "${{BASH_VERSINFO[1]}}" -ge 4 ]; }}; }}; then
+  PROMPT_COMMAND="__lenslet_end${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
+  PS0='\[\033]6973;L;S;$(__lenslet_start)\007\]'"$PS0"
+else
+  # Bash before 4.4 (macOS's /bin/bash) has no PS0: mark the start from the
+  # DEBUG trap, armed when the prompt shows, once per command line.
+  __lenslet_armed=
+  __lenslet_arm() {{ __lenslet_armed=1; }}
+  __lenslet_debug() {{
+    [ -n "$__lenslet_armed" ] || return 0
+    [ -n "$COMP_LINE" ] && return 0
+    case "$BASH_COMMAND" in __lenslet_*) return 0 ;; esac
+    __lenslet_armed=
+    printf '\033]6973;L;S;%s\007' "$(__lenslet_start)"
+  }}
+  PROMPT_COMMAND="__lenslet_end;${{PROMPT_COMMAND:+$PROMPT_COMMAND;}}__lenslet_arm"
+  trap '__lenslet_debug' DEBUG
+fi
 "#
             );
             std::fs::write(&rc, script).ok()?;
@@ -386,6 +402,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bash_marks_each_command_with_its_line_and_status() {
+        bash_marks(false);
+    }
+
+    /// The DEBUG-trap way, which bash before 4.4 (macOS's) uses.
+    #[cfg(unix)]
+    #[test]
+    fn bash_without_ps0_marks_each_command_too() {
+        bash_marks(true);
+    }
+
+    #[cfg(unix)]
+    fn bash_marks(debug_trap: bool) {
         use std::time::{Duration, Instant};
         if !Path::new("/bin/bash").exists() {
             return;
@@ -401,6 +429,9 @@ mod tests {
         .expect("bash integrates");
         assert!(integrated);
         command.cwd(&dir);
+        if debug_trap {
+            command.env("__LENSLET_DEBUG_TRAP", "1");
+        }
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
