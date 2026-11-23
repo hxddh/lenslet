@@ -211,6 +211,10 @@ mod tests {
     fn json_call(body: &str) -> Call {
         Call {
             seq: 0,
+            id: 0,
+            parent: None,
+            internal: false,
+            run: None,
             generation: 0,
             at_ms: 0,
             service: "dynamodb".into(),

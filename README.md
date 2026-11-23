@@ -6,28 +6,27 @@ Lenslet is a desktop app with AWS inside it. Open it and you have an empty
 AWS account on `http://127.0.0.1:4510`: S3, DynamoDB, SQS, SNS, Lambda, IAM
 and eight more services, emulated in-process by
 [AWS Emulator](https://github.com/aws/aws-emulator), and a terminal already
-pointed at it. Run your code there and watch what it does:
+pointed at it. Run your code there, and Lenslet shows what happened, including
+inside AWS:
 
-- **Every call, live.** A table you sort, filter and search: service,
-  operation, what it acted on, status, duration and the client that sent it
-  (boto3, the AWS CLI, any AWS SDK). The inspector shows the request and
-  response, headers and bodies, the SDK's retry attempt and the request ID,
-  and copies the call as an AWS CLI command, curl or boto3.
-- **Every resource, opened.** The buckets, tables, queues, topics, functions,
-  log groups, secrets and parameters your code made, with their counts as
-  they change. Open one to see what it holds: S3 objects (and their text),
-  DynamoDB items, queue attributes, log events, secret and parameter values,
-  executions, and every call that touched it.
-- **Why it failed.** A failing call says what went wrong in plain words.
-  Calls the emulator does not support are marked "not emulated", so you know
-  it is not your code.
-- **The IAM policy it needs.** Every permission the session used, each with
-  the calls that needed it, compiled into one least-privilege policy to copy
-  or save.
-- **The session at a glance.** Calls, failures, median and 95th-percentile
-  latency, retries, by service and by client.
-- **New empty account.** One command gives you a fresh account. No
-  containers, no cleanup scripts.
+- **Every command is a run.** Each command you run in the terminal (`pytest`,
+  `aws s3 cp …`, your script) becomes a run: how it ended, every call it
+  made, and the first thing that failed and why. It also shows what the run
+  changed and the IAM policy it needed.
+- **What AWS did because of it.** The calls are a tree. Under the upload sits
+  the function its notification invoked, and under the function its own calls
+  to DynamoDB, and why one was denied. Deliveries, triggers and your
+  functions' code are all there. On AWS this takes CloudTrail, X-Ray and
+  CloudWatch together.
+- **Fix it, then go back and run it again.** A function denied by its role?
+  One click allows the role what it needed. Rewind puts the account back as
+  it was before any run. Run Again repeats the command.
+- **Every resource, opened.** Buckets, tables, queues, topics, functions, log
+  groups, secrets and parameters, with their counts as they change. Open one
+  to see what it holds and every call that touched it.
+- **Every call, in full.** Request and response, headers and bodies, the
+  client and its retry attempt, the request ID; copy any call as an AWS CLI
+  command, curl or boto3.
 
 ![Lenslet](docs/lenslet.png)
 
@@ -59,6 +58,10 @@ endpoint says; the terminal's placeholder keys keep those away from your
 account. If port 4510 is taken, Lenslet takes a free port and shows it; set
 `LENSLET_PORT` to choose one.
 
+Runs come from the terminal's shell integration (bash and zsh): Lenslet adds
+marks around each command, after your own startup files. Calls from other
+shells and programs appear under All Activity.
+
 Every command is in the menu bar (macOS) or the main menu (☰), with its
 shortcut, and on the context menu of what it acts on: Find (⌘F / Ctrl+F),
 Clear Calls (⌘K), New Empty Account (⇧⌘N), Copy as AWS CLI (⇧⌘C), Export
@@ -87,9 +90,16 @@ cd lenslet
 cargo run --release
 ```
 
-On macOS, apply the one-line portability patch to the emulator first
-(`git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch`):
-its Lambda service reads per-thread memory usage, which only Linux reports.
+Then apply Lenslet's patches to the emulator:
+
+```bash
+git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
+# macOS only: its Lambda service reads per-thread memory usage, which only Linux reports
+git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
+```
+
+The observer patch lets Lenslet see the calls AWS makes inside the emulator
+(a notification invoking a function, the function's own calls).
 
 The window uses [Native Shell](https://github.com/longbridge/nsh): AppKit on
 macOS, GTK 4 on Linux. On Linux, install `libgtk-4-dev` first. The first
@@ -100,7 +110,11 @@ build compiles the emulator and takes a while.
 `crates/app` embeds AWS Emulator's services behind a small HTTP server.
 Each request goes to the emulator unchanged and comes back unchanged; on the
 way, `crates/core` reads it: which service and operation it is, which IAM
-permissions it needs on which resources, and why it failed. After a call
+permissions it needs on which resources, and why it failed. The observer
+patch reports the calls AWS makes inside the emulator too; Lenslet hangs each
+under its cause, on the same task, or through the X-Ray tracing header AWS
+carries onto everything a call causes. Rewind sends the calls that changed
+the account again, in order, to a new engine. After a call
 that changes something, Lenslet asks the emulator for its resources with the
 services' own List operations, and opens a resource with their Describe and Get
 operations. A new empty account swaps in a new, empty engine. The terminal

@@ -334,10 +334,118 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
             ))
         },
     );
+    // Where the call came from: the call it happened inside, and the command.
+    let cause = move || {
+        let parent = call.with(|c| c.as_ref().and_then(|c| c.0.parent))?;
+        ui.snap
+            .with(|s| s.calls.iter().rev().find(|c| c.id == parent).cloned())
+    };
+    let origin = view()
+        .gap(px(4.0))
+        .child(when(
+            move || call.with(|c| c.as_ref().is_some_and(|c| c.0.internal)),
+            move || {
+                text(move || {
+                    ts(
+                        "AWS made this call, not your code: a delivery, a trigger, or a function's own call.",
+                        "这次调用由 AWS 发起，不是你的代码：一次投递、一次触发，或函数自己的调用。",
+                    )
+                })
+                .text_size(small())
+                .text_color(accent())
+            },
+        ))
+        .child(when(
+            move || cause().is_some(),
+            move || {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(text(move || ts("Caused by", "由此引起")).w(px(96.0)).text_size(small()).text_color(secondary_text()))
+                    .child(
+                        nsh_base::button()
+                            .on_press(move || {
+                                if let Some(parent) = cause() {
+                                    ui.show_call(parent.seq);
+                                }
+                            })
+                            .rounded(radius())
+                            .hover(|s| s.bg(hover_bg()))
+                            .child(
+                                text(move || {
+                                    cause()
+                                        .map(|p| format!("{} {} ↗", service_title(&p.service), p.operation))
+                                        .unwrap_or_default()
+                                })
+                                .text_size(small())
+                                .text_color(accent()),
+                            ),
+                    )
+            },
+        ))
+        .child(when(
+            move || call.with(|c| c.as_ref().is_some_and(|c| c.0.run.is_some())),
+            move || {
+                view()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(text(move || ts("Run", "所属运行")).w(px(96.0)).text_size(small()).text_color(secondary_text()))
+                    .child(
+                        text(move || {
+                            let run = call.with(|c| c.as_ref().and_then(|c| c.0.run));
+                            ui.snap.with(|s| s.runs.iter().find(|r| Some(r.id) == run).map(|r| r.command.clone()).unwrap_or_default())
+                        })
+                        .flex_1()
+                        .text_size(small())
+                        .font_family(MONO),
+                    )
+            },
+        ));
+    // A call denied to a role (a function's): allow the role what it needed.
+    let denied_role = move || {
+        call.with(|c| {
+            let c = c.as_ref()?;
+            let f = c.0.failure.as_ref()?;
+            if !f.code.contains("AccessDenied") || c.0.access.is_empty() {
+                return None;
+            }
+            crate::resources::denied_role(f.message.as_deref()?)
+        })
+    };
+    let grant = when(
+        move || denied_role().is_some(),
+        move || {
+            view().flex_row().child(push_button(
+                move || {
+                    format!(
+                        "{} {}",
+                        t("Allow for role", "允许角色"),
+                        denied_role().unwrap_or_default()
+                    )
+                },
+                move || {
+                    let Some(role) = denied_role() else { return };
+                    let accesses = call.with_untracked(|c| {
+                        c.as_ref().map(|c| c.0.access.clone()).unwrap_or_default()
+                    });
+                    let done = super::engine().grant(role.clone(), accesses);
+                    spawn(async move {
+                        match done.await {
+                            Ok(()) => ui.say(format!("{} {role}", t("Allowed for", "已授权给"))),
+                            Err(e) => ui.say(e),
+                        }
+                    });
+                },
+            ))
+        },
+    );
     view()
         .gap(px(16.0))
         .pt(px(12.0))
         .child(failure)
+        .child(grant)
+        .child(origin)
         .child(facts)
         .child(replay)
         .child(show_resource)

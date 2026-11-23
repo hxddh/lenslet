@@ -54,13 +54,32 @@ impl Emulator {
     }
 
     pub async fn handle(&self, request: http::Request<Bytes>) -> http::Response<Bytes> {
+        self.serve(request, None).await
+    }
+
+    /// Serve a call from outside with id `id`: the calls it causes inside the
+    /// emulator are recorded under it.
+    pub async fn handle_traced(
+        &self,
+        request: http::Request<Bytes>,
+        id: u64,
+    ) -> http::Response<Bytes> {
+        self.serve(request, Some(id)).await
+    }
+
+    async fn serve(&self, request: http::Request<Bytes>, id: Option<u64>) -> http::Response<Bytes> {
         let router = self
             .router
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let work = async move { router.handle_request(request).await };
         // A panic in a service answers 500 instead of taking the window down.
-        match tokio::spawn(async move { router.handle_request(request).await }).await {
+        let task = match id {
+            Some(id) => tokio::spawn(crate::observe::within(id, work)),
+            None => tokio::spawn(work),
+        };
+        match task.await {
             Ok(response) => localize(response, &self.endpoint),
             Err(_) => http::Response::builder()
                 .status(500)

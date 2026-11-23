@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use nsh_core::{element::desktop::title_bar, prelude::*};
 
 use super::{Page, Ui, bar_height, engine, style::*, t, ts};
-use crate::session::{Group, Resource, now_ms};
+use crate::session::{Group, Resource, Run, now_ms};
 
 /// A resource that just appeared stays marked this long.
 const NEW_FOR_MS: u64 = 4000;
@@ -157,54 +157,162 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             .text_color(secondary_text()),
         );
 
+    // Each run's calls and failures, counted once per change.
+    let tallies = computed(move || {
+        ui.snap.with(|s| {
+            let mut t: HashMap<u64, (usize, usize)> = HashMap::new();
+            for c in &s.calls {
+                if let Some(run) = c.run {
+                    let e = t.entry(run).or_default();
+                    e.0 += 1;
+                    if c.failed() && !c.unsupported {
+                        e.1 += 1;
+                    }
+                }
+            }
+            RunTallies(t)
+        })
+    });
+    let all = row(
+        ui,
+        Icon::Calls,
+        Box::new(|| ts("All Activity", "全部活动")),
+        Box::new(move || {
+            let failed = ui.snap.with(|s| {
+                s.calls
+                    .iter()
+                    .filter(|c| c.failed() && !c.unsupported)
+                    .count()
+            });
+            if failed > 0 {
+                failed.to_string()
+            } else {
+                ui.snap.with(|s| s.calls.len()).to_string()
+            }
+        }),
+        Box::new(move || {
+            if ui
+                .snap
+                .with(|s| s.calls.iter().any(|c| c.failed() && !c.unsupported))
+            {
+                red()
+            } else {
+                secondary_text()
+            }
+        }),
+        Page::Activity,
+    );
+    let runs = each(
+        move || {
+            ui.snap
+                .with(|s| s.runs.iter().rev().take(50).cloned().collect::<Vec<Run>>())
+        },
+        |r: &Run| r.id,
+        move |run, _| {
+            let id = run.get_untracked().id;
+            let page = Page::Run(id);
+            let target = page.clone();
+            let selected = move || ui.page.get() == page;
+            let state = move || {
+                let r = run.get();
+                let failed = tallies.with(|t| t.0.get(&id).map_or(0, |e| e.1));
+                match r.exit {
+                    None => RunState::Running,
+                    Some(0) if failed == 0 => RunState::Passed,
+                    _ => RunState::Failed,
+                }
+            };
+            let menu_target = Page::Run(id);
+            nsh_base::button()
+                .on_press(move || ui.page.set(target.clone()))
+                .on_context_menu(move |e: &ContextMenuEvent| {
+                    ui.page.set(menu_target.clone());
+                    let finished = run.get_untracked().ended_ms.is_some();
+                    let command = run.get_untracked().command;
+                    drop(nsh_core::element::desktop::popup_menu_at(
+                        vec![
+                            nsh_core::element::desktop::MenuItem::new(t("Run Again", "再运行一次"))
+                                .on_select(move || {
+                                    ui.terminal.set(true);
+                                    ui.run.set(Some(command.clone()));
+                                }),
+                            nsh_core::element::desktop::MenuItem::new(t(
+                                "Rewind to Before This Run…",
+                                "回到这次运行之前…",
+                            ))
+                            .disabled(!finished)
+                            .on_select(move || ui.rewind(id)),
+                        ],
+                        e.page_position,
+                    ))
+                })
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .h(px(26.0))
+                .rounded(radius())
+                .bg(move || {
+                    if selected() {
+                        selected_bg()
+                    } else {
+                        AdaptiveColor::rgb(0, 0).opacity(0.0)
+                    }
+                })
+                .hover(|s| s.bg(hover_bg()))
+                .child(dynamic(move || match state() {
+                    RunState::Running => view()
+                        .w(px(14.0))
+                        .items_center()
+                        .child(view().w(px(7.0)).h(px(7.0)).rounded(px(4.0)).bg(accent()))
+                        .into_element(),
+                    RunState::Passed => icon_colored(Icon::Check, 14.0, green()).into_element(),
+                    RunState::Failed => icon_colored(Icon::Close, 14.0, red()).into_element(),
+                }))
+                .child(
+                    text(move || run.get().command)
+                        .flex_1()
+                        .font_family(MONO)
+                        .text_size(small())
+                        .truncate(),
+                )
+                .child(badge(
+                    move || {
+                        tallies
+                            .with(|t| t.0.get(&id).map_or(0, |e| e.0))
+                            .to_string()
+                    },
+                    || tertiary_text(),
+                ))
+        },
+    );
+    let no_runs = when(
+        move || ui.snap.with(|s| s.runs.is_empty()),
+        move || {
+            text(move || {
+                ts(
+                    "Commands you run in the terminal appear here.",
+                    "在终端里运行的命令会显示在这里。",
+                )
+            })
+            .px(px(8.0))
+            .pt(px(2.0))
+            .text_size(small())
+            .text_color(tertiary_text())
+        },
+    );
     let nav = view()
         .px(px(10.0))
         .gap(px(1.0))
-        .child(row(
-            ui,
-            Icon::Overview,
-            Box::new(|| ts("Overview", "概览")),
-            Box::new(|| String::new()),
-            Box::new(secondary_text),
-            Page::Overview,
-        ))
-        .child(row(
-            ui,
-            Icon::Calls,
-            Box::new(|| ts("Calls", "调用")),
-            Box::new(move || {
-                let failed = ui.snap.with(|s| {
-                    s.calls
-                        .iter()
-                        .filter(|c| c.failed() && !c.unsupported)
-                        .count()
-                });
-                if failed > 0 {
-                    failed.to_string()
-                } else {
-                    ui.snap.with(|s| s.calls.len()).to_string()
-                }
-            }),
-            Box::new(move || {
-                if ui
-                    .snap
-                    .with(|s| s.calls.iter().any(|c| c.failed() && !c.unsupported))
-                {
-                    red()
-                } else {
-                    secondary_text()
-                }
-            }),
-            Page::Calls,
-        ))
-        .child(row(
-            ui,
-            Icon::Shield,
-            Box::new(|| ts("Permissions", "权限")),
-            Box::new(move || ui.snap.with(|s| s.permissions.len()).to_string()),
-            Box::new(secondary_text),
-            Page::Permissions,
-        ));
+        .child(
+            view()
+                .px(px(8.0))
+                .pb(px(3.0))
+                .child(section(|| ts("Runs", "运行"))),
+        )
+        .child(all)
+        .child(no_runs)
+        .child(runs);
 
     let groups = each(
         move || {
@@ -379,4 +487,21 @@ fn resource_row(
 /// A selected sidebar row's fill.
 fn selected_bg() -> AdaptiveColor {
     AdaptiveColor::rgb(0x000000, 0xffffff).opacity(0.09)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RunState {
+    Running,
+    Passed,
+    Failed,
+}
+
+/// Each run's calls and failed calls.
+#[derive(Clone, Default)]
+struct RunTallies(HashMap<u64, (usize, usize)>);
+
+impl PartialEq for RunTallies {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
 }

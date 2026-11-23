@@ -1,75 +1,53 @@
-# Lenslet 15.0.0
+# Lenslet 16.0.0
 
-Lenslet 15 rebuilds the window to work the way each platform's apps work,
-puts a terminal inside it, and shows far more of what your code does.
+Lenslet 16 shows what happens inside AWS, not just what your code sends to
+it. It organizes everything by the commands you run, and it can put the
+account back as it was before any of them.
 
-## Run your code right here
+## What AWS did because of your call
 
-- **A terminal in the window.** It is your own shell, started in the folder
-  you opened Lenslet from, with `AWS_ENDPOINT_URL`, the region and
-  placeholder keys already set. Type `pytest` or `aws s3 mb s3://demo` and
-  watch the calls arrive. `` Ctrl+` `` shows and hides it; the folder button
-  starts it somewhere else.
-- **One-click examples.** A new account's overview runs a first command for
-  you.
-- **A free port when 4510 is taken**, instead of refusing to start.
-- **Your own credentials stay out.** The terminal drops `AWS_PROFILE`,
-  `AWS_SESSION_TOKEN` and the other credential variables, so nothing it runs
-  can sign with your real account.
+The calls are a tree now. Under each call your code made sit the calls AWS
+made because of it:
+- an S3 upload, and under it the function its notification invoked;
+- under the function, its own call to DynamoDB, and why that call was denied;
+- a topic delivering to a queue;
+- a rule reaching its target.
 
-## Native on each platform
+Delivered later or right away, each call hangs under its cause. On AWS you
+would piece this together from CloudTrail, X-Ray and CloudWatch. The
+inspector says when AWS made a call, and links the call that caused it.
 
-- **A full-height sidebar with the system's sidebar material** (macOS,
-  Windows 11), and a toolbar over the content.
-- **A menu bar on macOS, a main menu (☰) elsewhere.** Every command is
-  there with its shortcut, using ⌘ on macOS and Ctrl elsewhere:
-  - Find (⌘F)
-  - Clear Calls (⌘K)
-  - New Empty Account (⇧⌘N)
-  - Copy as AWS CLI (⇧⌘C)
-  - Export Session (⌘E)
-  - Save IAM Policy (⇧⌘S)
-  - the views (⌘1 to ⌘3)
-- **Context menus** on calls, the endpoint, and everything else that has
-  actions.
-- **The system's fonts, accent and semantic colors**, following light and
-  dark mode.
-- **The window remembers** its size and place, and you can drag the panes
-  to resize them.
-- **A confirmation** before a new empty account replaces the old one.
-- **A Dock badge** that counts failed calls.
+## Every command is a run
 
-## See much more
+Each command you run in Lenslet's terminal is a run. The sidebar lists the
+runs, newest first, each with how it ended. A run's summary shows:
+- how it ended and how long it took;
+- its calls, and the calls AWS made because of them;
+- the first failure and why, one click from its details;
+- what it changed;
+- the IAM policy it needed, to copy or save.
 
-- **Calls are a real table.**
-  - Sort by any column, resize and reorder the columns.
-  - Move the selection with the arrow keys.
-  - Search across operation, resource, error, client and request ID.
-  - Filter to failed or not-emulated calls, or to one service.
-- **The inspector** has tabs for the summary, the request, the response and
-  the permissions. It shows:
-  - the client (boto3, AWS CLI, any SDK, with its version);
-  - the SDK's retry attempt, the request ID, the sizes and the region;
-  - copy as AWS CLI, curl or boto3.
-- **Open any resource** to see what it holds, and every call that touched it:
-  - S3 objects (double-click one for its text);
-  - DynamoDB items;
-  - SQS attributes;
-  - CloudWatch Logs events;
-  - secret and parameter values;
-  - EventBridge rules and targets;
-  - Step Functions executions;
-  - Lambda configuration;
-  - IAM roles and their policies.
-- **The overview** shows calls, failures, median and 95th-percentile latency
-  and retries, broken down by service and by client, with the latest
-  failures one click from their details.
-- **The permissions view** shows the calls that needed each permission, next
-  to the policy, which you can copy or save.
-- **Export Session** writes every call (headers, bodies, permissions) to
-  JSON.
+Calls from elsewhere are under All Activity. Runs come from bash and zsh;
+Lenslet adds marks around each command after your own startup files.
 
-## Faster
+## Fix it, go back, run it again
 
-The window takes the session only when it changed, and shares calls rather
-than copying their bodies, so it stays fast with thousands of calls.
+- **Allow for role.** When a function is denied by its role, the inspector
+  offers to allow the role exactly what the call needed.
+- **Rewind to before a run** puts the account back as it was when the command
+  started. Lenslet sends the calls that changed the account again, in order,
+  to a new engine. What AWS does in response (a function's writes) lands
+  seconds later, as on AWS.
+- **Run Again**, on a run's context menu, repeats its command.
+
+## Simpler
+
+The Overview and Permissions pages are gone: a run's summary says the same
+things about the run you care about. The sidebar has two groups, Runs and
+Resources.
+
+## Under the hood
+
+Lenslet applies a small patch to AWS Emulator: its router reports every call
+it serves to an observer. The submodule stays at the upstream commit. CI and
+the release apply `patches/` at build time.

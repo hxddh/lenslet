@@ -31,8 +31,90 @@ pub fn matches(call: &Call, query: &str) -> bool {
         || call.request_id.as_deref().is_some_and(has)
 }
 
-/// The list's order: by the chosen column, else newest first.
-pub fn sort(calls: &mut [Arc<Call>], sort: Option<&DataTableSort>) {
+/// One row of the list: a call, and how deep it sits in what caused it.
+#[derive(Clone)]
+pub struct Row {
+    pub call: Arc<Call>,
+    pub depth: u8,
+}
+
+/// The rows of the list: the calls of `run` (or all) that pass the filters.
+/// Unfiltered and unsorted, a tree: each call your code made, newest first,
+/// with what it caused inside AWS under it; else flat, in the chosen order.
+pub fn rows(
+    calls: &[Arc<Call>],
+    run: Option<u64>,
+    query: &str,
+    filter: Filter,
+    service: Option<&str>,
+    sort: Option<&DataTableSort>,
+) -> Vec<Row> {
+    let in_scope: Vec<&Arc<Call>> = calls
+        .iter()
+        .filter(|c| run.is_none() || c.run == run)
+        .collect();
+    let filtering = !query.is_empty() || filter != Filter::All || service.is_some();
+    if filtering || sort.is_some() {
+        let mut flat: Vec<Arc<Call>> = in_scope
+            .into_iter()
+            .filter(|c| match filter {
+                Filter::All => true,
+                Filter::Failed => c.failed() && !c.unsupported,
+                Filter::NotEmulated => c.unsupported,
+            })
+            .filter(|c| service.is_none_or(|s| s == c.service))
+            .filter(|c| query.is_empty() || matches(c, query))
+            .cloned()
+            .collect();
+        order(&mut flat, sort);
+        return flat
+            .into_iter()
+            .map(|call| Row { call, depth: 0 })
+            .collect();
+    }
+    let ids: std::collections::HashSet<u64> = in_scope
+        .iter()
+        .filter(|c| c.id != 0)
+        .map(|c| c.id)
+        .collect();
+    let mut children: std::collections::HashMap<u64, Vec<&Arc<Call>>> =
+        std::collections::HashMap::new();
+    let mut roots = Vec::new();
+    for c in &in_scope {
+        match c.parent.filter(|p| ids.contains(p)) {
+            Some(p) => children.entry(p).or_default().push(c),
+            None => roots.push(*c),
+        }
+    }
+    for list in children.values_mut() {
+        list.sort_by_key(|c| (c.at_ms, c.seq));
+    }
+    roots.sort_by(|a, b| (b.at_ms, b.seq).cmp(&(a.at_ms, a.seq)));
+    let mut out = Vec::with_capacity(in_scope.len());
+    fn walk<'a>(
+        call: &'a Arc<Call>,
+        depth: u8,
+        children: &std::collections::HashMap<u64, Vec<&'a Arc<Call>>>,
+        out: &mut Vec<Row>,
+    ) {
+        out.push(Row {
+            call: call.clone(),
+            depth,
+        });
+        if let Some(list) = children.get(&call.id) {
+            for child in list {
+                walk(child, depth.saturating_add(1), children, out);
+            }
+        }
+    }
+    for root in roots {
+        walk(root, 0, &children, &mut out);
+    }
+    out
+}
+
+/// A flat list's order: by the chosen column, else newest first.
+fn order(calls: &mut [Arc<Call>], sort: Option<&DataTableSort>) {
     let Some(sort) = sort else {
         calls.sort_by(|a, b| b.seq.cmp(&a.seq));
         return;
@@ -75,6 +157,19 @@ pub fn status_text(call: &Call) -> String {
     }
 }
 
+/// The operation, set in by how deep it sits in what caused it.
+fn indented(row: &Row) -> String {
+    if row.depth == 0 {
+        row.call.operation.clone()
+    } else {
+        format!(
+            "{}↳ {}",
+            "    ".repeat(row.depth as usize - 1),
+            row.call.operation
+        )
+    }
+}
+
 /// One line under the operation: the failure, else what it acted on.
 pub fn summary(call: &Call) -> String {
     match &call.failure {
@@ -99,7 +194,7 @@ pub fn calls(ui: Ui) -> AnyElement {
             column("time", ts("Time", "时间"), 82.0, 70.0),
             status,
             column("service", ts("Service", "服务"), 100.0, 60.0),
-            column("operation", ts("Operation", "操作"), 160.0, 80.0),
+            column("operation", ts("Operation", "操作"), 220.0, 80.0),
             ms,
             column(
                 "target",
@@ -111,26 +206,33 @@ pub fn calls(ui: Ui) -> AnyElement {
         ]
     };
     let data = move || {
-        ui.visible.with(|calls| {
-            DataTableRows::new(calls.len())
-                .texts("time", calls.iter().map(|c| clock(c.at_ms)))
-                .texts("service", calls.iter().map(|c| service_title(&c.service)))
-                .texts("operation", calls.iter().map(|c| c.operation.as_str()))
-                .texts("target", calls.iter().map(|c| summary(c)))
-                .texts("status", calls.iter().map(|c| c.status.to_string()))
-                .texts("ms", calls.iter().map(|c| format!("{} ms", c.ms)))
+        ui.visible.with(|rows| {
+            let calls = || rows.iter().map(|r| &r.call);
+            DataTableRows::new(rows.len())
+                .texts("time", calls().map(|c| clock(c.at_ms)))
+                .texts("service", calls().map(|c| service_title(&c.service)))
+                .texts("operation", rows.iter().map(|r| indented(r)))
+                .texts("target", calls().map(|c| summary(c)))
+                .texts("status", calls().map(|c| c.status.to_string()))
+                .texts("ms", calls().map(|c| format!("{} ms", c.ms)))
                 .texts(
                     "client",
-                    calls.iter().map(|c| c.client.clone().unwrap_or_default()),
+                    calls().map(|c| {
+                        if c.internal {
+                            "AWS".to_string()
+                        } else {
+                            c.client.clone().unwrap_or_default()
+                        }
+                    }),
                 )
         })
     };
     // Failures read red and gaps in the emulator orange, in their status and
     // in what they say.
     let cell_classes = move || {
-        ui.visible.with(|calls| {
+        ui.visible.with(|rows| {
             let mut classes = Vec::new();
-            for (row, c) in calls.iter().enumerate() {
+            for (row, c) in rows.iter().map(|r| &r.call).enumerate() {
                 let class = if c.unsupported {
                     "text-orange-600 dark:text-orange-300"
                 } else if c.failed() {
@@ -151,12 +253,17 @@ pub fn calls(ui: Ui) -> AnyElement {
     };
     let selection = move || {
         let seq = ui.selected.get()?;
-        let row = ui.visible.with(|v| v.iter().position(|c| c.seq == seq))?;
+        let row = ui
+            .visible
+            .with(|v| v.iter().position(|r| r.call.seq == seq))?;
         let mut s = DataTableSelection::default();
         s.row = Some(row as u32);
         Some(s)
     };
-    let call_at = move |row: u32| ui.visible.with_untracked(|v| v.get(row as usize).cloned());
+    let call_at = move |row: u32| {
+        ui.visible
+            .with_untracked(|v| v.get(row as usize).map(|r| r.call.clone()))
+    };
 
     let mut classes = nsh_base::DataTableClasses::default();
     classes.header = Some("bg-transparent".into());
@@ -165,7 +272,23 @@ pub fn calls(ui: Ui) -> AnyElement {
     classes.row_selected = Some(selected_row_class().into());
     classes.row_hover = Some("bg-black/[0.03] dark:bg-white/[0.04]".into());
 
+    // A call selected elsewhere (the summary, a resource, the inspector)
+    // scrolls into view.
+    let table_ref = component_ref::<nsh_base::DataTable>();
+    effect(move || {
+        let Some(seq) = ui.selected.get() else { return };
+        let Some(row) = ui
+            .visible
+            .with(|v| v.iter().position(|r| r.call.seq == seq))
+        else {
+            return;
+        };
+        if let Some(api) = table_ref.api::<nsh_base::DataTableApi>() {
+            api.scroll_to_row(row as u32, None);
+        }
+    });
     let table = nsh_base::data_table()
+        .component_ref(&table_ref)
         .columns(columns)
         .data(data)
         .cell_classes(cell_classes)
@@ -205,6 +328,8 @@ pub fn calls(ui: Ui) -> AnyElement {
 
     view()
         .flex_1()
+        .child(super::summary::summary(ui))
+        .child(hairline())
         .child(scope_bar(ui))
         .child(hairline())
         .child(table)
@@ -266,7 +391,7 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
         ))
         .on_select(move || {
             ui.service.set(Some(service.clone()));
-            ui.page.set(Page::Calls);
+            ui.show_calls();
         }),
     );
     if let Some(page) = resource_page(call) {
@@ -333,18 +458,17 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
                 }),
             )
     };
-    let failed = move || {
+    let scope = move |f: &dyn Fn(&Call) -> bool| {
+        let run = ui.run();
         ui.snap.with(|s| {
             s.calls
                 .iter()
-                .filter(|c| c.failed() && !c.unsupported)
+                .filter(|c| (run.is_none() || c.run == run) && f(c))
                 .count()
         })
     };
-    let unsupported = move || {
-        ui.snap
-            .with(|s| s.calls.iter().filter(|c| c.unsupported).count())
-    };
+    let failed = move || scope(&|c: &Call| c.failed() && !c.unsupported);
+    let unsupported = move || scope(&|c: &Call| c.unsupported);
     let services = move || {
         let mut names: Vec<String> = ui
             .snap

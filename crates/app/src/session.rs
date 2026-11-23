@@ -16,6 +16,15 @@ use lenslet_core::access::Access;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub seq: usize,
+    /// The call's id while it runs: the calls it causes name it as `parent`.
+    pub id: u64,
+    /// The call this one happened inside: the S3 put whose notification
+    /// invoked a function, the function whose code made this call.
+    pub parent: Option<u64>,
+    /// AWS made it, not your code: a delivery, a trigger, a function's own call.
+    pub internal: bool,
+    /// The terminal command it belongs to.
+    pub run: Option<u64>,
     /// Which fresh start it belongs to (0 is the first).
     pub generation: u64,
     /// Milliseconds since the Unix epoch, when the request arrived.
@@ -120,8 +129,40 @@ pub struct Permission {
 }
 
 #[derive(Default)]
+/// One command run in the terminal, and the calls it made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub id: u64,
+    pub command: String,
+    pub started_ms: u64,
+    /// When it ended, and with what status; `None` while it runs.
+    pub ended_ms: Option<u64>,
+    pub exit: Option<i32>,
+    /// Which fresh start it ran in.
+    pub generation: u64,
+}
+
+/// A call from outside that changed the account, kept as it was sent, so
+/// the account can be rebuilt by sending it again.
+#[derive(Clone, Debug)]
+pub struct Sent {
+    pub at_ms: u64,
+    pub method: http::Method,
+    pub uri: http::Uri,
+    pub headers: http::HeaderMap,
+    pub body: bytes::Bytes,
+}
+
+#[derive(Default)]
 struct Inner {
+    /// What changed the account, in order, since it was last empty.
+    log: Vec<Sent>,
     calls: Vec<Arc<Call>>,
+    /// Each call's place in `calls`, by its id.
+    by_id: std::collections::HashMap<u64, usize>,
+    runs: Vec<Run>,
+    /// The run of the command running now.
+    current: Option<u64>,
     permissions: BTreeMap<Access, Vec<usize>>,
     resources: Arc<Vec<Group>>,
     generation: u64,
@@ -140,6 +181,7 @@ pub struct Session {
 pub struct Snapshot {
     pub version: u64,
     pub calls: Vec<Arc<Call>>,
+    pub runs: Vec<Run>,
     pub resources: Arc<Vec<Group>>,
     pub permissions: Vec<Permission>,
     pub generation: u64,
@@ -162,6 +204,19 @@ impl Session {
         let mut inner = self.lock();
         call.seq = inner.calls.len();
         call.generation = inner.generation;
+        // A call belongs to the run of the call it happened inside, else to
+        // the command running now.
+        if call.run.is_none() {
+            call.run = call
+                .parent
+                .and_then(|p| inner.by_id.get(&p))
+                .and_then(|&i| inner.calls[i].run)
+                .or(inner.current);
+        }
+        if call.id != 0 {
+            let seq = call.seq;
+            inner.by_id.insert(call.id, seq);
+        }
         for access in &call.access {
             let calls = inner.permissions.entry(access.clone()).or_default();
             if calls.last() != Some(&call.seq) {
@@ -169,6 +224,37 @@ impl Session {
             }
         }
         inner.calls.push(Arc::new(call));
+        inner.version += 1;
+    }
+
+    /// A command starts in the terminal.
+    pub fn start_run(&self, command: String) -> u64 {
+        let mut inner = self.lock();
+        let id = inner.runs.last().map_or(1, |r| r.id + 1);
+        let generation = inner.generation;
+        inner.runs.push(Run {
+            id,
+            command,
+            started_ms: now_ms(),
+            ended_ms: None,
+            exit: None,
+            generation,
+        });
+        inner.current = Some(id);
+        inner.version += 1;
+        id
+    }
+
+    /// The command running now ended with `exit`.
+    pub fn end_run(&self, exit: i32) {
+        let mut inner = self.lock();
+        let Some(id) = inner.current.take() else {
+            return;
+        };
+        if let Some(run) = inner.runs.iter_mut().find(|r| r.id == id) {
+            run.ended_ms = Some(now_ms());
+            run.exit = Some(exit);
+        }
         inner.version += 1;
     }
 
@@ -184,10 +270,31 @@ impl Session {
     /// resources and the permissions start over.
     pub fn fresh(&self) {
         let mut inner = self.lock();
+        inner.log.clear();
         inner.generation += 1;
         inner.permissions.clear();
         inner.resources = Arc::default();
         inner.version += 1;
+    }
+
+    /// Keep a call that changed the account, to send it again on a rewind.
+    pub fn keep(&self, sent: Sent) {
+        self.lock().log.push(sent);
+    }
+
+    /// What changed the account before `at_ms`; what came after is dropped,
+    /// as the account goes back to that moment.
+    pub fn rewind_to(&self, at_ms: u64) -> Vec<Sent> {
+        let mut inner = self.lock();
+        inner.log.retain(|s| s.at_ms < at_ms);
+        inner.generation += 1;
+        inner.resources = Arc::default();
+        inner.version += 1;
+        inner.log.clone()
+    }
+
+    pub fn run(&self, id: u64) -> Option<Run> {
+        self.lock().runs.iter().find(|r| r.id == id).cloned()
     }
 
     /// Clear the list of calls, and the permissions they needed; the
@@ -196,6 +303,8 @@ impl Session {
         let mut inner = self.lock();
         inner.cleared = inner.calls.len();
         inner.permissions.clear();
+        let current = inner.current;
+        inner.runs.retain(|r| Some(r.id) == current);
         inner.version += 1;
     }
 
@@ -208,6 +317,7 @@ impl Session {
         Some(Snapshot {
             version: inner.version,
             calls: inner.calls[inner.cleared..].to_vec(),
+            runs: inner.runs.clone(),
             resources: inner.resources.clone(),
             permissions: inner
                 .permissions
@@ -347,6 +457,10 @@ mod tests {
     fn call(service: &str, resource: Option<&str>) -> Call {
         Call {
             seq: 0,
+            id: 0,
+            parent: None,
+            internal: false,
+            run: None,
             generation: 0,
             at_ms: 0,
             service: service.into(),

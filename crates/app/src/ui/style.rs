@@ -150,9 +150,7 @@ pub enum Icon {
     Clear,
     NewAccount,
     Menu,
-    Overview,
     Calls,
-    Shield,
     Bucket,
     Table,
     Queue,
@@ -170,6 +168,7 @@ pub enum Icon {
     Folder,
     Restart,
     Close,
+    Check,
 }
 
 impl Icon {
@@ -188,14 +187,8 @@ impl Icon {
             Icon::Clear => "<circle cx='12' cy='12' r='8.5'/><path d='m6 6 12 12'/>",
             Icon::NewAccount => "<path d='M4 12a8 8 0 1 0 2.4-5.7L4 8.5'/><path d='M4 4v4.5h4.5'/>",
             Icon::Menu => "<path d='M4 7h16M4 12h16M4 17h16'/>",
-            Icon::Overview => {
-                "<rect x='3.5' y='3.5' width='7' height='7' rx='1.5'/><rect x='13.5' y='3.5' width='7' height='7' rx='1.5'/><rect x='3.5' y='13.5' width='7' height='7' rx='1.5'/><rect x='13.5' y='13.5' width='7' height='7' rx='1.5'/>"
-            }
             Icon::Calls => {
                 "<path d='M8 6h12M8 12h12M8 18h12'/><circle cx='4' cy='6' r='.6'/><circle cx='4' cy='12' r='.6'/><circle cx='4' cy='18' r='.6'/>"
-            }
-            Icon::Shield => {
-                "<path d='M12 3 4.5 6v5.5c0 4.6 3.2 8.2 7.5 9.5 4.3-1.3 7.5-4.9 7.5-9.5V6z'/><path d='m9 12 2 2 4-4'/>"
             }
             Icon::Bucket => {
                 "<path d='M4 7h16l-1.6 12.2a2 2 0 0 1-2 1.8H7.6a2 2 0 0 1-2-1.8z'/><ellipse cx='12' cy='7' rx='8' ry='2.5'/>"
@@ -237,6 +230,7 @@ impl Icon {
             Icon::Restart => {
                 "<path d='M20 12a8 8 0 1 1-2.4-5.7L20 8.5'/><path d='M20 4v4.5h-4.5'/>"
             }
+            Icon::Check => "<path d='m5 12.5 4.5 4.5L19 7'/>",
             Icon::Close => "<path d='m6 6 12 12M18 6 6 18'/>",
         }
     }
