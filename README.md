@@ -87,9 +87,16 @@ cd lenslet
 cargo run --release
 ```
 
-On macOS, apply the one-line portability patch to the emulator first
-(`git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch`):
-its Lambda service reads per-thread memory usage, which only Linux reports.
+Then apply Lenslet's patches to the emulator:
+
+```bash
+git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
+# macOS only: its Lambda service reads per-thread memory usage, which only Linux reports
+git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
+```
+
+The observer patch lets Lenslet see the calls AWS makes inside the emulator
+(a notification invoking a function, the function's own calls).
 
 The window uses [Native Shell](https://github.com/longbridge/nsh): AppKit on
 macOS, GTK 4 on Linux. On Linux, install `libgtk-4-dev` first. The first

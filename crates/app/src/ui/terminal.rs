@@ -23,7 +23,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         let (shell, size) = (shell.clone(), size.clone());
         Rc::new(move || {
             let (cols, rows) = *size.borrow();
-            match Shell::start(folder.get_untracked(), &engine().env_vars(), cols, rows) {
+            match Shell::start(folder.get_untracked(), &engine().env_vars(), cols, rows, engine().on_mark()) {
                 Ok(s) => {
                     *shell.borrow_mut() = Some(s);
                     exited.set(false);

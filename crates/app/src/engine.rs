@@ -45,6 +45,7 @@ impl Engine {
         let emulator = Emulator::new(&endpoint);
         let session = Session::default();
         let refresher = Refresher::default();
+        crate::observe::install(session.clone(), refresher.clone());
         let (handle_tx, handle_rx) = std::sync::mpsc::channel();
         let background = (emulator.clone(), session.clone(), refresher.clone());
         std::thread::Builder::new()
@@ -105,6 +106,17 @@ impl Engine {
         self.emulator.fresh();
         self.session.fresh();
         self.refresher.poke();
+    }
+
+    /// What the terminal's shell says about its commands: each one a run.
+    pub fn on_mark(&self) -> crate::shell::OnMark {
+        let session = self.session.clone();
+        std::sync::Arc::new(move |mark| match mark {
+            crate::shell::Mark::Start(command) => {
+                session.start_run(command);
+            }
+            crate::shell::Mark::End(exit) => session.end_run(exit),
+        })
     }
 
     /// Clear the list of calls; the resources stay.

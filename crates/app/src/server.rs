@@ -84,16 +84,19 @@ async fn handle(
         .map(|b| b.to_bytes())
         .unwrap_or_default();
     let request = http::Request::from_parts(parts.clone(), body.clone());
-    let response = emulator.handle(request).await;
+    // The calls this one causes inside the emulator hang under its id.
+    let id = crate::observe::next_id();
+    let response = emulator.handle_traced(request, id).await;
     let (rparts, rbody) = response.into_parts();
-    let call = record(
-        &parts,
+    let mut call = record(
+        Sent { method: &parts.method, uri: &parts.uri, headers: &parts.headers },
         &body,
-        &rparts,
+        Answered { status: rparts.status, headers: &rparts.headers },
         &rbody,
         at_ms,
         started.elapsed().as_millis() as u64,
     );
+    call.id = id;
     if changes_resources(&call) {
         refresher.poke();
     }
@@ -101,15 +104,21 @@ async fn handle(
     Ok(Response::from_parts(rparts, Full::new(rbody)))
 }
 
+/// What a request was: its method, address and headers.
+pub struct Sent<'a> {
+    pub method: &'a http::Method,
+    pub uri: &'a http::Uri,
+    pub headers: &'a http::HeaderMap,
+}
+
+/// What came back: its status and headers.
+pub struct Answered<'a> {
+    pub status: http::StatusCode,
+    pub headers: &'a http::HeaderMap,
+}
+
 /// The call as lenslet-core sees it, and the facts it derives.
-fn record(
-    request: &http::request::Parts,
-    body: &Bytes,
-    response: &http::response::Parts,
-    rbody: &Bytes,
-    at_ms: u64,
-    ms: u64,
-) -> Call {
+pub fn record(request: Sent<'_>, body: &Bytes, response: Answered<'_>, rbody: &Bytes, at_ms: u64, ms: u64) -> Call {
     let path = request
         .uri
         .path_and_query()
@@ -168,6 +177,10 @@ fn record(
         || (info.service != "aws" && !SERVICES.contains(&info.service.as_str()) && status >= 400);
     Call {
         seq: 0,
+        id: 0,
+        parent: None,
+        internal: false,
+        run: None,
         generation: 0,
         at_ms,
         service: info.service,
@@ -269,7 +282,7 @@ fn exchange(
 
 /// Whether a call may have created, changed or removed a resource (anything
 /// but a read that succeeded or failed).
-fn changes_resources(call: &Call) -> bool {
+pub fn changes_resources(call: &Call) -> bool {
     let op = call.operation.as_str();
     let read = [
         "Get",

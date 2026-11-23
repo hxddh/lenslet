@@ -61,6 +61,8 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           submodules: true
+      - name: Patch AWS Emulator (see patches/)
+        run: git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
       - run: sudo apt-get update && sudo apt-get install -y $GTK_DEPS
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -88,8 +90,10 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           submodules: true
-      - name: Patch AWS Emulator for macOS (see patches/)
-        run: git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
+      - name: Patch AWS Emulator (see patches/)
+        run: |
+          git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
+          git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin

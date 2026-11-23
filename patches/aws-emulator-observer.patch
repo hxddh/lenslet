@@ -1,0 +1,100 @@
+diff --git a/vendor/smithy-server-runtime/src/lib.rs b/vendor/smithy-server-runtime/src/lib.rs
+index 43f7aafbb..43e37c174 100644
+--- a/vendor/smithy-server-runtime/src/lib.rs
++++ b/vendor/smithy-server-runtime/src/lib.rs
+@@ -20,6 +20,7 @@ pub mod endpoint;
+ pub mod errors;
+ pub mod extract;
+ pub mod multi_service_router;
++pub mod observer;
+ pub mod operation;
+ pub mod pre_dispatch;
+ pub mod router;
+diff --git a/vendor/smithy-server-runtime/src/multi_service_router.rs b/vendor/smithy-server-runtime/src/multi_service_router.rs
+index 32f266d97..45238b9e9 100644
+--- a/vendor/smithy-server-runtime/src/multi_service_router.rs
++++ b/vendor/smithy-server-runtime/src/multi_service_router.rs
+@@ -138,6 +138,39 @@ impl MultiServiceRouter {
+     pub async fn dispatch(
+         &self,
+         request: http::Request<bytes::Bytes>,
++    ) -> http::Response<bytes::Bytes> {
++        let Some(observer) = crate::observer::current() else {
++            return self.dispatch_unobserved(request).await;
++        };
++        let depth = request
++            .extensions()
++            .get::<crate::CallbackRecursionDepth>()
++            .map_or(0, |depth| depth.0);
++        let (method, uri, headers, body) = (
++            request.method().clone(),
++            request.uri().clone(),
++            request.headers().clone(),
++            request.body().clone(),
++        );
++        let token = observer.begin(depth);
++        let response = self.dispatch_unobserved(request).await;
++        observer.end(
++            token,
++            depth,
++            &crate::observer::ObservedCall {
++                method: &method,
++                uri: &uri,
++                headers: &headers,
++                body: &body,
++                response: &response,
++            },
++        );
++        response
++    }
++
++    async fn dispatch_unobserved(
++        &self,
++        request: http::Request<bytes::Bytes>,
+     ) -> http::Response<bytes::Bytes> {
+         let (parts, _body) = {
+             let (parts, body) = request.into_parts();
+diff --git a/vendor/smithy-server-runtime/src/observer.rs b/vendor/smithy-server-runtime/src/observer.rs
+new file mode 100644
+index 000000000..1b2258840
+--- /dev/null
++++ b/vendor/smithy-server-runtime/src/observer.rs
+@@ -0,0 +1,38 @@
++//! A host's view of every call the router serves, including the calls one
++//! service makes to another in-process (an S3 notification invoking a
++//! function, a function's own SDK calls, a topic delivering to a queue).
++//!
++//! A host that embeds the router sets one observer for the process. It hears
++//! each call begin (with its callback depth, 0 for a call from outside) and
++//! end, with the request and the response, and returns from `begin` the token
++//! `end` is given back. The observer must be quick: it runs on the request's
++//! task, before and after the call.
++
++use std::sync::{Arc, RwLock};
++
++/// One call the router served.
++pub struct ObservedCall<'a> {
++    pub method: &'a http::Method,
++    pub uri: &'a http::Uri,
++    pub headers: &'a http::HeaderMap,
++    pub body: &'a [u8],
++    pub response: &'a http::Response<bytes::Bytes>,
++}
++
++pub trait CallObserver: Send + Sync {
++    /// A call begins at `depth` (0 from outside, 1 and more for a callback).
++    fn begin(&self, depth: u8) -> u64;
++    /// The call `token` ended.
++    fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>);
++}
++
++static OBSERVER: RwLock<Option<Arc<dyn CallObserver>>> = RwLock::new(None);
++
++/// Set (or clear) the process's observer.
++pub fn set_call_observer(observer: Option<Arc<dyn CallObserver>>) {
++    *OBSERVER.write().unwrap_or_else(|e| e.into_inner()) = observer;
++}
++
++pub(crate) fn current() -> Option<Arc<dyn CallObserver>> {
++    OBSERVER.read().unwrap_or_else(|e| e.into_inner()).clone()
++}

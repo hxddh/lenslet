@@ -5,6 +5,7 @@
 pub mod copy_as;
 pub mod emulator;
 pub mod engine;
+pub mod observe;
 pub mod resources;
 pub mod server;
 pub mod session;
