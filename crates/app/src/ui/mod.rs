@@ -236,6 +236,42 @@ impl Ui {
         });
     }
 
+    /// Put the account back as it was before the run `id`, once the user confirms.
+    pub fn rewind(&self, id: u64) {
+        let ui = *self;
+        let command = self.snap.with_untracked(|s| {
+            s.runs
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.command.clone())
+        });
+        let Some(command) = command else { return };
+        let answer = nsh_base::alert_dialog()
+            .title(format!("{} “{command}”?", t("Rewind to before", "回到这次运行之前：")))
+            .description(t(
+                "The account goes back to how it was when this command started: what it and later commands created, changed or deleted is undone. The calls stay in the list.",
+                "账户会回到这条命令开始时的样子：它和之后的命令所做的创建、修改、删除都会撤销。调用记录保留。",
+            ))
+            .cancel("cancel", t("Cancel", "取消"))
+            .destructive("rewind", t("Rewind", "回到之前"))
+            .close_on_escape(true)
+            .show();
+        spawn(async move {
+            if answer.await.ok().and_then(|r| r.action).as_deref() != Some("rewind") {
+                return;
+            }
+            ui.toast.set(Some(ts("Rewinding…", "正在回到之前…")));
+            match engine().rewind(id).await {
+                Ok(n) => ui.say(format!(
+                    "{} {n} {}",
+                    t("Rewound: replayed", "已回到之前：重放了"),
+                    t("calls", "次调用")
+                )),
+                Err(e) => ui.say(e),
+            }
+        });
+    }
+
     /// The IAM policy for the calls on show: the run's, else everything's.
     pub fn policy(&self) -> String {
         let run = match self.page.get_untracked() {
@@ -491,6 +527,7 @@ fn workbench() -> AnyElement {
             ui.inspector.get(),
             ui.terminal.get(),
             ui.filter.get(),
+            ui.page.get(),
         );
         set_application_menu(menu(ui));
     });
@@ -892,6 +929,13 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::new(t("Refresh Resources", "刷新资源"))
                 .shortcut("mod+r")
                 .on_select(|| engine().refresh()),
+            MenuItem::new(t("Rewind to Before This Run…", "回到这次运行之前…"))
+                .disabled(!matches!(ui.page.get_untracked(), Page::Run(_)))
+                .on_select(move || {
+                    if let Page::Run(id) = ui.page.get_untracked() {
+                        ui.rewind(id);
+                    }
+                }),
             MenuItem::separator(),
             MenuItem::new(t("New Empty Account…", "新建空账户…"))
                 .shortcut("mod+shift+n")

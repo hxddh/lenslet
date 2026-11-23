@@ -272,7 +272,23 @@ pub fn calls(ui: Ui) -> AnyElement {
     classes.row_selected = Some(selected_row_class().into());
     classes.row_hover = Some("bg-black/[0.03] dark:bg-white/[0.04]".into());
 
+    // A call selected elsewhere (the summary, a resource, the inspector)
+    // scrolls into view.
+    let table_ref = component_ref::<nsh_base::DataTable>();
+    effect(move || {
+        let Some(seq) = ui.selected.get() else { return };
+        let Some(row) = ui
+            .visible
+            .with(|v| v.iter().position(|r| r.call.seq == seq))
+        else {
+            return;
+        };
+        if let Some(api) = table_ref.api::<nsh_base::DataTableApi>() {
+            api.scroll_to_row(row as u32, None);
+        }
+    });
     let table = nsh_base::data_table()
+        .component_ref(&table_ref)
         .columns(columns)
         .data(data)
         .cell_classes(cell_classes)

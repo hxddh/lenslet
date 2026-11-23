@@ -127,10 +127,18 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                         } else {
                             format!("{:.1} s", took as f64 / 1000.0)
                         };
-                        if code == 0 {
+                        if code == 0 && s.failed == 0 {
                             (
                                 format!("{} · {when} · {took}", t("Succeeded", "成功")),
                                 green(),
+                            )
+                        } else if code == 0 {
+                            (
+                                format!(
+                                    "{} · {when} · {took}",
+                                    t("Finished, but calls failed", "已结束，但有调用失败")
+                                ),
+                                red(),
                             )
                         } else {
                             (
@@ -325,16 +333,43 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                 ))
         },
     );
+    let rewind = when(
+        move || summary.with(|s| s.run.as_ref().is_some_and(|r| r.ended_ms.is_some())),
+        move || {
+            nsh_base::button()
+                .on_press(move || {
+                    if let Some(id) = summary.with_untracked(|s| s.run.as_ref().map(|r| r.id)) {
+                        ui.rewind(id);
+                    }
+                })
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(8.0))
+                .h(px(22.0))
+                .rounded(radius())
+                .hover(|s| s.bg(hover_bg()))
+                .child(icon(Icon::NewAccount, 13.0))
+                .child(text(move || ts("Rewind to Before", "回到运行之前")).text_size(small()))
+        },
+    );
     view()
         .px(px(16.0))
         .pt(px(12.0))
         .pb(px(10.0))
         .gap(px(8.0))
         .child(
-            text(move || status().0)
-                .text_size(small())
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || status().1),
+            view()
+                .flex_row()
+                .items_center()
+                .child(
+                    text(move || status().0)
+                        .flex_1()
+                        .text_size(small())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(move || status().1),
+                )
+                .child(rewind),
         )
         .child(chips)
         .child(failure)

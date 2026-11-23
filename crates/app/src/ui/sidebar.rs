@@ -222,8 +222,30 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     _ => RunState::Failed,
                 }
             };
+            let menu_target = Page::Run(id);
             nsh_base::button()
                 .on_press(move || ui.page.set(target.clone()))
+                .on_context_menu(move |e: &ContextMenuEvent| {
+                    ui.page.set(menu_target.clone());
+                    let finished = run.get_untracked().ended_ms.is_some();
+                    let command = run.get_untracked().command;
+                    drop(nsh_core::element::desktop::popup_menu_at(
+                        vec![
+                            nsh_core::element::desktop::MenuItem::new(t("Run Again", "再运行一次"))
+                                .on_select(move || {
+                                    ui.terminal.set(true);
+                                    ui.run.set(Some(command.clone()));
+                                }),
+                            nsh_core::element::desktop::MenuItem::new(t(
+                                "Rewind to Before This Run…",
+                                "回到这次运行之前…",
+                            ))
+                            .disabled(!finished)
+                            .on_select(move || ui.rewind(id)),
+                        ],
+                        e.page_position,
+                    ))
+                })
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))

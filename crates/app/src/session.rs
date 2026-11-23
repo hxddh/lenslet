@@ -142,8 +142,21 @@ pub struct Run {
     pub generation: u64,
 }
 
+/// A call from outside that changed the account, kept as it was sent, so
+/// the account can be rebuilt by sending it again.
+#[derive(Clone, Debug)]
+pub struct Sent {
+    pub at_ms: u64,
+    pub method: http::Method,
+    pub uri: http::Uri,
+    pub headers: http::HeaderMap,
+    pub body: bytes::Bytes,
+}
+
 #[derive(Default)]
 struct Inner {
+    /// What changed the account, in order, since it was last empty.
+    log: Vec<Sent>,
     calls: Vec<Arc<Call>>,
     /// Each call's place in `calls`, by its id.
     by_id: std::collections::HashMap<u64, usize>,
@@ -257,10 +270,31 @@ impl Session {
     /// resources and the permissions start over.
     pub fn fresh(&self) {
         let mut inner = self.lock();
+        inner.log.clear();
         inner.generation += 1;
         inner.permissions.clear();
         inner.resources = Arc::default();
         inner.version += 1;
+    }
+
+    /// Keep a call that changed the account, to send it again on a rewind.
+    pub fn keep(&self, sent: Sent) {
+        self.lock().log.push(sent);
+    }
+
+    /// What changed the account before `at_ms`; what came after is dropped,
+    /// as the account goes back to that moment.
+    pub fn rewind_to(&self, at_ms: u64) -> Vec<Sent> {
+        let mut inner = self.lock();
+        inner.log.retain(|s| s.at_ms < at_ms);
+        inner.generation += 1;
+        inner.resources = Arc::default();
+        inner.version += 1;
+        inner.log.clone()
+    }
+
+    pub fn run(&self, id: u64) -> Option<Run> {
+        self.lock().runs.iter().find(|r| r.id == id).cloned()
     }
 
     /// Clear the list of calls, and the permissions they needed; the

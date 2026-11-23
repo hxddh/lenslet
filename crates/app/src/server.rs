@@ -114,6 +114,15 @@ async fn handle(
     call.id = id;
     if changes_resources(&call) {
         refresher.poke();
+        if !call.unsupported && call.status < 400 {
+            session.keep(crate::session::Sent {
+                at_ms,
+                method: parts.method.clone(),
+                uri: parts.uri.clone(),
+                headers: parts.headers.clone(),
+                body: body.clone(),
+            });
+        }
     }
     session.record(call);
     Ok(Response::from_parts(rparts, Full::new(rbody)))

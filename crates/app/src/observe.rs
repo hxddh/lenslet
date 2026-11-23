@@ -33,6 +33,24 @@ use crate::{
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// While the account is rebuilt, what it does is not news: nothing is recorded.
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn pause(paused: bool) {
+    PAUSED.store(paused, Ordering::SeqCst);
+}
+
+/// When AWS last began or ended a call of its own, in ms since the epoch.
+static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// AWS has nothing in progress and has done nothing for `quiet_ms`.
+pub fn settled(quiet_ms: u64) -> bool {
+    let open = OBSERVER
+        .get()
+        .is_some_and(|o| !o.open.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    !open && now_ms().saturating_sub(LAST_ACTIVITY.load(Ordering::SeqCst)) >= quiet_ms
+}
+
 /// A fresh call id.
 pub fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -107,6 +125,7 @@ impl CallObserver for Observer {
             // Calls from outside are recorded where they arrive.
             return 0;
         }
+        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
         let id = next_id();
         let on_task = STACK
             .try_with(|stack| {
@@ -147,6 +166,18 @@ impl CallObserver for Observer {
 
     fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>) {
         if depth == 0 || token == 0 {
+            return;
+        }
+        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
+        if PAUSED.load(Ordering::SeqCst) {
+            self.open
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&token);
+            // Not recorded, but what exists may have changed.
+            if !call.method.is_safe() {
+                self.refresher.poke();
+            }
             return;
         }
         let _ = STACK.try_with(|stack| {

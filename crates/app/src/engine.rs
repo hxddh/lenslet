@@ -174,6 +174,68 @@ impl Engine {
         async move { rx.await.unwrap_or_default() }
     }
 
+    /// Put the account back as it was before the run `run` started: a new,
+    /// empty engine, and every call from outside that changed the account
+    /// before then sent to it again, in order. What the account did in
+    /// response (deliveries, functions) happens again too, unrecorded.
+    pub fn rewind(&self, run: u64) -> impl Future<Output = Result<usize, String>> + use<> {
+        let (emulator, session, refresher) = (
+            self.emulator.clone(),
+            self.session.clone(),
+            self.refresher.clone(),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let result = async {
+                let started = session.run(run).ok_or("no such run")?.started_ms;
+                crate::observe::pause(true);
+                emulator.fresh();
+                let log = session.rewind_to(started);
+                for (i, sent) in log.iter().enumerate() {
+                    // Keep the session's pace, up to a few seconds a gap: what the
+                    // code waited for (a table, a function becoming ready) is
+                    // ready again before the next call.
+                    if let Some(previous) = i.checked_sub(1).map(|p| log[p].at_ms) {
+                        let gap = sent.at_ms.saturating_sub(previous).min(3000);
+                        tokio::time::sleep(std::time::Duration::from_millis(gap)).await;
+                    }
+                    // Each call succeeded the first time. Sent again sooner than
+                    // it was, it can find what it acts on not ready yet (a table
+                    // still being created): wait for it, as the code did.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    loop {
+                        let mut request = http::Request::new(sent.body.clone());
+                        *request.method_mut() = sent.method.clone();
+                        *request.uri_mut() = sent.uri.clone();
+                        *request.headers_mut() = sent.headers.clone();
+                        let status = emulator.handle(request).await.status();
+                        if status.as_u16() < 400 || std::time::Instant::now() > deadline {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+                // Let what the calls set off (deliveries, functions) finish: until
+                // AWS has been quiet a moment, for at most a while.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                while !crate::observe::settled(1500) && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                crate::observe::pause(false);
+                refresher.poke();
+                Ok::<usize, String>(log.len())
+            }
+            .await;
+            crate::observe::pause(false);
+            let _ = tx.send(result);
+        });
+        async move {
+            rx.await
+                .unwrap_or_else(|_| Err("the engine stopped".into()))
+        }
+    }
+
     /// Allow the role `role` what `accesses` need, as an inline policy.
     pub fn grant(
         &self,
