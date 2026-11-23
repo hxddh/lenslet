@@ -30,9 +30,15 @@ fn nothing_selected(ui: Ui) -> impl IntoElement {
         .child(
             text(move || {
                 if ui.snap.with(|s| s.calls.is_empty()) {
-                    ts("Calls appear here as your code makes them.", "代码发出调用后，会显示在这里。")
+                    ts(
+                        "Calls appear here as your code makes them.",
+                        "代码发出调用后，会显示在这里。",
+                    )
                 } else {
-                    ts("Select a call to see everything about it.", "选中一次调用，查看它的全部信息。")
+                    ts(
+                        "Select a call to see everything about it.",
+                        "选中一次调用，查看它的全部信息。",
+                    )
                 }
             })
             .text_size(body())
@@ -53,10 +59,16 @@ fn selected(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    text(move || call.with(|c| c.as_ref().map(|c| c.0.operation.clone()).unwrap_or_default()))
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .selectable(true),
+                    text(move || {
+                        call.with(|c| {
+                            c.as_ref()
+                                .map(|c| c.0.operation.clone())
+                                .unwrap_or_default()
+                        })
+                    })
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .selectable(true),
                 )
                 .child(status_pill(call)),
         )
@@ -88,13 +100,21 @@ fn selected(ui: Ui) -> impl IntoElement {
             .items_center()
             .justify_center()
             .rounded(radius())
-            .bg(move || if on() { fill_bg() } else { AdaptiveColor::rgb(0, 0).opacity(0.0) })
+            .bg(move || {
+                if on() {
+                    fill_bg()
+                } else {
+                    AdaptiveColor::rgb(0, 0).opacity(0.0)
+                }
+            })
             .hover(|s| s.bg(hover_bg()))
-            .child(
-                text(label)
-                    .text_size(small())
-                    .text_color(move || if on() { AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7) } else { secondary_text() }),
-            )
+            .child(text(label).text_size(small()).text_color(move || {
+                if on() {
+                    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                } else {
+                    secondary_text()
+                }
+            }))
     };
     let tabs = nsh_base::tabs()
         .flex_row()
@@ -108,14 +128,23 @@ fn selected(ui: Ui) -> impl IntoElement {
     let tab_kind = computed(move || ui.tab.get());
     let body = scroll().flex_1().child(dynamic(move || {
         let which = tab_kind.get();
-        view().px(px(14.0)).pb(px(16.0)).gap(px(14.0)).child(match which {
-            Tab::Summary => summary(ui, call).into_element(),
-            Tab::Request => exchange(call, true).into_element(),
-            Tab::Response => exchange(call, false).into_element(),
-            Tab::Access => access(ui, call).into_element(),
-        })
+        view()
+            .px(px(14.0))
+            .pb(px(16.0))
+            .gap(px(14.0))
+            .child(match which {
+                Tab::Summary => summary(ui, call).into_element(),
+                Tab::Request => exchange(call, true).into_element(),
+                Tab::Response => exchange(call, false).into_element(),
+                Tab::Access => access(ui, call).into_element(),
+            })
     }));
-    view().flex_1().child(header).child(tabs).child(hairline()).child(body)
+    view()
+        .flex_1()
+        .child(header)
+        .child(tabs)
+        .child(hairline())
+        .child(body)
 }
 
 /// A call held for the views, compared by identity (bodies are large).
@@ -138,15 +167,21 @@ fn status_pill(call: Held) -> impl IntoElement {
             _ => green(),
         })
     };
-    text(move || call.with(|c| c.as_ref().map(|c| calls::status_text(&c.0)).unwrap_or_default()))
-        .text_size(small())
-        .font_weight(FontWeight::SEMIBOLD)
-        .px(px(6.0))
-        .py(px(1.0))
-        .rounded(px(4.0))
-        .text_color(color)
-        .border_1()
-        .border_color(color)
+    text(move || {
+        call.with(|c| {
+            c.as_ref()
+                .map(|c| calls::status_text(&c.0))
+                .unwrap_or_default()
+        })
+    })
+    .text_size(small())
+    .font_weight(FontWeight::SEMIBOLD)
+    .px(px(6.0))
+    .py(px(1.0))
+    .rounded(px(4.0))
+    .text_color(color)
+    .border_1()
+    .border_color(color)
 }
 
 fn summary(ui: Ui, call: Held) -> impl IntoElement {
@@ -162,27 +197,51 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                 .flex_row()
                 .gap(px(10.0))
                 .py(px(2.0))
-                .child(text(label).w(px(96.0)).text_size(small()).text_color(secondary_text()))
                 .child(
-                    text(move || call.with(|c| c.as_ref().and_then(|c| value(&c.0)).unwrap_or_default()))
-                        .flex_1()
+                    text(label)
+                        .w(px(96.0))
                         .text_size(small())
-                        .font_family(MONO)
-                        .selectable(true),
+                        .text_color(secondary_text()),
+                )
+                .child(
+                    text(move || {
+                        call.with(|c| c.as_ref().and_then(|c| value(&c.0)).unwrap_or_default())
+                    })
+                    .flex_1()
+                    .text_size(small())
+                    .font_family(MONO)
+                    .selectable(true),
                 )
         })
     };
     let failure = when(
-        move || call.with(|c| c.as_ref().is_some_and(|c| c.0.failure.is_some() || c.0.unsupported)),
+        move || {
+            call.with(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.0.failure.is_some() || c.0.unsupported)
+            })
+        },
         move || failure_box(call),
     );
     let facts = view()
         .gap(px(2.0))
         .child(super::style::section(|| ts("Details", "详细信息")))
-        .child(field(|| ts("Resource", "资源"), Box::new(|c| c.target.clone())))
-        .child(field(|| ts("Status", "状态"), Box::new(|c| Some(c.status.to_string()))))
-        .child(field(|| ts("Duration", "耗时"), Box::new(|c| Some(format!("{} ms", c.ms)))))
-        .child(field(|| ts("Client", "客户端"), Box::new(|c| c.client.clone())))
+        .child(field(
+            || ts("Resource", "资源"),
+            Box::new(|c| c.target.clone()),
+        ))
+        .child(field(
+            || ts("Status", "状态"),
+            Box::new(|c| Some(c.status.to_string())),
+        ))
+        .child(field(
+            || ts("Duration", "耗时"),
+            Box::new(|c| Some(format!("{} ms", c.ms))),
+        ))
+        .child(field(
+            || ts("Client", "客户端"),
+            Box::new(|c| c.client.clone()),
+        ))
         .child(field(
             || ts("Attempt", "第几次尝试"),
             Box::new(|c| {
@@ -192,9 +251,18 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                 })
             }),
         ))
-        .child(field(|| ts("Region", "区域"), Box::new(|c| c.region.clone())))
-        .child(field(|| ts("Request ID", "请求 ID"), Box::new(|c| c.request_id.clone())))
-        .child(field(|| ts("Request", "请求"), Box::new(|c| Some(format!("{} {}", c.method, c.path)))))
+        .child(field(
+            || ts("Region", "区域"),
+            Box::new(|c| c.region.clone()),
+        ))
+        .child(field(
+            || ts("Request ID", "请求 ID"),
+            Box::new(|c| c.request_id.clone()),
+        ))
+        .child(field(
+            || ts("Request", "请求"),
+            Box::new(|c| Some(format!("{} {}", c.method, c.path))),
+        ))
         .child(field(
             || ts("Sizes", "大小"),
             Box::new(|c| {
@@ -214,29 +282,65 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                 .gap(px(6.0))
                 .flex_wrap()
                 .child(when(
-                    move || call.with(|c| c.as_ref().is_some_and(|c| crate::copy_as::aws_cli(&c.0).is_some())),
-                    move || push_button(|| ts("Copy as AWS CLI", "复制为 AWS CLI"), move || ui.copy_call_as(CopyAs::Cli)),
+                    move || {
+                        call.with(|c| {
+                            c.as_ref()
+                                .is_some_and(|c| crate::copy_as::aws_cli(&c.0).is_some())
+                        })
+                    },
+                    move || {
+                        push_button(
+                            || ts("Copy as AWS CLI", "复制为 AWS CLI"),
+                            move || ui.copy_call_as(CopyAs::Cli),
+                        )
+                    },
                 ))
-                .child(push_button(|| ts("Copy as curl", "复制为 curl"), move || ui.copy_call_as(CopyAs::Curl)))
+                .child(push_button(
+                    || ts("Copy as curl", "复制为 curl"),
+                    move || ui.copy_call_as(CopyAs::Curl),
+                ))
                 .child(when(
-                    move || call.with(|c| c.as_ref().is_some_and(|c| crate::copy_as::boto3(&c.0).is_some())),
-                    move || push_button(|| ts("Copy as boto3", "复制为 boto3"), move || ui.copy_call_as(CopyAs::Boto3)),
+                    move || {
+                        call.with(|c| {
+                            c.as_ref()
+                                .is_some_and(|c| crate::copy_as::boto3(&c.0).is_some())
+                        })
+                    },
+                    move || {
+                        push_button(
+                            || ts("Copy as boto3", "复制为 boto3"),
+                            move || ui.copy_call_as(CopyAs::Boto3),
+                        )
+                    },
                 )),
         );
     let show_resource = when(
-        move || call.with(|c| c.as_ref().is_some_and(|c| calls::resource_page(&c.0).is_some())),
+        move || {
+            call.with(|c| {
+                c.as_ref()
+                    .is_some_and(|c| calls::resource_page(&c.0).is_some())
+            })
+        },
         move || {
             view().flex_row().child(push_button(
                 || ts("Show Resource", "查看资源"),
                 move || {
-                    if let Some(page) = call.with_untracked(|c| c.as_ref().and_then(|c| calls::resource_page(&c.0))) {
+                    if let Some(page) =
+                        call.with_untracked(|c| c.as_ref().and_then(|c| calls::resource_page(&c.0)))
+                    {
                         ui.page.set(page);
                     }
                 },
             ))
         },
     );
-    view().gap(px(16.0)).pt(px(12.0)).child(failure).child(facts).child(replay).child(show_resource)
+    view()
+        .gap(px(16.0))
+        .pt(px(12.0))
+        .child(failure)
+        .child(facts)
+        .child(replay)
+        .child(show_resource)
 }
 
 fn failure_box(call: Held) -> impl IntoElement {
@@ -252,7 +356,7 @@ fn failure_box(call: Held) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
-                .child(icon_colored(Icon::Warning, 15.0, orange()))
+                .child(dynamic(move || icon_colored(Icon::Warning, 15.0, if unsupported() { orange() } else { red() })))
                 .child(
                     text(move || {
                         if unsupported() {
@@ -291,11 +395,24 @@ fn failure_box(call: Held) -> impl IntoElement {
 }
 
 fn exchange(call: Held, request: bool) -> impl IntoElement {
-    let part = move |c: &Call| if request { c.request.clone() } else { c.response.clone() };
+    let part = move |c: &Call| {
+        if request {
+            c.request.clone()
+        } else {
+            c.response.clone()
+        }
+    };
     let headers = move || {
         call.with(|c| {
             c.as_ref()
-                .map(|c| part(&c.0).headers.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n"))
+                .map(|c| {
+                    part(&c.0)
+                        .headers
+                        .iter()
+                        .map(|(n, v)| format!("{n}: {v}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
                 .unwrap_or_default()
         })
     };
@@ -304,7 +421,11 @@ fn exchange(call: Held, request: bool) -> impl IntoElement {
             c.as_ref()
                 .map(|c| {
                     let e = part(&c.0);
-                    if e.body.is_empty() { ts("(no body)", "（无正文）") } else { pretty(&e.body) }
+                    if e.body.is_empty() {
+                        ts("(no body)", "（无正文）")
+                    } else {
+                        pretty(&e.body)
+                    }
                 })
                 .unwrap_or_default()
         })
@@ -332,18 +453,29 @@ fn access(ui: Ui, call: Held) -> impl IntoElement {
     let lines = move || {
         call.with(|c| {
             c.as_ref()
-                .map(|c| c.0.access.iter().map(|a| format!("{}\n  {}", a.action, a.resource)).collect::<Vec<_>>())
+                .map(|c| {
+                    c.0.access
+                        .iter()
+                        .map(|a| format!("{}\n  {}", a.action, a.resource))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         })
     };
     view()
         .gap(px(8.0))
         .pt(px(12.0))
-        .child(super::style::section(|| ts("This call needed", "这次调用需要")))
+        .child(super::style::section(|| {
+            ts("This call needed", "这次调用需要")
+        }))
         .child(
             text(move || {
                 let lines = lines();
-                if lines.is_empty() { ts("No IAM permission", "不需要 IAM 权限") } else { lines.join("\n") }
+                if lines.is_empty() {
+                    ts("No IAM permission", "不需要 IAM 权限")
+                } else {
+                    lines.join("\n")
+                }
             })
             .font_family(MONO)
             .text_size(px(11.5))
@@ -355,8 +487,14 @@ fn access(ui: Ui, call: Held) -> impl IntoElement {
                 push_button(
                     || ts("Copy as Policy", "复制为策略"),
                     move || {
-                        let accesses = call.with_untracked(|c| c.as_ref().map(|c| c.0.access.clone()).unwrap_or_default());
-                        ui.copy(lenslet_core::policy::compile(&accesses), "Copied the policy", "已复制策略");
+                        let accesses = call.with_untracked(|c| {
+                            c.as_ref().map(|c| c.0.access.clone()).unwrap_or_default()
+                        });
+                        ui.copy(
+                            lenslet_core::policy::compile(&accesses),
+                            "Copied the policy",
+                            "已复制策略",
+                        );
                     },
                 )
             },

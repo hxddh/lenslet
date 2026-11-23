@@ -70,7 +70,9 @@ impl Call {
                 || s.contains(&format!("/{name} "))
                 || s.contains(&format!("//{name}"))
         };
-        self.target.as_deref().is_some_and(|t| t.split(" · ").any(named))
+        self.target
+            .as_deref()
+            .is_some_and(|t| t.split(" · ").any(named))
             || self.access.iter().any(|a| named(&a.resource))
     }
 }
@@ -210,7 +212,10 @@ impl Session {
             permissions: inner
                 .permissions
                 .iter()
-                .map(|(access, calls)| Permission { access: access.clone(), calls: calls.clone() })
+                .map(|(access, calls)| Permission {
+                    access: access.clone(),
+                    calls: calls.clone(),
+                })
                 .collect(),
             generation: inner.generation,
         })
@@ -256,8 +261,15 @@ pub fn client_of(user_agent: &str) -> Option<String> {
     let first = user_agent.split_whitespace().collect::<Vec<_>>();
     for (prefix, name) in KNOWN {
         if let Some(token) = first.iter().find(|t| t.starts_with(prefix)) {
-            let version = token[prefix.len()..].split(['#', ' ']).next().unwrap_or_default();
-            return Some(if version.is_empty() { name.to_string() } else { format!("{name} {version}") });
+            let version = token[prefix.len()..]
+                .split(['#', ' '])
+                .next()
+                .unwrap_or_default();
+            return Some(if version.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} {version}")
+            });
         }
     }
     let token = first.first()?;
@@ -278,7 +290,8 @@ mod tests {
     #[test]
     fn names_the_client_from_its_user_agent() {
         assert_eq!(
-            client_of("Boto3/1.35.0 md/Botocore#1.35.0 ua/2.0 os/linux#6.1 lang/python#3.12.1").as_deref(),
+            client_of("Boto3/1.35.0 md/Botocore#1.35.0 ua/2.0 os/linux#6.1 lang/python#3.12.1")
+                .as_deref(),
             Some("boto3 1.35.0")
         );
         assert_eq!(
@@ -286,7 +299,8 @@ mod tests {
             Some("AWS CLI 2.17.0")
         );
         assert_eq!(
-            client_of("aws-sdk-js/3.600.0 ua/2.1 os/darwin#23.5.0 lang/js md/nodejs#20.14.0").as_deref(),
+            client_of("aws-sdk-js/3.600.0 ua/2.1 os/darwin#23.5.0 lang/js md/nodejs#20.14.0")
+                .as_deref(),
             Some("AWS SDK for JavaScript 3.600.0")
         );
         assert_eq!(client_of("curl/8.5.0").as_deref(), Some("curl 8.5.0"));
@@ -298,7 +312,10 @@ mod tests {
         let session = Session::default();
         let first = session.snapshot_since(None).unwrap();
         assert!(session.snapshot_since(Some(first.version)).is_none());
-        session.set_resources(vec![Group { service: "s3", items: vec![Resource::default()] }]);
+        session.set_resources(vec![Group {
+            service: "s3",
+            items: vec![Resource::default()],
+        }]);
         session.record(call("s3", Some("bucket/a")));
         let s = session.snapshot_since(Some(first.version)).unwrap();
         assert_eq!(s.calls.len(), 1);
@@ -320,7 +337,10 @@ mod tests {
         assert!(!c.touches("sqs", "order"));
         assert!(!c.touches("sns", "orders"));
         let mut c = call("dynamodb", None);
-        c.access = vec![Access::new("dynamodb:PutItem", "arn:aws:dynamodb:*:*:table/orders")];
+        c.access = vec![Access::new(
+            "dynamodb:PutItem",
+            "arn:aws:dynamodb:*:*:table/orders",
+        )];
         assert!(c.touches("dynamodb", "orders"));
     }
 
@@ -339,7 +359,9 @@ mod tests {
             target: None,
             failure: None,
             unsupported: false,
-            access: resource.map(|r| vec![Access::new(format!("{service}:Op"), r)]).unwrap_or_default(),
+            access: resource
+                .map(|r| vec![Access::new(format!("{service}:Op"), r)])
+                .unwrap_or_default(),
             client: None,
             attempt: None,
             max_attempts: None,

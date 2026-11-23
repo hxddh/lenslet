@@ -53,7 +53,11 @@ pub fn aws_cli(call: &Call) -> Option<String> {
         return None;
     }
     let body = compact(&call.request.body)?;
-    let mut command = format!("aws {} {}", cli_service(&call.service), kebab(&call.operation));
+    let mut command = format!(
+        "aws {} {}",
+        cli_service(&call.service),
+        kebab(&call.operation)
+    );
     if body != "{}" {
         command.push_str(&format!(" --cli-input-json {}", quote(&body)));
     }
@@ -79,8 +83,18 @@ pub fn boto3(call: &Call) -> Option<String> {
 
 /// The exact request, replayable with curl.
 pub fn curl(call: &Call, endpoint: &str) -> String {
-    let mut command = format!("curl -sS -X {} {}", call.method, quote(&format!("{endpoint}{}", call.path)));
-    const SKIP: &[&str] = &["host", "content-length", "connection", "accept-encoding", "transfer-encoding"];
+    let mut command = format!(
+        "curl -sS -X {} {}",
+        call.method,
+        quote(&format!("{endpoint}{}", call.path))
+    );
+    const SKIP: &[&str] = &[
+        "host",
+        "content-length",
+        "connection",
+        "accept-encoding",
+        "transfer-encoding",
+    ];
     for (name, value) in &call.request.headers {
         if SKIP.iter().any(|s| name.eq_ignore_ascii_case(s)) {
             continue;
@@ -88,7 +102,10 @@ pub fn curl(call: &Call, endpoint: &str) -> String {
         command.push_str(&format!(" \\\n  -H {}", quote(&format!("{name}: {value}"))));
     }
     if !call.request.body.is_empty() && call.request.body.len() == call.request.bytes {
-        command.push_str(&format!(" \\\n  --data-binary {}", quote(&call.request.body)));
+        command.push_str(&format!(
+            " \\\n  --data-binary {}",
+            quote(&call.request.body)
+        ));
     }
     command
 }
@@ -164,11 +181,23 @@ mod tests {
             r#"aws dynamodb put-item --cli-input-json '{"TableName":"orders","ConsistentRead":true,"X":null}'"#
         );
         let py = boto3(&call).unwrap();
-        assert!(py.starts_with("boto3.client(\"dynamodb\").put_item(**{"), "{py}");
-        assert!(py.contains("\"ConsistentRead\": True") && py.contains("\"X\": None"), "{py}");
+        assert!(
+            py.starts_with("boto3.client(\"dynamodb\").put_item(**{"),
+            "{py}"
+        );
+        assert!(
+            py.contains("\"ConsistentRead\": True") && py.contains("\"X\": None"),
+            "{py}"
+        );
         let curl = curl(&call, "http://127.0.0.1:4510");
-        assert!(curl.starts_with("curl -sS -X POST 'http://127.0.0.1:4510/'"), "{curl}");
-        assert!(curl.contains("-H 'x-amz-target: DynamoDB_20120810.PutItem'"), "{curl}");
+        assert!(
+            curl.starts_with("curl -sS -X POST 'http://127.0.0.1:4510/'"),
+            "{curl}"
+        );
+        assert!(
+            curl.contains("-H 'x-amz-target: DynamoDB_20120810.PutItem'"),
+            "{curl}"
+        );
         assert!(curl.contains("--data-binary '{\"TableName\""), "{curl}");
     }
 

@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use nsh_base::{
-    DataTableCellClass, DataTableColumn, DataTableContextMenu, DataTablePress, DataTableRows, DataTableSelection,
-    DataTableSort, DataTableSortDirection, SelectItem,
+    DataTableCellClass, DataTableColumn, DataTableContextMenu, DataTablePress, DataTableRows,
+    DataTableSelection, DataTableSort, DataTableSortDirection, SelectItem,
 };
 use nsh_core::{
     element::desktop::{MenuItem, popup_menu_at},
@@ -22,7 +22,10 @@ pub fn matches(call: &Call, query: &str) -> bool {
     has(&call.operation)
         || has(&call.service)
         || call.target.as_deref().is_some_and(has)
-        || call.failure.as_ref().is_some_and(|f| has(&f.code) || f.message.as_deref().is_some_and(has))
+        || call
+            .failure
+            .as_ref()
+            .is_some_and(|f| has(&f.code) || f.message.as_deref().is_some_and(has))
         || call.status.to_string() == query
         || call.client.as_deref().is_some_and(has)
         || call.request_id.as_deref().is_some_and(has)
@@ -45,7 +48,11 @@ pub fn sort(calls: &mut [Arc<Call>], sort: Option<&DataTableSort>) {
             _ => a.seq.cmp(&b.seq),
         }
         .then(a.seq.cmp(&b.seq));
-        if sort.direction == DataTableSortDirection::Descending { order.reverse() } else { order }
+        if sort.direction == DataTableSortDirection::Descending {
+            order.reverse()
+        } else {
+            order
+        }
     });
 }
 
@@ -71,7 +78,11 @@ pub fn status_text(call: &Call) -> String {
 /// One line under the operation: the failure, else what it acted on.
 pub fn summary(call: &Call) -> String {
     match &call.failure {
-        _ if call.unsupported => format!("{} · {}", t("Not emulated", "未模拟"), call.service.to_uppercase()),
+        _ if call.unsupported => format!(
+            "{} · {}",
+            t("Not emulated", "未模拟"),
+            call.service.to_uppercase()
+        ),
         Some(f) if call.failed() => f.code.clone(),
         _ => call.target.clone().unwrap_or_default(),
     }
@@ -80,17 +91,22 @@ pub fn summary(call: &Call) -> String {
 pub fn calls(ui: Ui) -> AnyElement {
     let columns = move || {
         let _ = super::lang().get();
-        let mut ms = column("ms", ts("Duration", "耗时"), 70.0, 56.0);
+        let mut ms = column("ms", ts("Duration", "耗时"), 84.0, 60.0);
         ms.align = nsh_base::DataTableAlign::End;
-        let mut status = column("status", ts("Status", "状态"), 64.0, 50.0);
+        let mut status = column("status", ts("Status", "状态"), 72.0, 56.0);
         status.align = nsh_base::DataTableAlign::End;
         vec![
-            column("time", ts("Time", "时间"), 70.0, 60.0),
+            column("time", ts("Time", "时间"), 82.0, 70.0),
             status,
             column("service", ts("Service", "服务"), 100.0, 60.0),
             column("operation", ts("Operation", "操作"), 160.0, 80.0),
             ms,
-            column("target", ts("Resource or Error", "资源或错误"), 300.0, 120.0),
+            column(
+                "target",
+                ts("Resource or Error", "资源或错误"),
+                300.0,
+                120.0,
+            ),
             column("client", ts("Client", "客户端"), 130.0, 80.0),
         ]
     };
@@ -103,7 +119,10 @@ pub fn calls(ui: Ui) -> AnyElement {
                 .texts("target", calls.iter().map(|c| summary(c)))
                 .texts("status", calls.iter().map(|c| c.status.to_string()))
                 .texts("ms", calls.iter().map(|c| format!("{} ms", c.ms)))
-                .texts("client", calls.iter().map(|c| c.client.clone().unwrap_or_default()))
+                .texts(
+                    "client",
+                    calls.iter().map(|c| c.client.clone().unwrap_or_default()),
+                )
         })
     };
     // Failures read red and gaps in the emulator orange, in their status and
@@ -175,14 +194,21 @@ pub fn calls(ui: Ui) -> AnyElement {
             }
         })
         .on_context_menu(move |e: &DataTableContextMenu| {
-            let Some(call) = e.row.and_then(call_at) else { return };
+            let Some(call) = e.row.and_then(call_at) else {
+                return;
+            };
             ui.selected.set(Some(call.seq));
             drop(popup_menu_at(call_menu(ui, &call), point(e.x, e.y)));
         })
         .empty(empty(ui))
         .flex_1();
 
-    view().flex_1().child(scope_bar(ui)).child(hairline()).child(table).into_element()
+    view()
+        .flex_1()
+        .child(scope_bar(ui))
+        .child(hairline())
+        .child(table)
+        .into_element()
 }
 
 fn selected_row_class() -> &'static str {
@@ -199,7 +225,8 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
         MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI"))
             .disabled(crate::copy_as::aws_cli(call).is_none())
             .on_select(move || ui.copy_call_as(CopyAs::Cli)),
-        MenuItem::new(t("Copy as curl", "复制为 curl")).on_select(move || ui.copy_call_as(CopyAs::Curl)),
+        MenuItem::new(t("Copy as curl", "复制为 curl"))
+            .on_select(move || ui.copy_call_as(CopyAs::Curl)),
         MenuItem::new(t("Copy as boto3", "复制为 boto3"))
             .disabled(crate::copy_as::boto3(call).is_none())
             .on_select(move || ui.copy_call_as(CopyAs::Boto3)),
@@ -217,20 +244,36 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
                 .on_select(move || ui.copy(id.clone(), "Copied the request ID", "已复制请求 ID")),
         );
     }
-    let resources: Vec<String> = call.access.iter().map(|a| a.resource.clone()).filter(|r| r != "*").collect();
+    let resources: Vec<String> = call
+        .access
+        .iter()
+        .map(|a| a.resource.clone())
+        .filter(|r| r != "*")
+        .collect();
     if let Some(arn) = resources.first().cloned() {
-        items.push(MenuItem::new(t("Copy ARN", "复制 ARN")).on_select(move || ui.copy(arn.clone(), "Copied the ARN", "已复制 ARN")));
+        items.push(
+            MenuItem::new(t("Copy ARN", "复制 ARN"))
+                .on_select(move || ui.copy(arn.clone(), "Copied the ARN", "已复制 ARN")),
+        );
     }
     items.push(MenuItem::separator());
     let service = call.service.clone();
     items.push(
-        MenuItem::new(format!("{} {}", t("Show Only", "只看"), service_title(&call.service))).on_select(move || {
+        MenuItem::new(format!(
+            "{} {}",
+            t("Show Only", "只看"),
+            service_title(&call.service)
+        ))
+        .on_select(move || {
             ui.service.set(Some(service.clone()));
             ui.page.set(Page::Calls);
         }),
     );
     if let Some(page) = resource_page(call) {
-        items.push(MenuItem::new(t("Show Resource", "查看资源")).on_select(move || ui.page.set(page.clone())));
+        items.push(
+            MenuItem::new(t("Show Resource", "查看资源"))
+                .on_select(move || ui.page.set(page.clone())),
+        );
     }
     items
 }
@@ -238,12 +281,16 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
 /// The resource page a call acted on, when Lenslet lists that resource.
 pub fn resource_page(call: &Call) -> Option<Page> {
     let snapshot = super::engine().snapshot();
-    snapshot.resources.iter().find(|g| g.service == call.service).and_then(|g| {
-        g.items
-            .iter()
-            .find(|r| call.touches(&call.service, &r.name))
-            .map(|r| Page::Resource(g.service, r.name.clone()))
-    })
+    snapshot
+        .resources
+        .iter()
+        .find(|g| g.service == call.service)
+        .and_then(|g| {
+            g.items
+                .iter()
+                .find(|r| call.touches(&call.service, &r.name))
+                .map(|r| Page::Resource(g.service, r.name.clone()))
+        })
 }
 
 /// Which calls show: all, failed, not emulated; one service.
@@ -258,32 +305,58 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
             .px(px(10.0))
             .h(px(22.0))
             .rounded(radius())
-            .bg(move || if selected() { fill_bg() } else { AdaptiveColor::rgb(0, 0).opacity(0.0) })
-            .hover(|s| s.bg(hover_bg()))
-            .child(
-                text(label)
-                    .text_size(small())
-                    .text_color(move || if selected() { AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7) } else { secondary_text() }),
-            )
-            .child(text(move || match count() {
-                0 => String::new(),
-                n => n.to_string(),
+            .bg(move || {
+                if selected() {
+                    fill_bg()
+                } else {
+                    AdaptiveColor::rgb(0, 0).opacity(0.0)
+                }
             })
-            .text_size(small())
-            .text_color(move || match filter {
-                Filter::Failed => red(),
-                Filter::NotEmulated => orange(),
-                Filter::All => secondary_text(),
+            .hover(|s| s.bg(hover_bg()))
+            .child(text(label).text_size(small()).text_color(move || {
+                if selected() {
+                    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                } else {
+                    secondary_text()
+                }
             }))
+            .child(
+                text(move || match count() {
+                    0 => String::new(),
+                    n => n.to_string(),
+                })
+                .text_size(small())
+                .text_color(move || match filter {
+                    Filter::Failed => red(),
+                    Filter::NotEmulated => orange(),
+                    Filter::All => secondary_text(),
+                }),
+            )
     };
-    let failed = move || ui.snap.with(|s| s.calls.iter().filter(|c| c.failed() && !c.unsupported).count());
-    let unsupported = move || ui.snap.with(|s| s.calls.iter().filter(|c| c.unsupported).count());
+    let failed = move || {
+        ui.snap.with(|s| {
+            s.calls
+                .iter()
+                .filter(|c| c.failed() && !c.unsupported)
+                .count()
+        })
+    };
+    let unsupported = move || {
+        ui.snap
+            .with(|s| s.calls.iter().filter(|c| c.unsupported).count())
+    };
     let services = move || {
-        let mut names: Vec<String> = ui.snap.with(|s| s.calls.iter().map(|c| c.service.clone()).collect());
+        let mut names: Vec<String> = ui
+            .snap
+            .with(|s| s.calls.iter().map(|c| c.service.clone()).collect());
         names.sort();
         names.dedup();
         let mut items = vec![SelectItem::new("", t("All Services", "全部服务"))];
-        items.extend(names.iter().map(|n| SelectItem::new(n.clone(), service_title(n))));
+        items.extend(
+            names
+                .iter()
+                .map(|n| SelectItem::new(n.clone(), service_title(n))),
+        );
         items
     };
     view()
@@ -351,11 +424,17 @@ fn empty(ui: Ui) -> impl IntoElement {
                 if ui.snap.with(|s| s.calls.is_empty()) {
                     format!(
                         "{} {}",
-                        t("Run your code in the terminal below, or point any SDK at", "在下方终端运行你的代码，或把任何 SDK 指向"),
+                        t(
+                            "Run your code in the terminal below, or point any SDK at",
+                            "在下方终端运行你的代码，或把任何 SDK 指向"
+                        ),
                         engine().endpoint()
                     )
                 } else {
-                    ts("Change the search or the filters above.", "修改搜索或上方的筛选。")
+                    ts(
+                        "Change the search or the filters above.",
+                        "修改搜索或上方的筛选。",
+                    )
                 }
             })
             .text_size(body())

@@ -22,7 +22,9 @@ use std::{
 use nsh_base::DataTableSort;
 use nsh_core::{
     desktop::{Backdrop, MenuRole, TitleBarOptions, TitleBarStyle, WindowAttributes},
-    element::desktop::{MenuItem, popup_menu, set_application_menu, title_bar, window as app_window},
+    element::desktop::{
+        MenuItem, popup_menu, set_application_menu, title_bar, window as app_window,
+    },
     platform::Os,
     prelude::*,
 };
@@ -62,7 +64,11 @@ fn system_lang() -> Lang {
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
         .unwrap_or_else(|| locale().to_string());
-    if locale.starts_with("zh") { Lang::Zh } else { Lang::En }
+    if locale.starts_with("zh") {
+        Lang::Zh
+    } else {
+        Lang::En
+    }
 }
 
 // -- State --------------------------------------------------------------------------
@@ -151,7 +157,8 @@ impl Ui {
     /// The selected call.
     pub fn call(&self) -> Option<Arc<Call>> {
         let seq = self.selected.get()?;
-        self.snap.with(|s| s.calls.iter().rev().find(|c| c.seq == seq).cloned())
+        self.snap
+            .with(|s| s.calls.iter().rev().find(|c| c.seq == seq).cloned())
     }
 
     pub fn say(&self, message: impl Into<String>) {
@@ -290,7 +297,8 @@ fn session_json(calls: &[Arc<Call>]) -> String {
             })
         })
         .collect();
-    serde_json::to_string_pretty(&serde_json::json!({"lenslet": 1, "calls": entries})).unwrap_or_default()
+    serde_json::to_string_pretty(&serde_json::json!({"lenslet": 1, "calls": entries}))
+        .unwrap_or_default()
 }
 
 // -- The window ---------------------------------------------------------------------
@@ -342,11 +350,21 @@ fn cannot_start(error: String) -> AnyElement {
         .window_drag(true)
         .child(icon_colored(Icon::Warning, 40.0, orange()))
         .child(
-            text(move || ts("Lenslet could not start its endpoint", "Lenslet 无法启动本地端点"))
-                .text_size(px(17.0))
-                .font_weight(FontWeight::SEMIBOLD),
+            text(move || {
+                ts(
+                    "Lenslet could not start its endpoint",
+                    "Lenslet 无法启动本地端点",
+                )
+            })
+            .text_size(px(17.0))
+            .font_weight(FontWeight::SEMIBOLD),
         )
-        .child(text(error.clone()).font_family(MONO).text_size(small()).text_color(secondary_text()))
+        .child(
+            text(error.clone())
+                .font_family(MONO)
+                .text_size(small())
+                .text_color(secondary_text()),
+        )
         .child(
             text(move || {
                 ts(
@@ -397,12 +415,23 @@ fn workbench() -> AnyElement {
     });
     // The Dock's badge counts the failed calls.
     effect(move || {
-        let failed = ui.snap.with(|s| s.calls.iter().filter(|c| c.failed() && !c.unsupported).count());
+        let failed = ui.snap.with(|s| {
+            s.calls
+                .iter()
+                .filter(|c| c.failed() && !c.unsupported)
+                .count()
+        });
         set_badge(failed as u32);
     });
     effect(move || {
         // Follows the language and the views' state, so checks stay right.
-        let _ = (lang().get(), ui.sidebar.get(), ui.inspector.get(), ui.terminal.get(), ui.filter.get());
+        let _ = (
+            lang().get(),
+            ui.sidebar.get(),
+            ui.inspector.get(),
+            ui.terminal.get(),
+            ui.filter.get(),
+        );
         set_application_menu(menu(ui));
     });
 
@@ -425,7 +454,9 @@ fn workbench() -> AnyElement {
                                 nsh_base::resizable_panel()
                                     .size(px(400.0))
                                     .size_range(px(300.0)..px(720.0))
-                                    .visible(move || ui.inspector.get() && ui.page.get() == Page::Calls)
+                                    .visible(move || {
+                                        ui.inspector.get() && ui.page.get() == Page::Calls
+                                    })
                                     .child(inspector::inspector(ui)),
                             ),
                     ),
@@ -486,18 +517,35 @@ fn toolbar(ui: Ui) -> impl IntoElement {
     };
     let subtitle = move || match ui.page.get() {
         Page::Calls => {
-            let (shown, all) = (ui.visible.with(|v| v.len()), ui.snap.with(|s| s.calls.len()));
+            let (shown, all) = (
+                ui.visible.with(|v| v.len()),
+                ui.snap.with(|s| s.calls.len()),
+            );
             if shown == all {
                 format!("{all} {}", t("calls", "次调用"))
             } else {
                 format!("{shown} / {all}")
             }
         }
-        Page::Permissions => format!("{} {}", ui.snap.with(|s| s.permissions.len()), t("permissions", "项权限")),
+        Page::Permissions => format!(
+            "{} {}",
+            ui.snap.with(|s| s.permissions.len()),
+            t("permissions", "项权限")
+        ),
         Page::Resource(service, _) => sidebar::service_title(service),
-        Page::Overview => format!("{} · {}", engine().endpoint().trim_start_matches("http://"), crate::engine::REGION),
+        Page::Overview => format!(
+            "{} · {}",
+            engine().endpoint().trim_start_matches("http://"),
+            crate::engine::REGION
+        ),
     };
-    let left_inset = move || if ui.sidebar.get() { px(12.0) } else { title_bar().left + px(4.0) };
+    let left_inset = move || {
+        if ui.sidebar.get() {
+            px(12.0)
+        } else {
+            title_bar().left + px(4.0)
+        }
+    };
     view()
         .flex_row()
         .items_center()
@@ -507,19 +555,36 @@ fn toolbar(ui: Ui) -> impl IntoElement {
         .gap(px(6.0))
         .bg(chrome_bg())
         .window_drag(true)
-        .child(when(move || !ui.sidebar.get(), move || {
-            tool_button(
-                Icon::Sidebar,
-                move || format!("{} ({})", t("Show Sidebar", "显示侧栏"), key_label(&sidebar_key())),
-                || false,
-                move || ui.sidebar.set(true),
-            )
-        }))
+        .child(when(
+            move || !ui.sidebar.get(),
+            move || {
+                tool_button(
+                    Icon::Sidebar,
+                    move || {
+                        format!(
+                            "{} ({})",
+                            t("Show Sidebar", "显示侧栏"),
+                            key_label(&sidebar_key())
+                        )
+                    },
+                    || false,
+                    move || ui.sidebar.set(true),
+                )
+            },
+        ))
         .child(
             view()
                 .px(px(4.0))
-                .child(text(title).font_weight(FontWeight::SEMIBOLD).text_size(body()))
-                .child(text(subtitle).text_size(small()).text_color(secondary_text())),
+                .child(
+                    text(title)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(body()),
+                )
+                .child(
+                    text(subtitle)
+                        .text_size(small())
+                        .text_color(secondary_text()),
+                ),
         )
         .child(view().flex_1())
         .child(search_field(ui))
@@ -531,7 +596,13 @@ fn toolbar(ui: Ui) -> impl IntoElement {
         ))
         .child(tool_button(
             Icon::NewAccount,
-            move || format!("{} ({})", t("New Empty Account…", "新建空账户…"), key_label("mod+shift+n")),
+            move || {
+                format!(
+                    "{} ({})",
+                    t("New Empty Account…", "新建空账户…"),
+                    key_label("mod+shift+n")
+                )
+            },
             || false,
             move || ui.new_account(),
         ))
@@ -541,25 +612,31 @@ fn toolbar(ui: Ui) -> impl IntoElement {
             move || ui.terminal.get(),
             move || ui.terminal.update(|v| *v = !*v),
         ))
-        .child(when(move || ui.page.get() == Page::Calls, move || {
-            tool_button(
-                Icon::Inspector,
-                move || format!("{} ({})", t("Inspector", "检查器"), key_label("mod+alt+i")),
-                move || ui.inspector.get(),
-                move || ui.inspector.update(|v| *v = !*v),
-            )
-        }))
-        .child(when(move || os() != Os::MacOs, move || {
-            nsh_base::button()
-                .on_press(move || drop(popup_menu(menu(ui))))
-                .w(px(30.0))
-                .h(px(26.0))
-                .items_center()
-                .justify_center()
-                .rounded(radius())
-                .hover(|s| s.bg(hover_bg()))
-                .child(icon(Icon::Menu, 17.0))
-        }))
+        .child(when(
+            move || ui.page.get() == Page::Calls,
+            move || {
+                tool_button(
+                    Icon::Inspector,
+                    move || format!("{} ({})", t("Inspector", "检查器"), key_label("mod+alt+i")),
+                    move || ui.inspector.get(),
+                    move || ui.inspector.update(|v| *v = !*v),
+                )
+            },
+        ))
+        .child(when(
+            move || os() != Os::MacOs,
+            move || {
+                nsh_base::button()
+                    .on_press(move || drop(popup_menu(menu(ui))))
+                    .w(px(30.0))
+                    .h(px(26.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(radius())
+                    .hover(|s| s.bg(hover_bg()))
+                    .child(icon(Icon::Menu, 17.0))
+            },
+        ))
 }
 
 fn search_field(ui: Ui) -> impl IntoElement {
@@ -610,28 +687,37 @@ fn toast(ui: Ui) -> impl IntoElement {
         .right(px(0.0))
         .items_center()
         .pointer_events(PointerEvents::None)
-        .child(when(move || ui.toast.get().is_some(), move || {
-            text(move || ui.toast.get().unwrap_or_default())
-                .px(px(14.0))
-                .py(px(7.0))
-                .rounded(px(9.0))
-                .bg(AdaptiveColor::rgb(0x1c1c1e, 0xf2f2f7).opacity(0.92))
-                .text_color(AdaptiveColor::rgb(0xffffff, 0x1c1c1e))
-                .text_size(body())
-        }))
+        .child(when(
+            move || ui.toast.get().is_some(),
+            move || {
+                text(move || ui.toast.get().unwrap_or_default())
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .rounded(px(9.0))
+                    .bg(AdaptiveColor::rgb(0x1c1c1e, 0xf2f2f7).opacity(0.92))
+                    .text_color(AdaptiveColor::rgb(0xffffff, 0x1c1c1e))
+                    .text_size(body())
+            },
+        ))
 }
 
 // -- Menus and shortcuts --------------------------------------------------------------------
 
 fn sidebar_key() -> String {
-    if os() == Os::MacOs { "ctrl+cmd+s".into() } else { "mod+alt+s".into() }
+    if os() == Os::MacOs {
+        "ctrl+cmd+s".into()
+    } else {
+        "mod+alt+s".into()
+    }
 }
 
 /// The application's menus: the menu bar on macOS, the main menu (☰)
 /// elsewhere. Each command is here with its shortcut.
 fn menu(ui: Ui) -> Vec<MenuItem> {
     let mac = os() == Os::MacOs;
-    let check = |label: &'static str, label_zh: &'static str, on: bool| MenuItem::new(t(label, label_zh)).checked(on);
+    let check = |label: &'static str, label_zh: &'static str, on: bool| {
+        MenuItem::new(t(label, label_zh)).checked(on)
+    };
     let mut menus = Vec::new();
     if mac {
         menus.push(MenuItem::submenu(
@@ -648,7 +734,9 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
         ));
     }
     let mut file = vec![
-        MenuItem::new(t("Export Session…", "导出会话…")).shortcut("mod+e").on_select(move || ui.export_session()),
+        MenuItem::new(t("Export Session…", "导出会话…"))
+            .shortcut("mod+e")
+            .on_select(move || ui.export_session()),
         MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…"))
             .shortcut("mod+shift+s")
             .on_select(move || ui.save_policy()),
@@ -674,9 +762,11 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::role(MenuRole::Paste),
             MenuItem::role(MenuRole::SelectAll),
             MenuItem::separator(),
-            MenuItem::new(t("Find", "查找")).shortcut("mod+f").on_select(move || {
-                ui.focus_search.update(|n| *n += 1);
-            }),
+            MenuItem::new(t("Find", "查找"))
+                .shortcut("mod+f")
+                .on_select(move || {
+                    ui.focus_search.update(|n| *n += 1);
+                }),
             MenuItem::separator(),
             MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI"))
                 .shortcut("mod+shift+c")
@@ -684,15 +774,20 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::new(t("Copy as curl", "复制为 curl"))
                 .shortcut("mod+alt+c")
                 .on_select(move || ui.copy_call_as(CopyAs::Curl)),
-            MenuItem::new(t("Copy as boto3", "复制为 boto3")).on_select(move || ui.copy_call_as(CopyAs::Boto3)),
+            MenuItem::new(t("Copy as boto3", "复制为 boto3"))
+                .on_select(move || ui.copy_call_as(CopyAs::Boto3)),
         ],
     ));
     let filter = ui.filter.get_untracked();
     menus.push(MenuItem::submenu(
         t("View", "显示"),
         [
-            MenuItem::new(t("Overview", "概览")).shortcut("mod+1").on_select(move || ui.page.set(Page::Overview)),
-            MenuItem::new(t("Calls", "调用")).shortcut("mod+2").on_select(move || ui.page.set(Page::Calls)),
+            MenuItem::new(t("Overview", "概览"))
+                .shortcut("mod+1")
+                .on_select(move || ui.page.set(Page::Overview)),
+            MenuItem::new(t("Calls", "调用"))
+                .shortcut("mod+2")
+                .on_select(move || ui.page.set(Page::Calls)),
             MenuItem::new(t("Permissions", "权限"))
                 .shortcut("mod+3")
                 .on_select(move || ui.page.set(Page::Permissions)),
@@ -707,7 +802,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                     ui.filter.set(Filter::Failed);
                     ui.page.set(Page::Calls);
                 }),
-            check("Not Emulated", "未模拟的调用", filter == Filter::NotEmulated).on_select(move || {
+            check(
+                "Not Emulated",
+                "未模拟的调用",
+                filter == Filter::NotEmulated,
+            )
+            .on_select(move || {
                 ui.filter.set(Filter::NotEmulated);
                 ui.page.set(Page::Calls);
             }),
@@ -725,8 +825,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::submenu(
                 t("Language", "语言"),
                 [
-                    MenuItem::new("English").checked(lang().get_untracked() == Lang::En).on_select(|| lang().set(Lang::En)),
-                    MenuItem::new("中文").checked(lang().get_untracked() == Lang::Zh).on_select(|| lang().set(Lang::Zh)),
+                    MenuItem::new("English")
+                        .checked(lang().get_untracked() == Lang::En)
+                        .on_select(|| lang().set(Lang::En)),
+                    MenuItem::new("中文")
+                        .checked(lang().get_untracked() == Lang::Zh)
+                        .on_select(|| lang().set(Lang::Zh)),
                 ],
             ),
         ],
@@ -734,8 +838,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     menus.push(MenuItem::submenu(
         t("Account", "账户"),
         [
-            MenuItem::new(t("Clear Calls", "清空调用")).shortcut("mod+k").on_select(move || ui.clear()),
-            MenuItem::new(t("Refresh Resources", "刷新资源")).shortcut("mod+r").on_select(|| engine().refresh()),
+            MenuItem::new(t("Clear Calls", "清空调用"))
+                .shortcut("mod+k")
+                .on_select(move || ui.clear()),
+            MenuItem::new(t("Refresh Resources", "刷新资源"))
+                .shortcut("mod+r")
+                .on_select(|| engine().refresh()),
             MenuItem::separator(),
             MenuItem::new(t("New Empty Account…", "新建空账户…"))
                 .shortcut("mod+shift+n")
@@ -756,8 +864,10 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     }
     menus.push(MenuItem::submenu(
         t("Help", "帮助"),
-        [MenuItem::new(t("Lenslet on GitHub", "Lenslet 的 GitHub 主页"))
-            .on_select(|| drop(open_url("https://github.com/hxddh/lenslet")))],
+        [
+            MenuItem::new(t("Lenslet on GitHub", "Lenslet 的 GitHub 主页"))
+                .on_select(|| drop(open_url("https://github.com/hxddh/lenslet"))),
+        ],
     ));
     menus
 }

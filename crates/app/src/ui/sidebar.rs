@@ -68,7 +68,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
     });
     set_interval(std::time::Duration::from_millis(1000), move || {
         let t = now_ms();
-        if first_seen.with_untracked(|s| s.values().any(|&at| t.saturating_sub(at) < NEW_FOR_MS + 1000)) {
+        if first_seen.with_untracked(|s| {
+            s.values()
+                .any(|&at| t.saturating_sub(at) < NEW_FOR_MS + 1000)
+        }) {
             now.set(t);
         }
     });
@@ -86,12 +89,22 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         // macOS's window controls sit here; elsewhere the app's name does.
         .child(when(
             move || os() != nsh_core::platform::Os::MacOs,
-            move || text("Lenslet").font_weight(FontWeight::SEMIBOLD).pl(px(6.0)),
+            move || {
+                text("Lenslet")
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .pl(px(6.0))
+            },
         ))
         .child(view().flex_1())
         .child(tool_button(
             Icon::Sidebar,
-            move || format!("{} ({})", t("Hide Sidebar", "隐藏侧栏"), key_label(&super::sidebar_key())),
+            move || {
+                format!(
+                    "{} ({})",
+                    t("Hide Sidebar", "隐藏侧栏"),
+                    key_label(&super::sidebar_key())
+                )
+            },
             || false,
             move || ui.sidebar.set(false),
         ));
@@ -101,10 +114,18 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .on_context_menu(move |e: &ContextMenuEvent| {
             drop(nsh_core::element::desktop::popup_menu_at(
                 vec![
-                    nsh_core::element::desktop::MenuItem::new(t("Copy Environment", "复制环境变量"))
-                        .on_select(move || ui.copy_env()),
-                    nsh_core::element::desktop::MenuItem::new(t("Copy Endpoint URL", "复制端点地址"))
-                        .on_select(move || ui.copy(engine().endpoint(), "Copied the endpoint", "已复制端点")),
+                    nsh_core::element::desktop::MenuItem::new(t(
+                        "Copy Environment",
+                        "复制环境变量",
+                    ))
+                    .on_select(move || ui.copy_env()),
+                    nsh_core::element::desktop::MenuItem::new(t(
+                        "Copy Endpoint URL",
+                        "复制端点地址",
+                    ))
+                    .on_select(move || {
+                        ui.copy(engine().endpoint(), "Copied the endpoint", "已复制端点")
+                    }),
                 ],
                 e.page_position,
             ))
@@ -125,10 +146,15 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .child(text(move || ts("Local AWS", "本地 AWS")).font_weight(FontWeight::SEMIBOLD)),
         )
         .child(
-            text(move || engine().endpoint().trim_start_matches("http://").to_string())
-                .font_family(MONO)
-                .text_size(small())
-                .text_color(secondary_text()),
+            text(move || {
+                engine()
+                    .endpoint()
+                    .trim_start_matches("http://")
+                    .to_string()
+            })
+            .font_family(MONO)
+            .text_size(small())
+            .text_color(secondary_text()),
         );
 
     let nav = view()
@@ -147,11 +173,27 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             Icon::Calls,
             Box::new(|| ts("Calls", "调用")),
             Box::new(move || {
-                let failed = ui.snap.with(|s| s.calls.iter().filter(|c| c.failed() && !c.unsupported).count());
-                if failed > 0 { failed.to_string() } else { ui.snap.with(|s| s.calls.len()).to_string() }
+                let failed = ui.snap.with(|s| {
+                    s.calls
+                        .iter()
+                        .filter(|c| c.failed() && !c.unsupported)
+                        .count()
+                });
+                if failed > 0 {
+                    failed.to_string()
+                } else {
+                    ui.snap.with(|s| s.calls.len()).to_string()
+                }
             }),
             Box::new(move || {
-                if ui.snap.with(|s| s.calls.iter().any(|c| c.failed() && !c.unsupported)) { red() } else { secondary_text() }
+                if ui
+                    .snap
+                    .with(|s| s.calls.iter().any(|c| c.failed() && !c.unsupported))
+                {
+                    red()
+                } else {
+                    secondary_text()
+                }
             }),
             Page::Calls,
         ))
@@ -165,7 +207,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         ));
 
     let groups = each(
-        move || ui.snap.with(|s| s.resources.iter().cloned().collect::<Vec<Group>>()),
+        move || {
+            ui.snap
+                .with(|s| s.resources.iter().cloned().collect::<Vec<Group>>())
+        },
         |g: &Group| g.service,
         move |group, _| {
             let g = group.get_untracked();
@@ -180,7 +225,11 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         .pb(px(3.0))
                         .child(section(move || service_title(service)))
                         .child(view().flex_1())
-                        .child(text(move || group.get().items.len().to_string()).text_size(small()).text_color(tertiary_text())),
+                        .child(
+                            text(move || group.get().items.len().to_string())
+                                .text_size(small())
+                                .text_color(tertiary_text()),
+                        ),
                 )
                 .child(each(
                     move || group.get().items,
@@ -191,7 +240,11 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         let key = format!("{service}/{name}");
                         let is_new = move || {
                             let t = now.get();
-                            first_seen.with(|s| s.get(&key).is_some_and(|&at| at > opened && t.saturating_sub(at) < NEW_FOR_MS))
+                            first_seen.with(|s| {
+                                s.get(&key).is_some_and(|&at| {
+                                    at > opened && t.saturating_sub(at) < NEW_FOR_MS
+                                })
+                            })
                         };
                         let name_for_label = name.clone();
                         resource_row(
@@ -199,7 +252,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             service,
                             name.clone(),
                             Box::new(move || name_for_label.clone()),
-                            Box::new(move || resource.get().count.map(|n| count_label(service, n)).unwrap_or_default()),
+                            Box::new(move || {
+                                resource
+                                    .get()
+                                    .count
+                                    .map(|n| count_label(service, n))
+                                    .unwrap_or_default()
+                            }),
                             Box::new(is_new),
                         )
                     },
@@ -210,11 +269,16 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
     let empty_resources = when(
         move || ui.snap.with(|s| s.resources.is_empty()),
         move || {
-            text(move || ts("Nothing yet. What your code creates appears here.", "还没有资源。代码创建的资源会显示在这里。"))
-                .px(px(18.0))
-                .pt(px(4.0))
-                .text_size(small())
-                .text_color(tertiary_text())
+            text(move || {
+                ts(
+                    "Nothing yet. What your code creates appears here.",
+                    "还没有资源。代码创建的资源会显示在这里。",
+                )
+            })
+            .px(px(18.0))
+            .pt(px(4.0))
+            .text_size(small())
+            .text_color(tertiary_text())
         },
     );
 
@@ -225,16 +289,18 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .child(endpoint)
         .child(
             scroll().flex_1().child(
-                view()
-                    .pb(px(16.0))
-                    .child(nav)
-                    .child(
-                        view()
-                            .px(px(10.0))
-                            .child(view().px(px(8.0)).pt(px(14.0)).child(section(|| ts("Resources", "资源"))))
-                            .child(empty_resources)
-                            .child(groups),
-                    ),
+                view().pb(px(16.0)).child(nav).child(
+                    view()
+                        .px(px(10.0))
+                        .child(
+                            view()
+                                .px(px(8.0))
+                                .pt(px(14.0))
+                                .child(section(|| ts("Resources", "资源"))),
+                        )
+                        .child(empty_resources)
+                        .child(groups),
+                ),
             ),
         )
 }
@@ -258,7 +324,13 @@ fn row(
         .px(px(8.0))
         .h(px(28.0))
         .rounded(radius())
-        .bg(move || if selected() { selected_bg() } else { AdaptiveColor::rgb(0, 0).opacity(0.0) })
+        .bg(move || {
+            if selected() {
+                selected_bg()
+            } else {
+                AdaptiveColor::rgb(0, 0).opacity(0.0)
+            }
+        })
         .hover(|s| s.bg(hover_bg()))
         .child(icon_colored(icon_name, 16.0, accent()))
         .child(text(label).flex_1().text_size(body()))
@@ -284,11 +356,23 @@ fn resource_row(
         .px(px(8.0))
         .h(px(26.0))
         .rounded(radius())
-        .bg(move || if selected() { selected_bg() } else { AdaptiveColor::rgb(0, 0).opacity(0.0) })
+        .bg(move || {
+            if selected() {
+                selected_bg()
+            } else {
+                AdaptiveColor::rgb(0, 0).opacity(0.0)
+            }
+        })
         .hover(|s| s.bg(hover_bg()))
         .child(icon_colored(Icon::of_service(service), 15.0, accent()))
         .child(text(label).flex_1().text_size(body()).truncate())
-        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(move || if is_new() { accent() } else { accent().opacity(0.0) }))
+        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(move || {
+            if is_new() {
+                accent()
+            } else {
+                accent().opacity(0.0)
+            }
+        }))
         .child(badge(count, || tertiary_text()))
 }
 

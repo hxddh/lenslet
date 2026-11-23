@@ -34,7 +34,9 @@ impl Engine {
     pub fn start(port: u16) -> Result<Engine, String> {
         let listener = match server::bind(port) {
             Ok(listener) => listener,
-            Err(_) if port == DEFAULT_PORT => server::bind(0).map_err(|e| format!("127.0.0.1: {e}"))?,
+            Err(_) if port == DEFAULT_PORT => {
+                server::bind(0).map_err(|e| format!("127.0.0.1: {e}"))?
+            }
             Err(e) => return Err(format!("127.0.0.1:{port}: {e}")),
         };
         // Port 0 picks a free one; report the one it is.
@@ -64,7 +66,13 @@ impl Engine {
             })
             .map_err(|e| e.to_string())?;
         let runtime = handle_rx.recv().map_err(|e| e.to_string())?;
-        Ok(Engine { port, emulator, session, refresher, runtime })
+        Ok(Engine {
+            port,
+            emulator,
+            session,
+            refresher,
+            runtime,
+        })
     }
 
     /// The port from `LENSLET_PORT`, else [`DEFAULT_PORT`].
@@ -111,7 +119,13 @@ impl Engine {
 
     /// The IAM policy for every permission this session used.
     pub fn policy(&self) -> String {
-        let accesses: Vec<_> = self.session.snapshot().permissions.into_iter().map(|p| p.access).collect();
+        let accesses: Vec<_> = self
+            .session
+            .snapshot()
+            .permissions
+            .into_iter()
+            .map(|p| p.access)
+            .collect();
         lenslet_core::policy::compile(&accesses)
     }
 
@@ -135,7 +149,11 @@ impl Engine {
     }
 
     /// What `resource` holds, fetched on the engine's threads.
-    pub fn contents(&self, service: &'static str, resource: Resource) -> impl Future<Output = Contents> + use<> {
+    pub fn contents(
+        &self,
+        service: &'static str,
+        resource: Resource,
+    ) -> impl Future<Output = Contents> + use<> {
         let emulator = self.emulator.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
@@ -145,7 +163,11 @@ impl Engine {
     }
 
     /// An S3 object's text, fetched on the engine's threads.
-    pub fn object_text(&self, bucket: String, key: String) -> impl Future<Output = Option<String>> + use<> {
+    pub fn object_text(
+        &self,
+        bucket: String,
+        key: String,
+    ) -> impl Future<Output = Option<String>> + use<> {
         let emulator = self.emulator.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {

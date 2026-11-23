@@ -156,21 +156,39 @@ fn opens_a_resource_and_counts_what_it_holds() {
     let (status, _) = sqs(port, "CreateQueue", r#"{"QueueName":"jobs"}"#);
     assert_eq!(status, 200);
     let url = format!("http://127.0.0.1:{port}/000000000000/jobs");
-    let (status, _) = sqs(port, "SendMessage", &format!(r#"{{"QueueUrl":"{url}","MessageBody":"hi"}}"#));
+    let (status, _) = sqs(
+        port,
+        "SendMessage",
+        &format!(r#"{{"QueueUrl":"{url}","MessageBody":"hi"}}"#),
+    );
     assert_eq!(status, 200);
     engine.refresh();
     wait_for("the queue's waiting message", || {
-        engine
-            .snapshot()
-            .resources
-            .iter()
-            .any(|g| g.service == "sqs" && g.items.iter().any(|r| r.name == "jobs" && r.count == Some(1)))
+        engine.snapshot().resources.iter().any(|g| {
+            g.service == "sqs"
+                && g.items
+                    .iter()
+                    .any(|r| r.name == "jobs" && r.count == Some(1))
+        })
     });
-    let queue = engine.snapshot().resources.iter().find(|g| g.service == "sqs").unwrap().items[0].clone();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let queue = engine
+        .snapshot()
+        .resources
+        .iter()
+        .find(|g| g.service == "sqs")
+        .unwrap()
+        .items[0]
+        .clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let contents = runtime.block_on(engine.contents("sqs", queue));
     assert!(
-        contents.fields.iter().any(|(k, v)| k == "ApproximateNumberOfMessages" && v == "1"),
+        contents
+            .fields
+            .iter()
+            .any(|(k, v)| k == "ApproximateNumberOfMessages" && v == "1"),
         "{:?}",
         contents.fields
     );

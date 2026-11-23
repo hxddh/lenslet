@@ -20,7 +20,13 @@ pub fn overview(ui: Ui) -> AnyElement {
     let started = computed(move || ui.snap.with(|s| !s.calls.is_empty()));
     scroll()
         .flex_1()
-        .child(dynamic(move || if started.get() { session(ui).into_element() } else { welcome(ui).into_element() }))
+        .child(dynamic(move || {
+            if started.get() {
+                session(ui).into_element()
+            } else {
+                welcome(ui).into_element()
+            }
+        }))
         .into_element()
 }
 
@@ -111,8 +117,19 @@ fn welcome(ui: Ui) -> impl IntoElement {
 
 /// After calls: the numbers, by service, by client, the latest failures.
 fn session(ui: Ui) -> impl IntoElement {
-    let stats = computed(move || ui.snap.with(|s| Stats::of(&s.calls, s.permissions.len(), s.resources.iter().map(|g| g.items.len()).sum())));
-    let card = move |label: fn() -> String, value: Box<dyn Fn(&Stats) -> String>, color: Box<dyn Fn(&Stats) -> AdaptiveColor>, page: Option<(Page, Option<super::Filter>)>| {
+    let stats = computed(move || {
+        ui.snap.with(|s| {
+            Stats::of(
+                &s.calls,
+                s.permissions.len(),
+                s.resources.iter().map(|g| g.items.len()).sum(),
+            )
+        })
+    });
+    let card = move |label: fn() -> String,
+                     value: Box<dyn Fn(&Stats) -> String>,
+                     color: Box<dyn Fn(&Stats) -> AdaptiveColor>,
+                     page: Option<(Page, Option<super::Filter>)>| {
         nsh_base::button()
             .on_press(move || {
                 if let Some((page, filter)) = page.clone() {
@@ -142,7 +159,12 @@ fn session(ui: Ui) -> impl IntoElement {
         .flex_row()
         .flex_wrap()
         .gap(px(10.0))
-        .child(card(|| ts("Calls", "调用"), Box::new(|s| s.calls.to_string()), Box::new(plain), Some((Page::Calls, Some(super::Filter::All)))))
+        .child(card(
+            || ts("Calls", "调用"),
+            Box::new(|s| s.calls.to_string()),
+            Box::new(plain),
+            Some((Page::Calls, Some(super::Filter::All))),
+        ))
         .child(card(
             || ts("Failed", "失败"),
             Box::new(|s| s.failed.to_string()),
@@ -152,14 +174,45 @@ fn session(ui: Ui) -> impl IntoElement {
         .child(card(
             || ts("Not emulated", "未模拟"),
             Box::new(|s| s.unsupported.to_string()),
-            Box::new(move |s| if s.unsupported > 0 { orange() } else { plain(s) }),
+            Box::new(move |s| {
+                if s.unsupported > 0 {
+                    orange()
+                } else {
+                    plain(s)
+                }
+            }),
             Some((Page::Calls, Some(super::Filter::NotEmulated))),
         ))
-        .child(card(|| ts("Median", "中位耗时"), Box::new(|s| format!("{} ms", s.p50)), Box::new(plain), None))
-        .child(card(|| ts("95th percentile", "P95 耗时"), Box::new(|s| format!("{} ms", s.p95)), Box::new(plain), None))
-        .child(card(|| ts("Retries", "重试"), Box::new(|s| s.retries.to_string()), Box::new(plain), None))
-        .child(card(|| ts("Permissions", "权限"), Box::new(|s| s.permissions.to_string()), Box::new(plain), Some((Page::Permissions, None))))
-        .child(card(|| ts("Resources", "资源"), Box::new(|s| s.resources.to_string()), Box::new(plain), None));
+        .child(card(
+            || ts("Median", "中位耗时"),
+            Box::new(|s| format!("{} ms", s.p50)),
+            Box::new(plain),
+            None,
+        ))
+        .child(card(
+            || ts("95th percentile", "P95 耗时"),
+            Box::new(|s| format!("{} ms", s.p95)),
+            Box::new(plain),
+            None,
+        ))
+        .child(card(
+            || ts("Retries", "重试"),
+            Box::new(|s| s.retries.to_string()),
+            Box::new(plain),
+            None,
+        ))
+        .child(card(
+            || ts("Permissions", "权限"),
+            Box::new(|s| s.permissions.to_string()),
+            Box::new(plain),
+            Some((Page::Permissions, None)),
+        ))
+        .child(card(
+            || ts("Resources", "资源"),
+            Box::new(|s| s.resources.to_string()),
+            Box::new(plain),
+            None,
+        ));
 
     let by_service = table_of(
         move || {
@@ -186,7 +239,9 @@ fn session(ui: Ui) -> impl IntoElement {
             })
         },
         move |row| {
-            if let Some(service) = stats.with_untracked(|s| s.services.get(row).map(|r| r.service.clone())) {
+            if let Some(service) =
+                stats.with_untracked(|s| s.services.get(row).map(|r| r.service.clone()))
+            {
                 ui.service.set(Some(service));
                 ui.page.set(Page::Calls);
             }
@@ -219,25 +274,63 @@ fn session(ui: Ui) -> impl IntoElement {
                 .h(px(26.0))
                 .rounded(radius())
                 .hover(|s| s.bg(hover_bg()))
-                .child(text(r.time.clone()).font_family(MONO).text_size(small()).text_color(secondary_text()))
-                .child(text(r.operation.clone()).text_size(body()).w(px(220.0)).truncate())
-                .child(text(r.error.clone()).text_size(body()).text_color(red()).flex_1().truncate())
+                .child(
+                    text(r.time.clone())
+                        .font_family(MONO)
+                        .text_size(small())
+                        .text_color(secondary_text()),
+                )
+                .child(
+                    text(r.operation.clone())
+                        .text_size(body())
+                        .w(px(220.0))
+                        .truncate(),
+                )
+                .child(
+                    text(r.error.clone())
+                        .text_size(body())
+                        .text_color(red())
+                        .flex_1()
+                        .truncate(),
+                )
         },
     );
     view()
         .p(px(24.0))
         .gap(px(22.0))
         .child(cards)
-        .child(view().gap(px(8.0)).child(section(|| ts("By service", "按服务"))).child(by_service))
+        .child(
+            view()
+                .gap(px(8.0))
+                .child(section(|| ts("By service", "按服务")))
+                .child(by_service),
+        )
         .child(
             view()
                 .flex_row()
                 .gap(px(28.0))
-                .child(view().flex_1().gap(px(8.0)).child(section(|| ts("Latest failures", "最近的失败"))).child(failures).child(when(
-                    move || stats.with(|s| s.recent_failures.is_empty()),
-                    move || text(move || ts("None", "无")).text_size(body()).text_color(tertiary_text()),
-                )))
-                .child(view().w(px(260.0)).gap(px(8.0)).child(section(|| ts("Clients", "客户端"))).child(clients)),
+                .child(
+                    view()
+                        .flex_1()
+                        .gap(px(8.0))
+                        .child(section(|| ts("Latest failures", "最近的失败")))
+                        .child(failures)
+                        .child(when(
+                            move || stats.with(|s| s.recent_failures.is_empty()),
+                            move || {
+                                text(move || ts("None", "无"))
+                                    .text_size(body())
+                                    .text_color(tertiary_text())
+                            },
+                        )),
+                )
+                .child(
+                    view()
+                        .w(px(260.0))
+                        .gap(px(8.0))
+                        .child(section(|| ts("Clients", "客户端")))
+                        .child(clients),
+                ),
         )
 }
 
@@ -290,7 +383,9 @@ impl Stats {
         let mut clients: BTreeMap<String, usize> = BTreeMap::new();
         for c in calls {
             services.entry(&c.service).or_default().push(c);
-            *clients.entry(c.client.clone().unwrap_or_else(|| "—".into())).or_default() += 1;
+            *clients
+                .entry(c.client.clone().unwrap_or_else(|| "—".into()))
+                .or_default() += 1;
         }
         let mut services: Vec<ServiceRow> = services
             .into_iter()
@@ -309,7 +404,11 @@ impl Stats {
                     failed: calls.iter().filter(|c| c.failed()).count(),
                     p50: percentile(&ms, 0.5),
                     p95: percentile(&ms, 0.95),
-                    operations: ops.iter().map(|(o, n)| format!("{o} ×{n}")).collect::<Vec<_>>().join(", "),
+                    operations: ops
+                        .iter()
+                        .map(|(o, n)| format!("{o} ×{n}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 }
             })
             .collect();
@@ -318,7 +417,10 @@ impl Stats {
         clients.sort_by(|a, b| b.1.cmp(&a.1));
         Stats {
             calls: calls.len(),
-            failed: calls.iter().filter(|c| c.failed() && !c.unsupported).count(),
+            failed: calls
+                .iter()
+                .filter(|c| c.failed() && !c.unsupported)
+                .count(),
             unsupported: calls.iter().filter(|c| c.unsupported).count(),
             retries: calls.iter().filter(|c| c.is_retry()).count(),
             p50: percentile(&ms, 0.5),
@@ -388,7 +490,14 @@ fn table_of(
 
 pub fn permissions(ui: Ui) -> AnyElement {
     let policy = computed(move || {
-        ui.snap.with(|s| lenslet_core::policy::compile(&s.permissions.iter().map(|p| p.access.clone()).collect::<Vec<_>>()))
+        ui.snap.with(|s| {
+            lenslet_core::policy::compile(
+                &s.permissions
+                    .iter()
+                    .map(|p| p.access.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
     });
     let rows = move || ui.snap.with(|s| s.permissions.len());
     let table = table_of(
@@ -414,7 +523,12 @@ pub fn permissions(ui: Ui) -> AnyElement {
                                 .iter()
                                 .rev()
                                 .take(3)
-                                .filter_map(|seq| s.calls.iter().find(|c| c.seq == *seq).map(|c| c.operation.clone()))
+                                .filter_map(|seq| {
+                                    s.calls
+                                        .iter()
+                                        .find(|c| c.seq == *seq)
+                                        .map(|c| c.operation.clone())
+                                })
                                 .collect();
                             let more = p.calls.len().saturating_sub(3);
                             if more > 0 {
@@ -427,7 +541,10 @@ pub fn permissions(ui: Ui) -> AnyElement {
             })
         },
         move |row| {
-            if let Some(seq) = ui.snap.with_untracked(|s| s.permissions.get(row).and_then(|p| p.calls.last().copied())) {
+            if let Some(seq) = ui
+                .snap
+                .with_untracked(|s| s.permissions.get(row).and_then(|p| p.calls.last().copied()))
+            {
                 ui.show_call(seq);
             }
         },
@@ -496,7 +613,9 @@ pub fn resource(ui: Ui) -> AnyElement {
     let preview = signal(None::<(String, String)>);
     // Fetch what it holds when it is opened, and again when the account changed.
     effect(move || {
-        let Some((service, resource)) = holder.get() else { return };
+        let Some((service, resource)) = holder.get() else {
+            return;
+        };
         let _ = ui.snap.with(|s| s.version);
         let fetch = engine().contents(service, resource);
         spawn(async move {
@@ -508,14 +627,24 @@ pub fn resource(ui: Ui) -> AnyElement {
         preview.set(None);
     });
     let touched = computed(move || {
-        let Some((service, name)) = which.get() else { return Vec::new() };
+        let Some((service, name)) = which.get() else {
+            return Vec::new();
+        };
         ui.snap.with(|s| {
             s.calls
                 .iter()
                 .rev()
                 .filter(|c| c.touches(service, &name))
                 .take(200)
-                .map(|c| (c.seq, clock(c.at_ms), c.operation.clone(), calls::status_text(c), c.failed()))
+                .map(|c| {
+                    (
+                        c.seq,
+                        clock(c.at_ms),
+                        c.operation.clone(),
+                        calls::status_text(c),
+                        c.failed(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
     });
@@ -541,25 +670,37 @@ pub fn resource(ui: Ui) -> AnyElement {
                     text(move || {
                         holder
                             .get()
-                            .map(|(s, r)| if r.id == r.name { service_title(s) } else { format!("{} · {}", service_title(s), r.id) })
+                            .map(|(s, r)| {
+                                if r.id == r.name {
+                                    service_title(s)
+                                } else {
+                                    format!("{} · {}", service_title(s), r.id)
+                                }
+                            })
                             .unwrap_or_default()
                     })
-                        .text_size(small())
-                        .text_color(secondary_text())
-                        .selectable(true),
+                    .text_size(small())
+                    .text_color(secondary_text())
+                    .selectable(true),
                 ),
         )
-        .child(push_button(|| ts("Copy Name", "复制名称"), move || {
-            if let Some((_, r)) = holder.get_untracked() {
-                ui.copy(r.id, "Copied", "已复制");
-            }
-        }))
-        .child(push_button(|| ts("Refresh", "刷新"), move || {
-            if let Some((service, resource)) = holder.get_untracked() {
-                let fetch = engine().contents(service, resource);
-                spawn(async move { contents.set(Some(fetch.await)) });
-            }
-        }));
+        .child(push_button(
+            || ts("Copy Name", "复制名称"),
+            move || {
+                if let Some((_, r)) = holder.get_untracked() {
+                    ui.copy(r.id, "Copied", "已复制");
+                }
+            },
+        ))
+        .child(push_button(
+            || ts("Refresh", "刷新"),
+            move || {
+                if let Some((service, resource)) = holder.get_untracked() {
+                    let fetch = engine().contents(service, resource);
+                    spawn(async move { contents.set(Some(fetch.await)) });
+                }
+            },
+        ));
 
     let fields = each(
         move || contents.with(|c| c.as_ref().map(|c| c.fields.clone()).unwrap_or_default()),
@@ -570,22 +711,39 @@ pub fn resource(ui: Ui) -> AnyElement {
                 .flex_row()
                 .gap(px(10.0))
                 .py(px(2.0))
-                .child(text(label).w(px(150.0)).text_size(small()).text_color(secondary_text()))
-                .child(text(move || field.get().1).flex_1().text_size(small()).font_family(MONO).selectable(true))
+                .child(
+                    text(label)
+                        .w(px(150.0))
+                        .text_size(small())
+                        .text_color(secondary_text()),
+                )
+                .child(
+                    text(move || field.get().1)
+                        .flex_1()
+                        .text_size(small())
+                        .font_family(MONO)
+                        .selectable(true),
+                )
         },
     );
     let value = when(
         move || contents.with(|c| c.as_ref().is_some_and(|c| c.text.is_some())),
         move || {
-            view().gap(px(6.0)).child(section(|| ts("Value", "值"))).child(
-                text(move || contents.with(|c| c.as_ref().and_then(|c| c.text.clone()).unwrap_or_default()))
+            view()
+                .gap(px(6.0))
+                .child(section(|| ts("Value", "值")))
+                .child(
+                    text(move || {
+                        contents
+                            .with(|c| c.as_ref().and_then(|c| c.text.clone()).unwrap_or_default())
+                    })
                     .font_family(MONO)
                     .text_size(px(11.5))
                     .selectable(true)
                     .p(px(10.0))
                     .rounded(px(8.0))
                     .bg(fill_bg()),
-            )
+                )
         },
     );
     let rows_table = when(
@@ -610,7 +768,8 @@ pub fn resource(ui: Ui) -> AnyElement {
                         .child(view().flex_1())
                         .child(
                             text(move || {
-                                let more = contents.with(|c| c.as_ref().is_some_and(|c| c.truncated));
+                                let more =
+                                    contents.with(|c| c.as_ref().is_some_and(|c| c.truncated));
                                 format!("{}{}", n(), if more { "+" } else { "" })
                             })
                             .text_size(small())
@@ -626,7 +785,13 @@ pub fn resource(ui: Ui) -> AnyElement {
                                         .iter()
                                         .enumerate()
                                         .map(|(i, name)| {
-                                            let width = if name == "Message" { 520.0 } else if i == 0 { 240.0 } else { 160.0 };
+                                            let width = if name == "Message" {
+                                                520.0
+                                            } else if i == 0 {
+                                                240.0
+                                            } else {
+                                                160.0
+                                            };
                                             col(&format!("c{i}"), name.clone(), width)
                                         })
                                         .collect()
@@ -636,26 +801,38 @@ pub fn resource(ui: Ui) -> AnyElement {
                     },
                     move || {
                         contents.with(|c| {
-                            let Some(c) = c else { return DataTableRows::new(0) };
+                            let Some(c) = c else {
+                                return DataTableRows::new(0);
+                            };
                             let mut rows = DataTableRows::new(c.rows.len());
                             for i in 0..c.columns.len() {
-                                rows = rows.texts(&format!("c{i}"), c.rows.iter().map(|r| r.get(i).cloned().unwrap_or_default()));
+                                rows = rows.texts(
+                                    &format!("c{i}"),
+                                    c.rows.iter().map(|r| r.get(i).cloned().unwrap_or_default()),
+                                );
                             }
                             rows
                         })
                     },
                     move |row| {
                         // An S3 object opens its text.
-                        let Some((service, r)) = holder.get_untracked() else { return };
+                        let Some((service, r)) = holder.get_untracked() else {
+                            return;
+                        };
                         if service != "s3" {
                             return;
                         }
-                        let Some(key) = contents.with_untracked(|c| c.as_ref().and_then(|c| c.rows.get(row).and_then(|r| r.first().cloned()))) else {
+                        let Some(key) = contents.with_untracked(|c| {
+                            c.as_ref()
+                                .and_then(|c| c.rows.get(row).and_then(|r| r.first().cloned()))
+                        }) else {
                             return;
                         };
                         let fetch = engine().object_text(r.id.clone(), key.clone());
                         spawn(async move {
-                            let text = fetch.await.unwrap_or_else(|| ts("(not text)", "（不是文本）"));
+                            let text = fetch
+                                .await
+                                .unwrap_or_else(|| ts("(not text)", "（不是文本）"));
                             preview.set(Some((key, text)));
                         });
                     },
@@ -668,15 +845,19 @@ pub fn resource(ui: Ui) -> AnyElement {
         move || {
             view()
                 .gap(px(6.0))
-                .child(section(move || preview.with(|p| p.as_ref().map(|p| p.0.clone()).unwrap_or_default())))
+                .child(section(move || {
+                    preview.with(|p| p.as_ref().map(|p| p.0.clone()).unwrap_or_default())
+                }))
                 .child(
-                    text(move || preview.with(|p| p.as_ref().map(|p| p.1.clone()).unwrap_or_default()))
-                        .font_family(MONO)
-                        .text_size(px(11.5))
-                        .selectable(true)
-                        .p(px(10.0))
-                        .rounded(px(8.0))
-                        .bg(fill_bg()),
+                    text(move || {
+                        preview.with(|p| p.as_ref().map(|p| p.1.clone()).unwrap_or_default())
+                    })
+                    .font_family(MONO)
+                    .text_size(px(11.5))
+                    .selectable(true)
+                    .p(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(fill_bg()),
                 )
         },
     );
@@ -694,9 +875,18 @@ pub fn resource(ui: Ui) -> AnyElement {
                 .h(px(24.0))
                 .rounded(radius())
                 .hover(|s| s.bg(hover_bg()))
-                .child(text(time).font_family(MONO).text_size(small()).text_color(secondary_text()))
+                .child(
+                    text(time)
+                        .font_family(MONO)
+                        .text_size(small())
+                        .text_color(secondary_text()),
+                )
                 .child(text(operation).flex_1().text_size(body()))
-                .child(text(status).text_size(small()).text_color(if failed { red() } else { secondary_text() }))
+                .child(text(status).text_size(small()).text_color(if failed {
+                    red()
+                } else {
+                    secondary_text()
+                }))
         },
     );
     scroll()
@@ -706,9 +896,14 @@ pub fn resource(ui: Ui) -> AnyElement {
                 .p(px(24.0))
                 .gap(px(18.0))
                 .child(header)
-                .child(when(move || contents.with(|c| c.is_none()), move || {
-                    text(move || ts("Loading…", "加载中…")).text_size(body()).text_color(tertiary_text())
-                }))
+                .child(when(
+                    move || contents.with(|c| c.is_none()),
+                    move || {
+                        text(move || ts("Loading…", "加载中…"))
+                            .text_size(body())
+                            .text_color(tertiary_text())
+                    },
+                ))
                 .child(view().gap(px(2.0)).child(fields))
                 .child(value)
                 .child(rows_table)
@@ -718,9 +913,14 @@ pub fn resource(ui: Ui) -> AnyElement {
                         .gap(px(6.0))
                         .child(section(|| ts("Calls that touched it", "访问过它的调用")))
                         .child(calls_list)
-                        .child(when(move || touched.with(|t| t.is_empty()), move || {
-                            text(move || ts("None in this list", "列表里没有")).text_size(body()).text_color(tertiary_text())
-                        })),
+                        .child(when(
+                            move || touched.with(|t| t.is_empty()),
+                            move || {
+                                text(move || ts("None in this list", "列表里没有"))
+                                    .text_size(body())
+                                    .text_color(tertiary_text())
+                            },
+                        )),
                 ),
         )
         .into_element()

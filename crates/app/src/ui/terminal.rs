@@ -30,7 +30,10 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 }
                 Err(e) => {
                     if let Some(api) = term.api::<TerminalApi>() {
-                        api.write(format!("\r\n{}: {e}\r\n", t("Could not start a shell", "无法启动 shell")));
+                        api.write(format!(
+                            "\r\n{}: {e}\r\n",
+                            t("Could not start a shell", "无法启动 shell")
+                        ));
                     }
                 }
             }
@@ -122,7 +125,8 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         move || {
             let restart = restart.clone();
             spawn(async move {
-                let dialog = nsh_core::file_dialog::OpenDialog::folders().directory(folder.get_untracked());
+                let dialog =
+                    nsh_core::file_dialog::OpenDialog::folders().directory(folder.get_untracked());
                 if let Ok(Some(paths)) = pick_paths(dialog).await
                     && let Some(path) = paths.into_iter().next()
                 {
@@ -141,7 +145,12 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         .px(px(10.0))
         .bg(chrome_bg())
         .child(icon(Icon::Terminal, 14.0))
-        .child(text(move || ts("Terminal", "终端")).text_size(small()).font_weight(FontWeight::SEMIBOLD).pl(px(4.0)))
+        .child(
+            text(move || ts("Terminal", "终端"))
+                .text_size(small())
+                .font_weight(FontWeight::SEMIBOLD)
+                .pl(px(4.0)),
+        )
         .child(
             nsh_base::button()
                 .on_press(choose_folder)
@@ -165,7 +174,11 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 format!(
                     "AWS_ENDPOINT_URL={}{}",
                     engine().endpoint(),
-                    if exited.get() { format!(" · {}", t("exited", "已退出")) } else { String::new() }
+                    if exited.get() {
+                        format!(" · {}", t("exited", "已退出"))
+                    } else {
+                        String::new()
+                    }
                 )
             })
             .text_size(small())
@@ -174,10 +187,21 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             .flex_1()
             .truncate(),
         )
-        .child(tool_button(Icon::Restart, move || ts("Restart Shell", "重启 shell"), || false, restart))
+        .child(tool_button(
+            Icon::Restart,
+            move || ts("Restart Shell", "重启 shell"),
+            || false,
+            restart,
+        ))
         .child(tool_button(
             Icon::Close,
-            move || format!("{} ({})", t("Hide Terminal", "隐藏终端"), key_label("ctrl+`")),
+            move || {
+                format!(
+                    "{} ({})",
+                    t("Hide Terminal", "隐藏终端"),
+                    key_label("ctrl+`")
+                )
+            },
             || false,
             move || ui.terminal.set(false),
         ));

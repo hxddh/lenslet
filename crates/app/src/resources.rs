@@ -50,8 +50,19 @@ impl Refresher {
 
 /// The signing names of the services the inventory lists, in its order.
 pub const LISTED: &[&str] = &[
-    "s3", "dynamodb", "sqs", "sns", "lambda", "logs", "secretsmanager", "ssm", "events", "states", "kinesis",
-    "kms", "iam",
+    "s3",
+    "dynamodb",
+    "sqs",
+    "sns",
+    "lambda",
+    "logs",
+    "secretsmanager",
+    "ssm",
+    "events",
+    "states",
+    "kinesis",
+    "kms",
+    "iam",
 ];
 
 pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
@@ -71,27 +82,46 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
                 .rest("s3", "GET", &format!("/{name}?list-type=2&max-keys=1000"))
                 .await
                 .and_then(|xml| tags(&xml, "KeyCount").first()?.parse::<u64>().ok());
-            buckets.push(Resource { id: name.clone(), name, count });
+            buckets.push(Resource {
+                id: name.clone(),
+                name,
+                count,
+            });
         }
     }
     add("s3", buckets);
 
     // DynamoDB: tables and their item counts.
     let mut tables = Vec::new();
-    if let Some(v) = ask.json("dynamodb", "DynamoDB_20120810.ListTables", "1.0", json!({})).await {
+    if let Some(v) = ask
+        .json("dynamodb", "DynamoDB_20120810.ListTables", "1.0", json!({}))
+        .await
+    {
         for name in strings(&v["TableNames"]).into_iter().take(MAX_ITEMS) {
             let count = ask
-                .json("dynamodb", "DynamoDB_20120810.Scan", "1.0", json!({"TableName": name, "Select": "COUNT"}))
+                .json(
+                    "dynamodb",
+                    "DynamoDB_20120810.Scan",
+                    "1.0",
+                    json!({"TableName": name, "Select": "COUNT"}),
+                )
                 .await
                 .and_then(|v| v["Count"].as_u64());
-            tables.push(Resource { id: name.clone(), name, count });
+            tables.push(Resource {
+                id: name.clone(),
+                name,
+                count,
+            });
         }
     }
     add("dynamodb", tables);
 
     // SQS: queues and the messages waiting in them.
     let mut queues = Vec::new();
-    if let Some(v) = ask.json("sqs", "AmazonSQS.ListQueues", "1.0", json!({})).await {
+    if let Some(v) = ask
+        .json("sqs", "AmazonSQS.ListQueues", "1.0", json!({}))
+        .await
+    {
         for url in strings(&v["QueueUrls"]).into_iter().take(MAX_ITEMS) {
             let waiting = ask
                 .json(
@@ -101,9 +131,18 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
                     json!({"QueueUrl": url, "AttributeNames": ["ApproximateNumberOfMessages"]}),
                 )
                 .await
-                .and_then(|v| v["Attributes"]["ApproximateNumberOfMessages"].as_str()?.parse::<u64>().ok());
+                .and_then(|v| {
+                    v["Attributes"]["ApproximateNumberOfMessages"]
+                        .as_str()?
+                        .parse::<u64>()
+                        .ok()
+                });
             let name = url.rsplit('/').next().unwrap_or(&url).to_string();
-            queues.push(Resource { name, id: url, count: waiting });
+            queues.push(Resource {
+                name,
+                id: url,
+                count: waiting,
+            });
         }
     }
     add("sqs", queues);
@@ -112,7 +151,12 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
         "sns",
         ask.query("sns", "Action=ListTopics&Version=2010-03-31")
             .await
-            .map(|xml| tags(&xml, "TopicArn").into_iter().map(|arn| named_by_arn(&arn)).collect())
+            .map(|xml| {
+                tags(&xml, "TopicArn")
+                    .into_iter()
+                    .map(|arn| named_by_arn(&arn))
+                    .collect()
+            })
             .unwrap_or_default(),
     );
     add(
@@ -131,10 +175,15 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
     );
     add(
         "secretsmanager",
-        ask.json("secretsmanager", "secretsmanager.ListSecrets", "1.1", json!({}))
-            .await
-            .map(|v| list(&v["SecretList"], "Name", "ARN"))
-            .unwrap_or_default(),
+        ask.json(
+            "secretsmanager",
+            "secretsmanager.ListSecrets",
+            "1.1",
+            json!({}),
+        )
+        .await
+        .map(|v| list(&v["SecretList"], "Name", "ARN"))
+        .unwrap_or_default(),
     );
     add(
         "ssm",
@@ -152,10 +201,15 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
     );
     add(
         "states",
-        ask.json("states", "AWSStepFunctions.ListStateMachines", "1.0", json!({}))
-            .await
-            .map(|v| list(&v["stateMachines"], "name", "stateMachineArn"))
-            .unwrap_or_default(),
+        ask.json(
+            "states",
+            "AWSStepFunctions.ListStateMachines",
+            "1.0",
+            json!({}),
+        )
+        .await
+        .map(|v| list(&v["stateMachines"], "name", "stateMachineArn"))
+        .unwrap_or_default(),
     );
     add(
         "kinesis",
@@ -164,7 +218,11 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
             .map(|v| {
                 strings(&v["StreamNames"])
                     .into_iter()
-                    .map(|n| Resource { id: n.clone(), name: n, count: None })
+                    .map(|n| Resource {
+                        id: n.clone(),
+                        name: n,
+                        count: None,
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -179,7 +237,12 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
                     .into_iter()
                     .flatten()
                     // AWS's own aliases exist in every account.
-                    .filter(|a| !a["AliasName"].as_str().unwrap_or_default().starts_with("alias/aws/"))
+                    .filter(|a| {
+                        !a["AliasName"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .starts_with("alias/aws/")
+                    })
                     .filter_map(|a| {
                         Some(Resource {
                             name: a["AliasName"].as_str()?.to_string(),
@@ -200,7 +263,11 @@ pub async fn inventory(emulator: &Emulator) -> Vec<Group> {
                 tags(&xml, "RoleName")
                     .into_iter()
                     .take(MAX_ITEMS)
-                    .map(|n| Resource { id: n.clone(), name: n, count: None })
+                    .map(|n| Resource {
+                        id: n.clone(),
+                        name: n,
+                        count: None,
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -229,12 +296,22 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
     let mut out = Contents::default();
     match service {
         "s3" => {
-            if let Some(xml) = ask.rest("s3", "GET", &format!("/{id}?list-type=2&max-keys={MAX_ROWS}")).await {
+            if let Some(xml) = ask
+                .rest(
+                    "s3",
+                    "GET",
+                    &format!("/{id}?list-type=2&max-keys={MAX_ROWS}"),
+                )
+                .await
+            {
                 out.columns = vec!["Key".into(), "Size".into(), "Last modified".into()];
                 for object in blocks(&xml, "Contents") {
                     out.rows.push(vec![
                         first_tag(&object, "Key"),
-                        first_tag(&object, "Size").parse::<u64>().map(bytes_label).unwrap_or_default(),
+                        first_tag(&object, "Size")
+                            .parse::<u64>()
+                            .map(bytes_label)
+                            .unwrap_or_default(),
                         first_tag(&object, "LastModified"),
                     ]);
                 }
@@ -242,17 +319,35 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
             }
         }
         "dynamodb" => {
-            if let Some(v) = ask.json("dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", json!({"TableName": id})).await {
+            if let Some(v) = ask
+                .json(
+                    "dynamodb",
+                    "DynamoDB_20120810.DescribeTable",
+                    "1.0",
+                    json!({"TableName": id}),
+                )
+                .await
+            {
                 let table = &v["Table"];
                 let keys: Vec<String> = table["KeySchema"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|k| Some(format!("{} ({})", k["AttributeName"].as_str()?, k["KeyType"].as_str()?)))
+                    .filter_map(|k| {
+                        Some(format!(
+                            "{} ({})",
+                            k["AttributeName"].as_str()?,
+                            k["KeyType"].as_str()?
+                        ))
+                    })
                     .collect();
                 out.fields.push(("Key".into(), keys.join(", ")));
                 push_str(&mut out.fields, "Status", &table["TableStatus"]);
-                push_str(&mut out.fields, "Billing", &table["BillingModeSummary"]["BillingMode"]);
+                push_str(
+                    &mut out.fields,
+                    "Billing",
+                    &table["BillingModeSummary"]["BillingMode"],
+                );
                 push_str(&mut out.fields, "ARN", &table["TableArn"]);
                 let key_names: Vec<String> = table["KeySchema"]
                     .as_array()
@@ -261,11 +356,20 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                     .filter_map(|k| k["AttributeName"].as_str().map(str::to_string))
                     .collect();
                 if let Some(scan) = ask
-                    .json("dynamodb", "DynamoDB_20120810.Scan", "1.0", json!({"TableName": id, "Limit": MAX_ROWS}))
+                    .json(
+                        "dynamodb",
+                        "DynamoDB_20120810.Scan",
+                        "1.0",
+                        json!({"TableName": id, "Limit": MAX_ROWS}),
+                    )
                     .await
                 {
-                    let items: Vec<&serde_json::Map<String, Value>> =
-                        scan["Items"].as_array().into_iter().flatten().filter_map(Value::as_object).collect();
+                    let items: Vec<&serde_json::Map<String, Value>> = scan["Items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_object)
+                        .collect();
                     // Key attributes first, then the others in first-seen order.
                     let mut columns = key_names;
                     for item in &items {
@@ -277,7 +381,12 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                     }
                     out.rows = items
                         .iter()
-                        .map(|item| columns.iter().map(|c| item.get(c).map(attribute_label).unwrap_or_default()).collect())
+                        .map(|item| {
+                            columns
+                                .iter()
+                                .map(|c| item.get(c).map(attribute_label).unwrap_or_default())
+                                .collect()
+                        })
                         .collect();
                     out.columns = columns;
                     out.truncated = scan.get("LastEvaluatedKey").is_some();
@@ -286,13 +395,19 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         }
         "sqs" => {
             if let Some(v) = ask
-                .json("sqs", "AmazonSQS.GetQueueAttributes", "1.0", json!({"QueueUrl": id, "AttributeNames": ["All"]}))
+                .json(
+                    "sqs",
+                    "AmazonSQS.GetQueueAttributes",
+                    "1.0",
+                    json!({"QueueUrl": id, "AttributeNames": ["All"]}),
+                )
                 .await
             {
                 out.fields.push(("URL".into(), id.to_string()));
                 if let Some(attributes) = v["Attributes"].as_object() {
                     for (name, value) in attributes {
-                        out.fields.push((name.clone(), value.as_str().unwrap_or_default().to_string()));
+                        out.fields
+                            .push((name.clone(), value.as_str().unwrap_or_default().to_string()));
                     }
                 }
             }
@@ -300,7 +415,13 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         "sns" => {
             out.fields.push(("ARN".into(), id.to_string()));
             if let Some(xml) = ask
-                .query("sns", &format!("Action=ListSubscriptionsByTopic&Version=2010-03-31&TopicArn={}", encode(id)))
+                .query(
+                    "sns",
+                    &format!(
+                        "Action=ListSubscriptionsByTopic&Version=2010-03-31&TopicArn={}",
+                        encode(id)
+                    ),
+                )
                 .await
             {
                 out.columns = vec!["Protocol".into(), "Endpoint".into(), "Subscription".into()];
@@ -314,7 +435,10 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
             }
         }
         "lambda" => {
-            if let Some(v) = ask.rest_json("lambda", "GET", &format!("/2015-03-31/functions/{id}")).await {
+            if let Some(v) = ask
+                .rest_json("lambda", "GET", &format!("/2015-03-31/functions/{id}"))
+                .await
+            {
                 let c = &v["Configuration"];
                 for (label, key) in [
                     ("Runtime", "Runtime"),
@@ -330,14 +454,22 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                 }
                 if let Some(vars) = c["Environment"]["Variables"].as_object() {
                     for (name, value) in vars {
-                        out.fields.push((format!("${name}"), value.as_str().unwrap_or_default().to_string()));
+                        out.fields.push((
+                            format!("${name}"),
+                            value.as_str().unwrap_or_default().to_string(),
+                        ));
                     }
                 }
             }
         }
         "logs" => {
             if let Some(v) = ask
-                .json("logs", "Logs_20140328.FilterLogEvents", "1.1", json!({"logGroupName": id, "limit": MAX_ROWS}))
+                .json(
+                    "logs",
+                    "Logs_20140328.FilterLogEvents",
+                    "1.1",
+                    json!({"logGroupName": id, "limit": MAX_ROWS}),
+                )
                 .await
             {
                 out.columns = vec!["Time".into(), "Stream".into(), "Message".into()];
@@ -345,7 +477,11 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                     out.rows.push(vec![
                         e["timestamp"].as_u64().map(clock).unwrap_or_default(),
                         e["logStreamName"].as_str().unwrap_or_default().to_string(),
-                        e["message"].as_str().unwrap_or_default().trim_end().to_string(),
+                        e["message"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim_end()
+                            .to_string(),
                     ]);
                 }
                 out.truncated = v.get("nextToken").is_some_and(|t| !t.is_null());
@@ -353,7 +489,12 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         }
         "secretsmanager" => {
             if let Some(v) = ask
-                .json("secretsmanager", "secretsmanager.DescribeSecret", "1.1", json!({"SecretId": id}))
+                .json(
+                    "secretsmanager",
+                    "secretsmanager.DescribeSecret",
+                    "1.1",
+                    json!({"SecretId": id}),
+                )
                 .await
             {
                 push_str(&mut out.fields, "ARN", &v["ARN"]);
@@ -361,7 +502,12 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                 push_str(&mut out.fields, "KMS key", &v["KmsKeyId"]);
             }
             if let Some(v) = ask
-                .json("secretsmanager", "secretsmanager.GetSecretValue", "1.1", json!({"SecretId": id}))
+                .json(
+                    "secretsmanager",
+                    "secretsmanager.GetSecretValue",
+                    "1.1",
+                    json!({"SecretId": id}),
+                )
                 .await
             {
                 out.text = v["SecretString"].as_str().map(|s| pretty_text(s));
@@ -369,7 +515,12 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         }
         "ssm" => {
             if let Some(v) = ask
-                .json("ssm", "AmazonSSM.GetParameter", "1.1", json!({"Name": id, "WithDecryption": true}))
+                .json(
+                    "ssm",
+                    "AmazonSSM.GetParameter",
+                    "1.1",
+                    json!({"Name": id, "WithDecryption": true}),
+                )
                 .await
             {
                 let p = &v["Parameter"];
@@ -380,14 +531,30 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
             }
         }
         "events" => {
-            if let Some(v) = ask.json("events", "AWSEvents.DescribeRule", "1.1", json!({"Name": id})).await {
+            if let Some(v) = ask
+                .json(
+                    "events",
+                    "AWSEvents.DescribeRule",
+                    "1.1",
+                    json!({"Name": id}),
+                )
+                .await
+            {
                 push_str(&mut out.fields, "State", &v["State"]);
                 push_str(&mut out.fields, "Schedule", &v["ScheduleExpression"]);
                 push_str(&mut out.fields, "Event bus", &v["EventBusName"]);
                 push_str(&mut out.fields, "ARN", &v["Arn"]);
                 out.text = v["EventPattern"].as_str().map(|s| pretty_text(s));
             }
-            if let Some(v) = ask.json("events", "AWSEvents.ListTargetsByRule", "1.1", json!({"Rule": id})).await {
+            if let Some(v) = ask
+                .json(
+                    "events",
+                    "AWSEvents.ListTargetsByRule",
+                    "1.1",
+                    json!({"Rule": id}),
+                )
+                .await
+            {
                 out.columns = vec!["Target".into(), "ARN".into()];
                 for t in v["Targets"].as_array().into_iter().flatten() {
                     out.rows.push(vec![
@@ -420,7 +587,12 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         }
         "kinesis" => {
             if let Some(v) = ask
-                .json("kinesis", "Kinesis_20131202.DescribeStreamSummary", "1.1", json!({"StreamName": id}))
+                .json(
+                    "kinesis",
+                    "Kinesis_20131202.DescribeStreamSummary",
+                    "1.1",
+                    json!({"StreamName": id}),
+                )
                 .await
             {
                 let d = &v["StreamDescriptionSummary"];
@@ -435,7 +607,15 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
             }
         }
         "kms" => {
-            if let Some(v) = ask.json("kms", "TrentService.DescribeKey", "1.1", json!({"KeyId": id})).await {
+            if let Some(v) = ask
+                .json(
+                    "kms",
+                    "TrentService.DescribeKey",
+                    "1.1",
+                    json!({"KeyId": id}),
+                )
+                .await
+            {
                 let k = &v["KeyMetadata"];
                 for (label, key) in [
                     ("Key", "KeyId"),
@@ -450,23 +630,36 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
         }
         "iam" => {
             if let Some(xml) = ask
-                .query("iam", &format!("Action=GetRole&Version=2010-05-08&RoleName={}", encode(id)))
+                .query(
+                    "iam",
+                    &format!("Action=GetRole&Version=2010-05-08&RoleName={}", encode(id)),
+                )
                 .await
             {
                 out.fields.push(("ARN".into(), first_tag(&xml, "Arn")));
-                out.fields.push(("Created".into(), first_tag(&xml, "CreateDate")));
+                out.fields
+                    .push(("Created".into(), first_tag(&xml, "CreateDate")));
                 let trust = percent_decode(&first_tag(&xml, "AssumeRolePolicyDocument"));
                 if !trust.is_empty() {
                     out.text = Some(pretty_text(&trust));
                 }
             }
             if let Some(xml) = ask
-                .query("iam", &format!("Action=ListAttachedRolePolicies&Version=2010-05-08&RoleName={}", encode(id)))
+                .query(
+                    "iam",
+                    &format!(
+                        "Action=ListAttachedRolePolicies&Version=2010-05-08&RoleName={}",
+                        encode(id)
+                    ),
+                )
                 .await
             {
                 out.columns = vec!["Attached policy".into(), "ARN".into()];
                 for member in blocks(&xml, "member") {
-                    out.rows.push(vec![first_tag(&member, "PolicyName"), first_tag(&member, "PolicyArn")]);
+                    out.rows.push(vec![
+                        first_tag(&member, "PolicyName"),
+                        first_tag(&member, "PolicyArn"),
+                    ]);
                 }
             }
         }
@@ -489,7 +682,12 @@ struct Ask<'a> {
 }
 
 impl Ask<'_> {
-    async fn send(&self, service: &str, request: http::request::Builder, body: String) -> Option<String> {
+    async fn send(
+        &self,
+        service: &str,
+        request: http::request::Builder,
+        body: String,
+    ) -> Option<String> {
         // Auth is off; the credential scope only tells the router the service.
         let scope = format!(
             "AWS4-HMAC-SHA256 Credential=lenslet/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
@@ -507,7 +705,12 @@ impl Ask<'_> {
     }
 
     async fn rest(&self, service: &str, method: &str, path: &str) -> Option<String> {
-        self.send(service, http::Request::builder().method(method).uri(path), String::new()).await
+        self.send(
+            service,
+            http::Request::builder().method(method).uri(path),
+            String::new(),
+        )
+        .await
     }
 
     async fn rest_json(&self, service: &str, method: &str, path: &str) -> Option<Value> {
@@ -548,15 +751,26 @@ fn list(value: &Value, name: &str, id: &str) -> Vec<Resource> {
         .flatten()
         .filter_map(|v| {
             let name = v[name].as_str()?.to_string();
-            let id = v[id].as_str().map(str::to_string).unwrap_or_else(|| name.clone());
-            Some(Resource { name, id, count: None })
+            let id = v[id]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| name.clone());
+            Some(Resource {
+                name,
+                id,
+                count: None,
+            })
         })
         .take(MAX_ITEMS)
         .collect()
 }
 
 fn named_by_arn(arn: &str) -> Resource {
-    Resource { name: arn.rsplit(':').next().unwrap_or(arn).to_string(), id: arn.to_string(), count: None }
+    Resource {
+        name: arn.rsplit(':').next().unwrap_or(arn).to_string(),
+        id: arn.to_string(),
+        count: None,
+    }
 }
 
 fn push_str(fields: &mut Vec<(String, String)>, label: &str, value: &Value) {
@@ -627,7 +841,10 @@ pub fn clock(ms: u64) -> String {
 }
 
 fn epoch_label(value: &Value) -> String {
-    value.as_f64().map(|s| clock((s * 1000.0) as u64)).unwrap_or_default()
+    value
+        .as_f64()
+        .map(|s| clock((s * 1000.0) as u64))
+        .unwrap_or_default()
 }
 
 fn tags(xml: &str, tag: &str) -> Vec<String> {
@@ -674,7 +891,9 @@ fn encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -712,17 +931,26 @@ mod tests {
     fn labels_dynamodb_attributes_on_one_line() {
         assert_eq!(attribute_label(&json!({"S": "o-1"})), "o-1");
         assert_eq!(attribute_label(&json!({"N": "30"})), "30");
-        assert_eq!(attribute_label(&json!({"L": [{"S": "a"}, {"S": "b"}]})), "[2]");
+        assert_eq!(
+            attribute_label(&json!({"L": [{"S": "a"}, {"S": "b"}]})),
+            "[2]"
+        );
         assert_eq!(attribute_label(&json!({"M": {"a": {"N": "1"}}})), "{a: 1}");
     }
 
     #[test]
     fn reads_xml_blocks_and_escapes() {
         let xml = "<r><member><Key>a&amp;b</Key></member><member><Key>c</Key></member></r>";
-        let keys: Vec<String> = blocks(xml, "member").iter().map(|m| first_tag(m, "Key")).collect();
+        let keys: Vec<String> = blocks(xml, "member")
+            .iter()
+            .map(|m| first_tag(m, "Key"))
+            .collect();
         assert_eq!(keys, vec!["a&b", "c"]);
         assert_eq!(percent_decode("%7B%22a%22%3A1%7D"), "{\"a\":1}");
-        assert_eq!(encode("arn:aws:sns:us-east-1:0:t"), "arn%3Aaws%3Asns%3Aus-east-1%3A0%3At");
+        assert_eq!(
+            encode("arn:aws:sns:us-east-1:0:t"),
+            "arn%3Aaws%3Asns%3Aus-east-1%3A0%3At"
+        );
         assert_eq!(clock(3_723_000), "01:02:03");
     }
 }

@@ -25,10 +25,20 @@ pub struct Shell {
 
 impl Shell {
     /// The user's shell in `folder`, with `env` set, `cols` by `rows`.
-    pub fn start(folder: PathBuf, env: &[(&str, String)], cols: u16, rows: u16) -> Result<Shell, String> {
+    pub fn start(
+        folder: PathBuf,
+        env: &[(&str, String)],
+        cols: u16,
+        rows: u16,
+    ) -> Result<Shell, String> {
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| e.to_string())?;
         let mut command = CommandBuilder::new(program());
         if cfg!(unix) {
@@ -57,7 +67,10 @@ impl Shell {
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = pair.slave.spawn_command(command).map_err(|e| e.to_string())?;
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -72,7 +85,10 @@ impl Shell {
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => output.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&buf[..n]),
+                            Ok(n) => output
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extend_from_slice(&buf[..n]),
                         }
                     }
                     exited.store(true, Ordering::SeqCst);
@@ -114,7 +130,12 @@ impl Shell {
             .master
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
     }
 
     pub fn exited(&self) -> bool {
@@ -136,13 +157,20 @@ fn program() -> String {
     std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| if cfg!(target_os = "macos") { "/bin/zsh".into() } else { "/bin/bash".into() })
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".into()
+            } else {
+                "/bin/bash".into()
+            }
+        })
 }
 
 /// The folder the shell starts in: the one Lenslet was started in when that
 /// is a project (not `/`), else the home folder.
 pub fn default_folder() -> PathBuf {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
     match std::env::current_dir() {
         Ok(dir) if dir.parent().is_some() && Some(&dir) != home.as_ref() => dir,
         _ => home.unwrap_or_else(|| PathBuf::from(".")),
@@ -157,8 +185,13 @@ mod tests {
     #[test]
     fn runs_commands_with_the_lenslet_environment() {
         let dir = std::env::temp_dir();
-        let shell = Shell::start(dir, &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())], 80, 24)
-            .expect("start a shell");
+        let shell = Shell::start(
+            dir,
+            &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())],
+            80,
+            24,
+        )
+        .expect("start a shell");
         shell.run("echo endpoint=$AWS_ENDPOINT_URL; exit");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = Vec::new();

@@ -180,7 +180,8 @@ fn record(
         target,
         failure,
         unsupported,
-        client: header(&request.headers, "user-agent").and_then(|ua| crate::session::client_of(&ua)),
+        client: header(&request.headers, "user-agent")
+            .and_then(|ua| crate::session::client_of(&ua)),
         attempt: info.attempt,
         max_attempts: info.max_attempts,
         invocation: info.invocation_id.clone(),
