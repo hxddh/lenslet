@@ -669,6 +669,33 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
     out
 }
 
+/// Attach an inline policy to the role `role`: what a denied call needed.
+pub async fn grant(
+    emulator: &Emulator,
+    role: &str,
+    name: &str,
+    policy: &str,
+) -> Result<(), String> {
+    let ask = Ask { emulator };
+    let form = format!(
+        "Action=PutRolePolicy&Version=2010-05-08&RoleName={}&PolicyName={}&PolicyDocument={}",
+        encode(role),
+        encode(name),
+        encode(policy)
+    );
+    ask.query("iam", &form)
+        .await
+        .map(|_| ())
+        .ok_or_else(|| format!("could not change the role {role}"))
+}
+
+/// The role a call denied to an assumed role ran as: `assumed-role/<role>/...`.
+pub fn denied_role(message: &str) -> Option<String> {
+    let after = message.split("assumed-role/").nth(1)?;
+    let role = after.split('/').next()?.trim();
+    (!role.is_empty()).then(|| role.to_string())
+}
+
 /// An S3 object's text, when it is text.
 pub async fn object_text(emulator: &Emulator, bucket: &str, key: &str) -> Option<String> {
     let ask = Ask { emulator };
@@ -936,6 +963,16 @@ mod tests {
             "[2]"
         );
         assert_eq!(attribute_label(&json!({"M": {"a": {"N": "1"}}})), "{a: 1}");
+    }
+
+    #[test]
+    fn finds_the_role_a_call_was_denied_to() {
+        let message = "User: arn:aws:sts::000000000000:assumed-role/resize-role/resize is not authorized to perform: dynamodb:PutItem";
+        assert_eq!(denied_role(message).as_deref(), Some("resize-role"));
+        assert_eq!(
+            denied_role("User: arn:aws:iam::0:user/bob is not authorized"),
+            None
+        );
     }
 
     #[test]

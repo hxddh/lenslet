@@ -174,6 +174,29 @@ impl Engine {
         async move { rx.await.unwrap_or_default() }
     }
 
+    /// Allow the role `role` what `accesses` need, as an inline policy.
+    pub fn grant(
+        &self,
+        role: String,
+        accesses: Vec<lenslet_core::access::Access>,
+    ) -> impl Future<Output = Result<(), String>> + use<> {
+        let emulator = self.emulator.clone();
+        let policy = lenslet_core::policy::compile(&accesses);
+        // One inline policy per granted action, so grants add up.
+        let name = accesses
+            .first()
+            .map(|a| format!("lenslet-{}", a.action.replace([':', '*'], "-")))
+            .unwrap_or_else(|| "lenslet-granted".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _ = tx.send(resources::grant(&emulator, &role, &name, &policy).await);
+        });
+        async move {
+            rx.await
+                .unwrap_or_else(|_| Err("the engine stopped".into()))
+        }
+    }
+
     /// An S3 object's text, fetched on the engine's threads.
     pub fn object_text(
         &self,

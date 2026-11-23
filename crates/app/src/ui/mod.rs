@@ -11,6 +11,7 @@ mod inspector;
 mod pages;
 mod sidebar;
 pub mod style;
+mod summary;
 mod terminal;
 
 use std::{
@@ -76,9 +77,10 @@ fn system_lang() -> Lang {
 /// What the content area shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Page {
-    Overview,
-    Calls,
-    Permissions,
+    /// Every call, of every run.
+    Activity,
+    /// One command run in the terminal, by its id.
+    Run(u64),
     /// One resource: its service and name.
     Resource(&'static str, String),
 }
@@ -114,7 +116,7 @@ pub struct Ui {
     pub service: Signal<Option<String>>,
     pub sort: Signal<Option<DataTableSort>>,
     /// The calls the list shows, filtered and sorted.
-    pub visible: Signal<Rc<Vec<Arc<Call>>>>,
+    pub visible: Signal<Rc<Vec<calls::Row>>>,
     pub sidebar: Signal<bool>,
     pub inspector: Signal<bool>,
     pub terminal: Signal<bool>,
@@ -137,7 +139,7 @@ impl Ui {
     fn new() -> Ui {
         Ui {
             snap: signal_with(Rc::new(Snapshot::default()), SignalEquals::Never),
-            page: signal(Page::Overview),
+            page: signal(Page::Activity),
             selected: signal(None),
             query: signal(String::new()),
             filter: signal(Filter::All),
@@ -174,9 +176,30 @@ impl Ui {
 
     /// Show a call in the list and the inspector.
     pub fn show_call(&self, seq: usize) {
-        self.page.set(Page::Calls);
+        let run = self
+            .snap
+            .with_untracked(|s| s.calls.iter().find(|c| c.seq == seq).and_then(|c| c.run));
+        let page = run.map(Page::Run).unwrap_or(Page::Activity);
+        if self.page.get_untracked() != page {
+            self.page.set(page);
+        }
         self.selected.set(Some(seq));
         self.inspector.set(true);
+    }
+
+    /// Show the calls (of the run on show, else of everything).
+    pub fn show_calls(&self) {
+        if let Page::Resource(..) = self.page.get_untracked() {
+            self.page.set(Page::Activity);
+        }
+    }
+
+    /// The run on show, if any.
+    pub fn run(&self) -> Option<u64> {
+        match self.page.get() {
+            Page::Run(id) => Some(id),
+            _ => None,
+        }
     }
 
     pub fn copy_env(&self) {
@@ -206,16 +229,36 @@ impl Ui {
             if answer.await.ok().and_then(|r| r.action).as_deref() == Some("new") {
                 engine().fresh();
                 if let Page::Resource(..) = ui.page.get_untracked() {
-                    ui.page.set(Page::Overview);
+                    ui.page.set(Page::Activity);
                 }
                 ui.say(t("A new, empty account", "已换成全新的空账户"));
             }
         });
     }
 
+    /// The IAM policy for the calls on show: the run's, else everything's.
+    pub fn policy(&self) -> String {
+        let run = match self.page.get_untracked() {
+            Page::Run(id) => Some(id),
+            _ => None,
+        };
+        let accesses: Vec<_> = self.snap.with_untracked(|s| {
+            let mut all: Vec<_> = s
+                .calls
+                .iter()
+                .filter(|c| run.is_none() || c.run == run)
+                .flat_map(|c| c.access.iter().cloned())
+                .collect();
+            all.sort();
+            all.dedup();
+            all
+        });
+        lenslet_core::policy::compile(&accesses)
+    }
+
     pub fn save_policy(&self) {
         let ui = *self;
-        let policy = engine().policy();
+        let policy = self.policy();
         spawn(async move {
             let dialog = nsh_core::file_dialog::SaveDialog::new()
                 .file_name("lenslet-policy.json")
@@ -391,28 +434,45 @@ fn workbench() -> AnyElement {
             }
         });
     }
-    // The list: the calls that pass the filters, in the chosen order.
+    // The list: the calls of the run on show that pass the filters, as a
+    // tree of what caused what, or flat in the chosen order.
     effect(move || {
         let query = ui.query.get().to_lowercase();
         let filter = ui.filter.get();
         let service = ui.service.get();
         let sort = ui.sort.get();
-        let mut calls: Vec<Arc<Call>> = ui.snap.with(|s| {
-            s.calls
-                .iter()
-                .filter(|c| match filter {
-                    Filter::All => true,
-                    Filter::Failed => c.failed() && !c.unsupported,
-                    Filter::NotEmulated => c.unsupported,
-                })
-                .filter(|c| service.as_deref().is_none_or(|s| s == c.service))
-                .filter(|c| query.is_empty() || calls::matches(c, &query))
-                .cloned()
-                .collect()
+        let run = ui.run();
+        let rows = ui.snap.with(|s| {
+            calls::rows(
+                &s.calls,
+                run,
+                &query,
+                filter,
+                service.as_deref(),
+                sort.as_ref(),
+            )
         });
-        calls::sort(&mut calls, sort.as_ref());
-        ui.visible.set(Rc::new(calls));
+        ui.visible.set(Rc::new(rows));
     });
+    // A command that starts shows its run, when the latest run or everything was on show.
+    {
+        let latest = std::cell::Cell::new(None::<u64>);
+        effect(move || {
+            let newest = ui.snap.with(|s| s.runs.last().map(|r| r.id));
+            if newest != latest.get() {
+                let following = match ui.page.get_untracked() {
+                    Page::Activity => true,
+                    Page::Run(id) => Some(id) == latest.get(),
+                    Page::Resource(..) => false,
+                };
+                if following && let Some(id) = newest {
+                    ui.page.set(Page::Run(id));
+                    ui.selected.set(None);
+                }
+                latest.set(newest);
+            }
+        });
+    }
     // The Dock's badge counts the failed calls.
     effect(move || {
         let failed = ui.snap.with(|s| {
@@ -455,7 +515,8 @@ fn workbench() -> AnyElement {
                                     .size(px(400.0))
                                     .size_range(px(300.0)..px(720.0))
                                     .visible(move || {
-                                        ui.inspector.get() && ui.page.get() == Page::Calls
+                                        ui.inspector.get()
+                                            && !matches!(ui.page.get(), Page::Resource(..))
                                     })
                                     .child(inspector::inspector(ui)),
                             ),
@@ -494,15 +555,13 @@ fn workbench() -> AnyElement {
 /// The content area for the page.
 fn page(ui: Ui) -> AnyElement {
     let kind = computed(move || match ui.page.get() {
-        Page::Overview => 0,
-        Page::Calls => 1,
-        Page::Permissions => 2,
-        Page::Resource(..) => 3,
+        Page::Activity if ui.snap.with(|s| s.calls.is_empty() && s.runs.is_empty()) => 0,
+        Page::Activity | Page::Run(_) => 1,
+        Page::Resource(..) => 2,
     });
     dynamic(move || match kind.get() {
-        0 => pages::overview(ui),
+        0 => pages::welcome(ui),
         1 => calls::calls(ui),
-        2 => pages::permissions(ui),
         _ => pages::resource(ui),
     })
 }
@@ -510,34 +569,22 @@ fn page(ui: Ui) -> AnyElement {
 /// The bar over the content: what it shows, and the actions on it.
 fn toolbar(ui: Ui) -> impl IntoElement {
     let title = move || match ui.page.get() {
-        Page::Overview => ts("Overview", "概览"),
-        Page::Calls => ts("Calls", "调用"),
-        Page::Permissions => ts("Permissions", "权限"),
+        Page::Activity => ts("All Activity", "全部活动"),
+        Page::Run(id) => ui.snap.with(|s| {
+            s.runs
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.command.clone())
+                .unwrap_or_default()
+        }),
         Page::Resource(_, name) => name,
     };
     let subtitle = move || match ui.page.get() {
-        Page::Calls => {
-            let (shown, all) = (
-                ui.visible.with(|v| v.len()),
-                ui.snap.with(|s| s.calls.len()),
-            );
-            if shown == all {
-                format!("{all} {}", t("calls", "次调用"))
-            } else {
-                format!("{shown} / {all}")
-            }
+        Page::Activity | Page::Run(_) => {
+            let shown = ui.visible.with(|v| v.len());
+            format!("{shown} {}", t("calls", "次调用"))
         }
-        Page::Permissions => format!(
-            "{} {}",
-            ui.snap.with(|s| s.permissions.len()),
-            t("permissions", "项权限")
-        ),
         Page::Resource(service, _) => sidebar::service_title(service),
-        Page::Overview => format!(
-            "{} · {}",
-            engine().endpoint().trim_start_matches("http://"),
-            crate::engine::REGION
-        ),
     };
     let left_inset = move || {
         if ui.sidebar.get() {
@@ -613,7 +660,7 @@ fn toolbar(ui: Ui) -> impl IntoElement {
             move || ui.terminal.update(|v| *v = !*v),
         ))
         .child(when(
-            move || ui.page.get() == Page::Calls,
+            move || !matches!(ui.page.get(), Page::Resource(..)),
             move || {
                 tool_button(
                     Icon::Inspector,
@@ -665,8 +712,8 @@ fn search_field(ui: Ui) -> impl IntoElement {
                 .value(move || ui.query.get())
                 .on_change(move |v: &str| {
                     ui.query.set(v.to_owned());
-                    if !v.is_empty() && ui.page.get_untracked() != Page::Calls {
-                        ui.page.set(Page::Calls);
+                    if !v.is_empty() {
+                        ui.show_calls();
                     }
                 })
                 .on_key_press(move |k: &str| {
@@ -782,25 +829,26 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     menus.push(MenuItem::submenu(
         t("View", "显示"),
         [
-            MenuItem::new(t("Overview", "概览"))
+            MenuItem::new(t("All Activity", "全部活动"))
                 .shortcut("mod+1")
-                .on_select(move || ui.page.set(Page::Overview)),
-            MenuItem::new(t("Calls", "调用"))
+                .on_select(move || ui.page.set(Page::Activity)),
+            MenuItem::new(t("Latest Run", "最近一次运行"))
                 .shortcut("mod+2")
-                .on_select(move || ui.page.set(Page::Calls)),
-            MenuItem::new(t("Permissions", "权限"))
-                .shortcut("mod+3")
-                .on_select(move || ui.page.set(Page::Permissions)),
+                .on_select(move || {
+                    if let Some(id) = ui.snap.with_untracked(|s| s.runs.last().map(|r| r.id)) {
+                        ui.page.set(Page::Run(id));
+                    }
+                }),
             MenuItem::separator(),
             check("All Calls", "全部调用", filter == Filter::All).on_select(move || {
                 ui.filter.set(Filter::All);
-                ui.page.set(Page::Calls);
+                ui.show_calls();
             }),
             check("Failed Calls", "失败的调用", filter == Filter::Failed)
                 .shortcut("mod+shift+f")
                 .on_select(move || {
                     ui.filter.set(Filter::Failed);
-                    ui.page.set(Page::Calls);
+                    ui.show_calls();
                 }),
             check(
                 "Not Emulated",
@@ -809,7 +857,7 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             )
             .on_select(move || {
                 ui.filter.set(Filter::NotEmulated);
-                ui.page.set(Page::Calls);
+                ui.show_calls();
             }),
             MenuItem::separator(),
             check("Sidebar", "侧栏", ui.sidebar.get_untracked())
