@@ -112,16 +112,28 @@ impl Engine {
         self.session.call_count()
     }
 
-    /// A new, empty AWS account. Building the engine takes a moment; it
-    /// happens on the engine's threads, and the session forgets the old
-    /// account at once.
-    pub fn fresh(&self) {
-        self.session.fresh();
-        let (emulator, refresher) = (self.emulator.clone(), self.refresher.clone());
+    /// A new, empty AWS account. Building the engine takes a moment, on the
+    /// engine's threads; calls until it is ready go to the old account, and
+    /// the session starts over once the new one serves. The future says when.
+    pub fn fresh(&self) -> impl Future<Output = ()> + use<> {
+        let (emulator, session, refresher) = (
+            self.emulator.clone(),
+            self.session.clone(),
+            self.refresher.clone(),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || emulator.fresh()).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                emulator.fresh();
+                session.fresh();
+            })
+            .await;
             refresher.poke();
+            let _ = tx.send(());
         });
+        async move {
+            let _ = rx.await;
+        }
     }
 
     /// What the terminal's shell says about its commands: each one a run.

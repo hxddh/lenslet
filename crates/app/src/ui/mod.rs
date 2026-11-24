@@ -270,10 +270,11 @@ impl Ui {
             .show();
         ui.spawn(async move {
             if answer.await.ok().and_then(|r| r.action).as_deref() == Some("new") {
-                engine().fresh();
                 if let Page::Resource(..) = ui.page.get_untracked() {
                     ui.page.set(Page::Activity);
                 }
+                ui.hold(ts("Starting a new account…", "正在新建账户…"));
+                engine().fresh().await;
                 ui.say(t("A new, empty account", "已换成全新的空账户"));
             }
         });

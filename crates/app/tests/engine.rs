@@ -136,7 +136,10 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
 
     // A fresh start: an empty account, the calls kept and marked.
     let before = engine.snapshot().calls.len();
-    engine.fresh();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(engine.fresh());
     assert_eq!(engine.snapshot().generation, 1);
     assert!(engine.snapshot().permissions.is_empty());
     let (_, body) = sqs(port, "ListQueues", "{}");
