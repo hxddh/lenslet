@@ -279,9 +279,11 @@ fn not_ready(status: u16, body: &[u8]) -> bool {
         return true;
     }
     let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
-    ["NotFound", "NoSuch", "InUse", "Conflict", "Pending", "NotReady", "Throttl"]
-        .iter()
-        .any(|code| text.contains(code))
+    [
+        "NotFound", "NoSuch", "InUse", "Conflict", "Pending", "NotReady", "Throttl",
+    ]
+    .iter()
+    .any(|code| text.contains(code))
 }
 
 async fn replay(emulator: &Emulator, session: &Session, run: u64) -> Result<Replayed, String> {

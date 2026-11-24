@@ -195,7 +195,10 @@ struct Inner {
 
 impl Inner {
     fn find(&self, seq: usize) -> Option<&Arc<Call>> {
-        self.calls.binary_search_by_key(&seq, |c| c.seq).ok().map(|i| &self.calls[i])
+        self.calls
+            .binary_search_by_key(&seq, |c| c.seq)
+            .ok()
+            .map(|i| &self.calls[i])
     }
 }
 
@@ -363,7 +366,10 @@ impl Session {
     pub fn can_rewind(&self, id: u64) -> bool {
         let inner = self.lock();
         !inner.log_broken
-            && inner.runs.iter().any(|r| r.id == id && !r.undone && r.ended_ms.is_some())
+            && inner
+                .runs
+                .iter()
+                .any(|r| r.id == id && !r.undone && r.ended_ms.is_some())
     }
 
     /// The account goes back to before the run `id`: what changed it before
@@ -371,9 +377,16 @@ impl Session {
     pub fn rewind_to(&self, id: u64) -> Result<Vec<Sent>, String> {
         let mut inner = self.lock();
         if inner.log_broken {
-            return Err("the session sent too much data to rewind; start a new account to rewind again".into());
+            return Err(
+                "the session sent too much data to rewind; start a new account to rewind again"
+                    .into(),
+            );
         }
-        let run = inner.runs.iter().find(|r| r.id == id).ok_or("no such run")?;
+        let run = inner
+            .runs
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or("no such run")?;
         if run.undone {
             return Err("what this command did is no longer in the account".into());
         }

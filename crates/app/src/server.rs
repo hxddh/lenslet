@@ -70,7 +70,10 @@ async fn handle(
         && request.uri().path() == "/"
         && request.uri().query().is_none()
         && !request.headers().contains_key(http::header::AUTHORIZATION)
-        && !request.headers().keys().any(|k| k.as_str().starts_with("x-amz"))
+        && !request
+            .headers()
+            .keys()
+            .any(|k| k.as_str().starts_with("x-amz"))
         && request
             .headers()
             .get(http::header::USER_AGENT)
@@ -131,13 +134,16 @@ async fn handle(
     if changes_resources(&call) {
         refresher.poke();
         if !call.unsupported && call.status < 400 {
-            session.keep(crate::session::Sent {
-                at_ms,
-                method: parts.method.clone(),
-                uri: parts.uri.clone(),
-                headers: parts.headers.clone(),
-                body: body.clone(),
-            }, generation);
+            session.keep(
+                crate::session::Sent {
+                    at_ms,
+                    method: parts.method.clone(),
+                    uri: parts.uri.clone(),
+                    headers: parts.headers.clone(),
+                    body: body.clone(),
+                },
+                generation,
+            );
         }
     }
     session.record(call);
@@ -335,16 +341,40 @@ pub fn changes_resources(call: &Call) -> bool {
     let raw_read = matches!(op, "GET" | "HEAD" | "OPTIONS");
     let read = raw_read
         || [
-            "Get", "List", "Describe", "Head", "Query", "Scan", "BatchGet", "Select", "Search",
-            "Lookup", "Filter", "Receive", "Decrypt", "Encrypt", "ReEncrypt", "GenerateDataKey",
-            "GenerateRandom", "GenerateMac", "VerifyMac", "Sign", "Verify", "Simulate", "Test",
-            "Validate", "Preview", "Estimate", "Check",
+            "Get",
+            "List",
+            "Describe",
+            "Head",
+            "Query",
+            "Scan",
+            "BatchGet",
+            "Select",
+            "Search",
+            "Lookup",
+            "Filter",
+            "Receive",
+            "Decrypt",
+            "Encrypt",
+            "ReEncrypt",
+            "GenerateDataKey",
+            "GenerateRandom",
+            "GenerateMac",
+            "VerifyMac",
+            "Sign",
+            "Verify",
+            "Simulate",
+            "Test",
+            "Validate",
+            "Preview",
+            "Estimate",
+            "Check",
         ]
         .iter()
         .any(|prefix| {
             // A whole word: "Tag…" and "Test…" are not the same.
-            op.strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase()))
+            op.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase())
+            })
         });
     !read && call.status < 400
 }

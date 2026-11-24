@@ -84,7 +84,11 @@ impl Shell {
             .map_err(|e| e.to_string())?;
         let program = program();
         let (mut command, prefix, dir) = match integrate(&program, env) {
-            Some(Integration { command, prefix, dir }) => (command, Some(prefix), Some(dir)),
+            Some(Integration {
+                command,
+                prefix,
+                dir,
+            }) => (command, Some(prefix), Some(dir)),
             None => {
                 let mut command = CommandBuilder::new(&program);
                 if cfg!(unix) {
@@ -123,8 +127,12 @@ impl Shell {
         let exited = Arc::new(AtomicBool::new(false));
         let gone = Arc::new(AtomicBool::new(false));
         {
-            let (output, exited, gone, on_mark) =
-                (output.clone(), exited.clone(), gone.clone(), on_mark.clone());
+            let (output, exited, gone, on_mark) = (
+                output.clone(),
+                exited.clone(),
+                gone.clone(),
+                on_mark.clone(),
+            );
             let mut marks = prefix.map(Marks::new).unwrap_or_default();
             std::thread::Builder::new()
                 .name("lenslet-shell".into())
@@ -318,7 +326,12 @@ fn integrate(program: &str, env: &[(&str, String)]) -> Option<Integration> {
     made
 }
 
-fn integrate_in(dir: &Path, name: &str, program: &str, env: &[(&str, String)]) -> Option<Integration> {
+fn integrate_in(
+    dir: &Path,
+    name: &str,
+    program: &str,
+    env: &[(&str, String)],
+) -> Option<Integration> {
     let key = format!("{:08x}", random() as u32);
     let prefix = [MARK, key.as_bytes(), b";"].concat();
     let mark = format!(r"\033]6973;L;{key};");
@@ -371,7 +384,11 @@ fi
             write_new(&rc, &script)?;
             let mut command = CommandBuilder::new(program);
             command.args(["--rcfile", rc.to_str()?, "-i"]);
-            Some(Integration { command, prefix, dir: dir.to_path_buf() })
+            Some(Integration {
+                command,
+                prefix,
+                dir: dir.to_path_buf(),
+            })
         }
         "zsh" => {
             // As VS Code does: zsh reads Lenslet's startup files, each of
@@ -425,7 +442,11 @@ add-zsh-hook precmd __lenslet_first
             if let Some(user) = std::env::var_os("ZDOTDIR") {
                 command.env("LENSLET_USER_ZDOTDIR", user);
             }
-            Some(Integration { command, prefix, dir: dir.to_path_buf() })
+            Some(Integration {
+                command,
+                prefix,
+                dir: dir.to_path_buf(),
+            })
         }
         _ => None,
     }
@@ -446,7 +467,10 @@ impl Default for Marks {
 impl Marks {
     /// Marks that start with `prefix`.
     fn new(prefix: Vec<u8>) -> Self {
-        Self { prefix, pending: Vec::new() }
+        Self {
+            prefix,
+            pending: Vec::new(),
+        }
     }
 
     /// The output without its marks, and the marks found in it.
@@ -593,7 +617,11 @@ mod tests {
         let printed = Arc::new(Mutex::new(Vec::<u8>::new()));
         let shown = printed.clone();
         let dir = std::env::temp_dir();
-        let Integration { mut command, prefix, dir: rc } = integrate(
+        let Integration {
+            mut command,
+            prefix,
+            dir: rc,
+        } = integrate(
             program,
             &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())],
         )

@@ -23,9 +23,7 @@ use std::{
 use nsh_base::DataTableSort;
 use nsh_core::{
     desktop::{Backdrop, MenuRole, TitleBarOptions, TitleBarStyle, WindowAttributes},
-    element::desktop::{
-        MenuItem, main_window, popup_menu, set_application_menu, title_bar,
-    },
+    element::desktop::{MenuItem, main_window, popup_menu, set_application_menu, title_bar},
     platform::Os,
     prelude::*,
 };
@@ -211,10 +209,13 @@ impl Ui {
             self.page.set(page);
         }
         // A call the filters hide is shown with them off.
-        let hidden = !self.visible.with_untracked(|rows| rows.iter().any(|r| r.call.seq == seq));
-        if hidden && (self.filter.get_untracked() != Filter::All
-            || !self.query.get_untracked().is_empty()
-            || self.service.get_untracked().is_some())
+        let hidden = !self
+            .visible
+            .with_untracked(|rows| rows.iter().any(|r| r.call.seq == seq));
+        if hidden
+            && (self.filter.get_untracked() != Filter::All
+                || !self.query.get_untracked().is_empty()
+                || self.service.get_untracked().is_some())
         {
             self.filter.set(Filter::All);
             self.query.set(String::new());
@@ -735,7 +736,17 @@ fn toolbar(ui: Ui) -> impl IntoElement {
         .child(view().flex_shrink_0().child(search_field(ui)))
         .child(tool_button(
             Icon::Clear,
-            move || format!("{} ({})", t("Clear Calls", "清空调用"), key_label(if os() == Os::MacOs { "cmd+k" } else { "ctrl+shift+k" })),
+            move || {
+                format!(
+                    "{} ({})",
+                    t("Clear Calls", "清空调用"),
+                    key_label(if os() == Os::MacOs {
+                        "cmd+k"
+                    } else {
+                        "ctrl+shift+k"
+                    })
+                )
+            },
             || false,
             move || ui.clear(),
         ))
@@ -921,15 +932,27 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::role(MenuRole::Paste),
             MenuItem::role(MenuRole::SelectAll),
             MenuItem::separator(),
-            key(MenuItem::new(t("Find", "查找")), "cmd+f", Some("ctrl+shift+f"))
-                .on_select(move || {
-                    ui.focus_search.update(|n| *n += 1);
-                }),
+            key(
+                MenuItem::new(t("Find", "查找")),
+                "cmd+f",
+                Some("ctrl+shift+f"),
+            )
+            .on_select(move || {
+                ui.focus_search.update(|n| *n += 1);
+            }),
             MenuItem::separator(),
-            key(MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI")), "cmd+shift+c", None)
-                .on_select(move || ui.copy_call_as(CopyAs::Cli)),
-            key(MenuItem::new(t("Copy as curl", "复制为 curl")), "cmd+alt+c", None)
-                .on_select(move || ui.copy_call_as(CopyAs::Curl)),
+            key(
+                MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI")),
+                "cmd+shift+c",
+                None,
+            )
+            .on_select(move || ui.copy_call_as(CopyAs::Cli)),
+            key(
+                MenuItem::new(t("Copy as curl", "复制为 curl")),
+                "cmd+alt+c",
+                None,
+            )
+            .on_select(move || ui.copy_call_as(CopyAs::Curl)),
             MenuItem::new(t("Copy as boto3", "复制为 boto3"))
                 .on_select(move || ui.copy_call_as(CopyAs::Boto3)),
         ],
@@ -959,9 +982,9 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 None,
             )
             .on_select(move || {
-                    ui.filter.set(Filter::Failed);
-                    ui.show_calls();
-                }),
+                ui.filter.set(Filter::Failed);
+                ui.show_calls();
+            }),
             check(
                 "Not Emulated",
                 "未模拟的调用",
@@ -998,8 +1021,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     menus.push(MenuItem::submenu(
         t("Account", "账户"),
         [
-            key(MenuItem::new(t("Clear Calls", "清空调用")), "cmd+k", Some("ctrl+shift+k"))
-                .on_select(move || ui.clear()),
+            key(
+                MenuItem::new(t("Clear Calls", "清空调用")),
+                "cmd+k",
+                Some("ctrl+shift+k"),
+            )
+            .on_select(move || ui.clear()),
             key(
                 MenuItem::new(t("Refresh Resources", "刷新资源")),
                 "cmd+r",

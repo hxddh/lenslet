@@ -79,7 +79,9 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 if history.len() > HISTORY {
                     let from = history.len() - HISTORY * 3 / 4;
                     let cut = history[from..].find('\n').map_or(from, |n| from + n + 1);
-                    let cut = (cut..history.len()).find(|&i| history.is_char_boundary(i)).unwrap_or(history.len());
+                    let cut = (cut..history.len())
+                        .find(|&i| history.is_char_boundary(i))
+                        .unwrap_or(history.len());
                     history.drain(..cut);
                 }
             }
@@ -251,40 +253,43 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         .child(header)
         // Hidden, the view goes (laid out at no size, it would lose its lines);
         // shown again, a new one shows what the shell printed meanwhile.
-        .child(when(move || ready.get() && ui.terminal.get(), move || {
-            let (on_data, on_resize) = (on_data.clone(), on_resize.clone());
-            let (history, replaying) = (history.clone(), replaying.clone());
-            // A new view: once it has a real size, it shows what the shell
-            // printed before.
-            let fresh = Rc::new(std::cell::Cell::new(true));
-            let on_resize = move |e: &TerminalEvent| {
-                if let TerminalEvent::Resize(cols, rows) = e
-                    && *cols >= 10
-                    && *rows >= 2
-                    && fresh.replace(false)
-                    && let Some(api) = term.api::<TerminalApi>()
-                {
-                    let shown = history.borrow().clone();
-                    if !shown.is_empty() {
-                        replaying.set(true);
-                        api.write(shown);
-                        replaying.set(false);
+        .child(when(
+            move || ready.get() && ui.terminal.get(),
+            move || {
+                let (on_data, on_resize) = (on_data.clone(), on_resize.clone());
+                let (history, replaying) = (history.clone(), replaying.clone());
+                // A new view: once it has a real size, it shows what the shell
+                // printed before.
+                let fresh = Rc::new(std::cell::Cell::new(true));
+                let on_resize = move |e: &TerminalEvent| {
+                    if let TerminalEvent::Resize(cols, rows) = e
+                        && *cols >= 10
+                        && *rows >= 2
+                        && fresh.replace(false)
+                        && let Some(api) = term.api::<TerminalApi>()
+                    {
+                        let shown = history.borrow().clone();
+                        if !shown.is_empty() {
+                            replaying.set(true);
+                            api.write(shown);
+                            replaying.set(false);
+                        }
                     }
-                }
-                on_resize(e);
-            };
-            nsh_base::terminal()
-                .component_ref(&term)
-                .font_family(SharedString::from(MONO))
-                .text_size(px(12.5))
-                .line_height(px(17.0))
-                .scrollback(10_000u32)
-                .on_data(move |d: &SharedString| on_data(d))
-                .on_resize(on_resize)
-                .flex_1()
-                .px(px(8.0))
-                .py(px(4.0))
-        }))
+                    on_resize(e);
+                };
+                nsh_base::terminal()
+                    .component_ref(&term)
+                    .font_family(SharedString::from(MONO))
+                    .text_size(px(12.5))
+                    .line_height(px(17.0))
+                    .scrollback(10_000u32)
+                    .on_data(move |d: &SharedString| on_data(d))
+                    .on_resize(on_resize)
+                    .flex_1()
+                    .px(px(8.0))
+                    .py(px(4.0))
+            },
+        ))
 }
 
 fn tilde(path: &std::path::Path) -> String {
