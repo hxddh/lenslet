@@ -140,6 +140,15 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                                 ),
                                 red(),
                             )
+                        } else if code == -1 {
+                            // The shell ended (exit, restart) before it said.
+                            (
+                                format!(
+                                    "{} · {when} · {took}",
+                                    t("Ended with the shell", "随 shell 结束")
+                                ),
+                                secondary_text(),
+                            )
                         } else {
                             (
                                 format!("{} {code} · {when} · {took}", t("Exited with", "退出码"),),

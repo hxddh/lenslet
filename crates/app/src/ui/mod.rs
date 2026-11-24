@@ -714,25 +714,28 @@ fn toolbar(ui: Ui) -> impl IntoElement {
                 )
             },
         ))
+        // A long command line is cut short, never the buttons.
         .child(
             view()
+                .flex_1()
                 .px(px(4.0))
                 .child(
                     text(title)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(body()),
+                        .text_size(body())
+                        .truncate(),
                 )
                 .child(
                     text(subtitle)
                         .text_size(small())
-                        .text_color(secondary_text()),
+                        .text_color(secondary_text())
+                        .truncate(),
                 ),
         )
-        .child(view().flex_1())
-        .child(search_field(ui))
+        .child(view().flex_shrink_0().child(search_field(ui)))
         .child(tool_button(
             Icon::Clear,
-            move || format!("{} ({})", t("Clear Calls", "清空调用"), key_label("mod+k")),
+            move || format!("{} ({})", t("Clear Calls", "清空调用"), key_label(if os() == Os::MacOs { "cmd+k" } else { "ctrl+shift+k" })),
             || false,
             move || ui.clear(),
         ))
