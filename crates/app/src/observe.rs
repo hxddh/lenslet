@@ -41,7 +41,13 @@ pub fn pause(paused: bool) {
     if paused {
         PAUSED.fetch_add(1, Ordering::SeqCst);
     } else {
-        let _ = PAUSED.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        let mut n = PAUSED.load(Ordering::SeqCst);
+        while n > 0 {
+            match PAUSED.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
     }
 }
 
