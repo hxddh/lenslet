@@ -275,16 +275,30 @@ pub fn calls(ui: Ui) -> AnyElement {
     // A call selected elsewhere (the summary, a resource, the inspector)
     // scrolls into view.
     let table_ref = component_ref::<nsh_base::DataTable>();
+    // Only when the selection changes, and only if the row is out of sight:
+    // new calls arriving never pull the list back to it.
+    let scrolled = std::rc::Rc::new(std::cell::Cell::new(None::<usize>));
     effect(move || {
-        let Some(seq) = ui.selected.get() else { return };
+        let Some(seq) = ui.selected.get() else {
+            scrolled.set(None);
+            return;
+        };
+        if scrolled.get() == Some(seq) {
+            return;
+        }
+        // The list may catch up with the selection a moment later.
         let Some(row) = ui
             .visible
             .with(|v| v.iter().position(|r| r.call.seq == seq))
         else {
             return;
         };
+        scrolled.set(Some(seq));
         if let Some(api) = table_ref.api::<nsh_base::DataTableApi>() {
-            api.scroll_to_row(row as u32, None);
+            let shown = api.visible_rows();
+            if !(shown.start..shown.end).contains(&(row as u32)) {
+                api.scroll_to_row(row as u32, None);
+            }
         }
     });
     let table = nsh_base::data_table()

@@ -63,9 +63,11 @@ marks around each command, after your own startup files. Calls from other
 shells and programs appear under All Activity.
 
 Every command is in the menu bar (macOS) or the main menu (☰), with its
-shortcut, and on the context menu of what it acts on: Find (⌘F / Ctrl+F),
-Clear Calls (⌘K), New Empty Account (⇧⌘N), Copy as AWS CLI (⇧⌘C), Export
-Session (⌘E), Save IAM Policy (⇧⌘S).
+shortcut, and on the context menu of what it acts on: Find (⌘F), Clear Calls
+(⌘K), New Empty Account (⇧⌘N), Copy as AWS CLI (⇧⌘C), Export Session (⌘E),
+Save IAM Policy (⇧⌘S). On Linux and Windows the shortcuts that the terminal's
+shell needs take Ctrl+Shift instead (Find is Ctrl+Shift+F, Clear Calls
+Ctrl+Shift+K), so Ctrl+R, Ctrl+K and the rest still reach your shell.
 
 ## Services
 

@@ -10,6 +10,9 @@ use nsh_core::prelude::*;
 use super::{Ui, engine, style::*, t, ts};
 use crate::shell::{Shell, default_folder};
 
+/// How much of what the shell printed is kept to show again.
+const HISTORY: usize = 256 * 1024;
+
 pub fn panel(ui: Ui) -> impl IntoElement {
     let term = component_ref::<Terminal>();
     let shell: Rc<RefCell<Option<Shell>>> = Rc::new(RefCell::new(None));
@@ -18,6 +21,12 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     let exited = signal(false);
     // UTF-8 split across reads waits for its tail.
     let carry = Rc::new(RefCell::new(Vec::<u8>::new()));
+    // What the shell printed lately, shown again when the terminal's view is
+    // made anew (hiding the panel takes the view away, not the shell).
+    let history = Rc::new(RefCell::new(String::new()));
+    // While the history is shown again, what the view would answer (a
+    // cursor position report) is not the user's typing.
+    let replaying = Rc::new(std::cell::Cell::new(false));
 
     let start = {
         let (shell, size) = (shell.clone(), size.clone());
@@ -47,7 +56,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     };
     // Output, at the display's pace.
     {
-        let (shell, carry) = (shell.clone(), carry.clone());
+        let (shell, carry, history) = (shell.clone(), carry.clone(), history.clone());
         set_interval(Duration::from_millis(16), move || {
             let guard = shell.borrow();
             let Some(s) = guard.as_ref() else { return };
@@ -60,14 +69,22 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             }
             let mut carry = carry.borrow_mut();
             carry.extend(bytes);
-            let valid = match std::str::from_utf8(&carry) {
-                Ok(s) => s.len(),
-                Err(e) if e.error_len().is_some() => carry.len(),
-                Err(e) => e.valid_up_to(),
-            };
+            let valid = carry.len() - incomplete_tail(&carry);
             let rest = carry.split_off(valid);
             let text = String::from_utf8_lossy(&carry).into_owned();
             *carry = rest;
+            {
+                let mut history = history.borrow_mut();
+                history.push_str(&text);
+                if history.len() > HISTORY {
+                    let from = history.len() - HISTORY * 3 / 4;
+                    let cut = history[from..].find('\n').map_or(from, |n| from + n + 1);
+                    let cut = (cut..history.len())
+                        .find(|&i| history.is_char_boundary(i))
+                        .unwrap_or(history.len());
+                    history.drain(..cut);
+                }
+            }
             if let Some(api) = term.api::<TerminalApi>() {
                 api.write(text);
             }
@@ -92,8 +109,11 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     }
 
     let on_data = {
-        let shell = shell.clone();
+        let (shell, replaying) = (shell.clone(), replaying.clone());
         move |data: &SharedString| {
+            if replaying.get() {
+                return;
+            }
             if let Some(s) = shell.borrow().as_ref() {
                 s.write(data.as_bytes());
             }
@@ -104,6 +124,12 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         move |e: &TerminalEvent| {
             if let TerminalEvent::Resize(cols, rows) = e {
                 let (cols, rows) = ((*cols).clamp(1, 1000) as u16, (*rows).clamp(1, 1000) as u16);
+                // A hidden or not yet laid out panel reports a size of next
+                // to nothing: the shell keeps the size it had (or waits for a
+                // real one to start), so its lines do not wrap at one column.
+                if cols < 10 || rows < 2 {
+                    return;
+                }
                 *size.borrow_mut() = (cols, rows);
                 let started = shell.borrow().is_some();
                 if started {
@@ -117,9 +143,10 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         }
     };
     let restart = {
-        let (shell, start) = (shell.clone(), start.clone());
+        let (shell, start, history) = (shell.clone(), start.clone(), history.clone());
         move || {
             *shell.borrow_mut() = None;
+            history.borrow_mut().clear();
             if let Some(api) = term.api::<TerminalApi>() {
                 api.reset();
             }
@@ -212,24 +239,57 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             move || ui.terminal.set(false),
         ));
 
+    // The terminal mounts once the window has its size: laid out first at
+    // the tiny size the window's content starts at, its rows never caught
+    // up (a blank terminal, on GTK).
+    let ready = signal(false);
+    set_timeout(Duration::from_millis(150), move || ready.set(true));
+    let on_data = Rc::new(on_data);
+    let on_resize = Rc::new(on_resize);
     view()
         .flex_1()
         .bg(AdaptiveColor::rgb(0xffffff, 0x1a1a1a))
         .child(hairline())
         .child(header)
-        .child(
-            nsh_base::terminal()
-                .component_ref(&term)
-                .font_family(SharedString::from(MONO))
-                .text_size(px(12.5))
-                .line_height(px(17.0))
-                .scrollback(10_000u32)
-                .on_data(on_data)
-                .on_resize(on_resize)
-                .flex_1()
-                .px(px(8.0))
-                .py(px(4.0)),
-        )
+        // Hidden, the view goes (laid out at no size, it would lose its lines);
+        // shown again, a new one shows what the shell printed meanwhile.
+        .child(when(
+            move || ready.get() && ui.terminal.get(),
+            move || {
+                let (on_data, on_resize) = (on_data.clone(), on_resize.clone());
+                let (history, replaying) = (history.clone(), replaying.clone());
+                // A new view: once it has a real size, it shows what the shell
+                // printed before.
+                let fresh = Rc::new(std::cell::Cell::new(true));
+                let on_resize = move |e: &TerminalEvent| {
+                    if let TerminalEvent::Resize(cols, rows) = e
+                        && *cols >= 10
+                        && *rows >= 2
+                        && fresh.replace(false)
+                        && let Some(api) = term.api::<TerminalApi>()
+                    {
+                        let shown = history.borrow().clone();
+                        if !shown.is_empty() {
+                            replaying.set(true);
+                            api.write(shown);
+                            replaying.set(false);
+                        }
+                    }
+                    on_resize(e);
+                };
+                nsh_base::terminal()
+                    .component_ref(&term)
+                    .font_family(SharedString::from(MONO))
+                    .text_size(px(12.5))
+                    .line_height(px(17.0))
+                    .scrollback(10_000u32)
+                    .on_data(move |d: &SharedString| on_data(d))
+                    .on_resize(on_resize)
+                    .flex_1()
+                    .px(px(8.0))
+                    .py(px(4.0))
+            },
+        ))
 }
 
 fn tilde(path: &std::path::Path) -> String {
@@ -239,4 +299,23 @@ fn tilde(path: &std::path::Path) -> String {
         Some(h) if shown.starts_with(&h) => format!("~{}", &shown[h.len()..]),
         _ => shown,
     }
+}
+
+/// How many bytes at the end of `bytes` begin a UTF-8 character whose rest
+/// has not arrived yet.
+fn incomplete_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let b = bytes[bytes.len() - back];
+        if b & 0xC0 == 0x80 {
+            continue; // a continuation byte: look further back
+        }
+        let needs = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        return if needs > back { back } else { 0 };
+    }
+    0
 }

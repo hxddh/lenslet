@@ -26,15 +26,25 @@ pub struct Engine {
     session: Session,
     refresher: Refresher,
     runtime: tokio::runtime::Handle,
+    /// A rewind is under way.
+    rewinding: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What a rewind sent again.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Replayed {
+    pub sent: usize,
+    pub failed: usize,
 }
 
 impl Engine {
     /// Start the emulator and the endpoint on `port`; on the default port,
     /// a free one when it is taken.
     pub fn start(port: u16) -> Result<Engine, String> {
+        let chosen = std::env::var_os("LENSLET_PORT").is_some();
         let listener = match server::bind(port) {
             Ok(listener) => listener,
-            Err(_) if port == DEFAULT_PORT => {
+            Err(e) if !chosen && e.kind() == std::io::ErrorKind::AddrInUse => {
                 server::bind(0).map_err(|e| format!("127.0.0.1: {e}"))?
             }
             Err(e) => return Err(format!("127.0.0.1:{port}: {e}")),
@@ -73,6 +83,7 @@ impl Engine {
             session,
             refresher,
             runtime,
+            rewinding: Default::default(),
         })
     }
 
@@ -101,11 +112,28 @@ impl Engine {
         self.session.call_count()
     }
 
-    /// A new, empty AWS account, at once.
-    pub fn fresh(&self) {
-        self.emulator.fresh();
-        self.session.fresh();
-        self.refresher.poke();
+    /// A new, empty AWS account. Building the engine takes a moment, on the
+    /// engine's threads; calls until it is ready go to the old account, and
+    /// the session starts over once the new one serves. The future says when.
+    pub fn fresh(&self) -> impl Future<Output = ()> + use<> {
+        let (emulator, session, refresher) = (
+            self.emulator.clone(),
+            self.session.clone(),
+            self.refresher.clone(),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                emulator.fresh();
+                session.fresh();
+            })
+            .await;
+            refresher.poke();
+            let _ = tx.send(());
+        });
+        async move {
+            let _ = rx.await;
+        }
     }
 
     /// What the terminal's shell says about its commands: each one a run.
@@ -178,56 +206,26 @@ impl Engine {
     /// empty engine, and every call from outside that changed the account
     /// before then sent to it again, in order. What the account did in
     /// response (deliveries, functions) happens again too, unrecorded.
-    pub fn rewind(&self, run: u64) -> impl Future<Output = Result<usize, String>> + use<> {
-        let (emulator, session, refresher) = (
+    /// Answers how many calls were sent again, and how many of them failed.
+    pub fn rewind(&self, run: u64) -> impl Future<Output = Result<Replayed, String>> + use<> {
+        let (emulator, session, refresher, busy) = (
             self.emulator.clone(),
             self.session.clone(),
             self.refresher.clone(),
+            self.rewinding.clone(),
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let result = async {
-                let started = session.run(run).ok_or("no such run")?.started_ms;
-                crate::observe::pause(true);
-                emulator.fresh();
-                let log = session.rewind_to(started);
-                for (i, sent) in log.iter().enumerate() {
-                    // Keep the session's pace, up to a few seconds a gap: what the
-                    // code waited for (a table, a function becoming ready) is
-                    // ready again before the next call.
-                    if let Some(previous) = i.checked_sub(1).map(|p| log[p].at_ms) {
-                        let gap = sent.at_ms.saturating_sub(previous).min(3000);
-                        tokio::time::sleep(std::time::Duration::from_millis(gap)).await;
-                    }
-                    // Each call succeeded the first time. Sent again sooner than
-                    // it was, it can find what it acts on not ready yet (a table
-                    // still being created): wait for it, as the code did.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-                    loop {
-                        let mut request = http::Request::new(sent.body.clone());
-                        *request.method_mut() = sent.method.clone();
-                        *request.uri_mut() = sent.uri.clone();
-                        *request.headers_mut() = sent.headers.clone();
-                        let status = emulator.handle(request).await.status();
-                        if status.as_u16() < 400 || std::time::Instant::now() > deadline {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                }
-                // Let what the calls set off (deliveries, functions) finish: until
-                // AWS has been quiet a moment, for at most a while.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                while !crate::observe::settled(1500) && std::time::Instant::now() < deadline {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                }
-                crate::observe::pause(false);
-                refresher.poke();
-                Ok::<usize, String>(log.len())
+            use std::sync::atomic::Ordering;
+            if busy.swap(true, Ordering::SeqCst) {
+                let _ = tx.send(Err("the account is already going back".into()));
+                return;
             }
-            .await;
+            crate::observe::pause(true);
+            let result = replay(&emulator, &session, run).await;
             crate::observe::pause(false);
+            busy.store(false, Ordering::SeqCst);
+            refresher.poke();
             let _ = tx.send(result);
         });
         async move {
@@ -272,4 +270,65 @@ impl Engine {
         });
         async move { rx.await.ok().flatten() }
     }
+}
+
+/// Whether an error answered to a call sent again means what it acts on is
+/// not ready yet (a table still being created), so it is worth sending again.
+fn not_ready(status: u16, body: &[u8]) -> bool {
+    if matches!(status, 409 | 429 | 503) {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+    [
+        "NotFound", "NoSuch", "InUse", "Conflict", "Pending", "NotReady", "Throttl",
+    ]
+    .iter()
+    .any(|code| text.contains(code))
+}
+
+async fn replay(emulator: &Emulator, session: &Session, run: u64) -> Result<Replayed, String> {
+    let log = session.rewind_to(run)?;
+    let fresh = emulator.clone();
+    tokio::task::spawn_blocking(move || fresh.fresh())
+        .await
+        .map_err(|_| "could not start a new engine".to_string())?;
+    let mut replayed = Replayed::default();
+    for (i, sent) in log.iter().enumerate() {
+        // Keep the session's pace, up to a few seconds a gap: what the code
+        // waited for (a table, a function becoming ready) is ready again
+        // before the next call.
+        if let Some(previous) = i.checked_sub(1).map(|p| log[p].at_ms) {
+            let gap = sent.at_ms.saturating_sub(previous).min(3000);
+            tokio::time::sleep(std::time::Duration::from_millis(gap)).await;
+        }
+        // Each call succeeded the first time. Sent again sooner than it was,
+        // it can find what it acts on not ready yet: wait for it, as the
+        // code did. Any other error is final.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut request = http::Request::new(sent.body.clone());
+            *request.method_mut() = sent.method.clone();
+            *request.uri_mut() = sent.uri.clone();
+            *request.headers_mut() = sent.headers.clone();
+            let response = emulator.handle(request).await;
+            let status = response.status().as_u16();
+            if status < 400 {
+                break;
+            }
+            if !not_ready(status, response.body()) || std::time::Instant::now() > deadline {
+                replayed.failed += 1;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        replayed.sent += 1;
+    }
+    // Let what the calls set off (deliveries, functions) finish: until AWS
+    // has been quiet a moment, for at most a while.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    while !crate::observe::settled(1500) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(replayed)
 }

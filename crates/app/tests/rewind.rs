@@ -48,7 +48,13 @@ fn rewinding_a_run_puts_the_account_back() {
         .build()
         .unwrap();
     let replayed = runtime.block_on(engine.rewind(run_two)).expect("rewind");
-    println!("replayed {replayed} calls in {:?}", started.elapsed());
+    println!("replayed {replayed:?} in {:?}", started.elapsed());
+    assert_eq!(replayed.failed, 0, "every call sent again succeeded");
+    // Run two is undone now: it cannot be rewound to again.
+    assert!(
+        runtime.block_on(engine.rewind(run_two)).is_err(),
+        "an undone run cannot be rewound to"
+    );
     // What functions do in response lands shortly after, as on AWS.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut rewound = py(&engine, "dump");

@@ -140,6 +140,15 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                                 ),
                                 red(),
                             )
+                        } else if code == -1 {
+                            // The shell ended (exit, restart) before it said.
+                            (
+                                format!(
+                                    "{} · {when} · {took}",
+                                    t("Ended with the shell", "随 shell 结束")
+                                ),
+                                secondary_text(),
+                            )
                         } else {
                             (
                                 format!("{} {code} · {when} · {took}", t("Exited with", "退出码"),),
@@ -334,7 +343,13 @@ pub fn summary(ui: Ui) -> impl IntoElement {
         },
     );
     let rewind = when(
-        move || summary.with(|s| s.run.as_ref().is_some_and(|r| r.ended_ms.is_some())),
+        move || {
+            summary.with(|s| {
+                s.run
+                    .as_ref()
+                    .is_some_and(|r| r.ended_ms.is_some() && !r.undone)
+            })
+        },
         move || {
             nsh_base::button()
                 .on_press(move || {

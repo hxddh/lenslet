@@ -34,10 +34,25 @@ use crate::{
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// While the account is rebuilt, what it does is not news: nothing is recorded.
-static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A count, so overlapping pauses do not end each other.
+static PAUSED: AtomicU64 = AtomicU64::new(0);
 
 pub fn pause(paused: bool) {
-    PAUSED.store(paused, Ordering::SeqCst);
+    if paused {
+        PAUSED.fetch_add(1, Ordering::SeqCst);
+    } else {
+        let mut n = PAUSED.load(Ordering::SeqCst);
+        while n > 0 {
+            match PAUSED.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
+    }
+}
+
+fn paused() -> bool {
+    PAUSED.load(Ordering::SeqCst) > 0
 }
 
 /// When AWS last began or ended a call of its own, in ms since the epoch.
@@ -164,12 +179,25 @@ impl CallObserver for Observer {
         id
     }
 
+    fn abort(&self, token: u64, depth: u8) {
+        if depth == 0 || token == 0 {
+            return;
+        }
+        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
+        self.forget(token, false);
+        self.open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&token);
+    }
+
     fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>) {
         if depth == 0 || token == 0 {
             return;
         }
         LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
-        if PAUSED.load(Ordering::SeqCst) {
+        self.forget(token, call.uri.path().ends_with("/invocations"));
+        if paused() {
             self.open
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -179,26 +207,6 @@ impl CallObserver for Observer {
                 self.refresher.poke();
             }
             return;
-        }
-        let _ = STACK.try_with(|stack| {
-            let mut stack = stack.borrow_mut();
-            if stack.last() == Some(&token) {
-                stack.pop();
-            }
-        });
-        {
-            let mut chains = self.chains.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(root) = chains.chain_of.remove(&token) {
-                if let Some(open) = chains.open.get_mut(&root) {
-                    open.retain(|&id| id != token);
-                    if open.is_empty() {
-                        chains.open.remove(&root);
-                    }
-                }
-                if call.uri.path().ends_with("/invocations") {
-                    chains.invoked.insert(root, token);
-                }
-            }
         }
         let Some(open) = self
             .open
@@ -238,6 +246,34 @@ impl CallObserver for Observer {
             self.refresher.poke();
         }
         self.session.record(recorded);
+    }
+}
+
+impl Observer {
+    /// The call `token` is over: off its task's stack and its chain. A call
+    /// to a function's invocations is where the function's own calls hang.
+    fn forget(&self, token: u64, invocation: bool) {
+        let _ = STACK.try_with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(at) = stack.iter().rposition(|&id| id == token) {
+                stack.truncate(at);
+            }
+        });
+        let mut chains = self.chains.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(root) = chains.chain_of.remove(&token) {
+            if let Some(open) = chains.open.get_mut(&root) {
+                open.retain(|&id| id != token);
+                if open.is_empty() {
+                    chains.open.remove(&root);
+                }
+            }
+            if invocation {
+                if chains.invoked.len() > 100_000 {
+                    chains.invoked.clear();
+                }
+                chains.invoked.insert(root, token);
+            }
+        }
     }
 }
 
