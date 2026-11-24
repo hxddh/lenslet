@@ -16,7 +16,7 @@ fn main() -> impl std::process::Termination {
             title: "Lenslet".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "dev.lenslet.Lenslet".to_owned(),
-            size: (1280, 800),
+            size: (1320, 840),
             ..Default::default()
         },
     )

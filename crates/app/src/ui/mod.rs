@@ -24,7 +24,7 @@ use nsh_base::DataTableSort;
 use nsh_core::{
     desktop::{Backdrop, MenuRole, TitleBarOptions, TitleBarStyle, WindowAttributes},
     element::desktop::{
-        MenuItem, popup_menu, set_application_menu, title_bar, window as app_window,
+        MenuItem, main_window, popup_menu, set_application_menu, title_bar,
     },
     platform::Os,
     prelude::*,
@@ -407,16 +407,13 @@ pub fn App() -> impl IntoElement {
     if matches!(os(), Os::MacOs | Os::Windows) {
         attributes.backdrop = Some(Backdrop::Sidebar);
     }
-    app_window()
-        .id("main")
-        .title("Lenslet")
-        .default_size(size(px(1320.0), px(840.0)))
-        .restore_bounds(true)
-        .attributes(attributes)
-        .content(move || match &started {
-            Ok(_) => workbench(),
-            Err(error) => cannot_start(error.clone()),
-        })
+    // The root renders in the platform's main window, which the platform
+    // opens and keeps the place of; a `window()` here would open a second.
+    main_window().set(attributes);
+    match &started {
+        Ok(_) => workbench(),
+        Err(error) => cannot_start(error.clone()),
+    }
 }
 
 fn cannot_start(error: String) -> AnyElement {
