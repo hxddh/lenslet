@@ -60,11 +60,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             }
             let mut carry = carry.borrow_mut();
             carry.extend(bytes);
-            let valid = match std::str::from_utf8(&carry) {
-                Ok(s) => s.len(),
-                Err(e) if e.error_len().is_some() => carry.len(),
-                Err(e) => e.valid_up_to(),
-            };
+            let valid = carry.len() - incomplete_tail(&carry);
             let rest = carry.split_off(valid);
             let text = String::from_utf8_lossy(&carry).into_owned();
             *carry = rest;
@@ -239,4 +235,23 @@ fn tilde(path: &std::path::Path) -> String {
         Some(h) if shown.starts_with(&h) => format!("~{}", &shown[h.len()..]),
         _ => shown,
     }
+}
+
+/// How many bytes at the end of `bytes` begin a UTF-8 character whose rest
+/// has not arrived yet.
+fn incomplete_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let b = bytes[bytes.len() - back];
+        if b & 0xC0 == 0x80 {
+            continue; // a continuation byte: look further back
+        }
+        let needs = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        return if needs > back { back } else { 0 };
+    }
+    0
 }

@@ -334,7 +334,9 @@ pub fn summary(ui: Ui) -> impl IntoElement {
         },
     );
     let rewind = when(
-        move || summary.with(|s| s.run.as_ref().is_some_and(|r| r.ended_ms.is_some())),
+        move || {
+            summary.with(|s| s.run.as_ref().is_some_and(|r| r.ended_ms.is_some() && !r.undone))
+        },
         move || {
             nsh_base::button()
                 .on_press(move || {

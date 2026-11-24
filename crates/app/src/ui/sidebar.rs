@@ -227,7 +227,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .on_press(move || ui.page.set(target.clone()))
                 .on_context_menu(move |e: &ContextMenuEvent| {
                     ui.page.set(menu_target.clone());
-                    let finished = run.get_untracked().ended_ms.is_some();
+                    let finished = {
+                        let r = run.get_untracked();
+                        r.ended_ms.is_some() && !r.undone
+                    };
                     let command = run.get_untracked().command;
                     drop(nsh_core::element::desktop::popup_menu_at(
                         vec![
@@ -274,7 +277,15 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         .flex_1()
                         .font_family(MONO)
                         .text_size(small())
-                        .truncate(),
+                        .truncate()
+                        // What it did was undone (a rewind, a new account).
+                        .text_color(move || {
+                            if run.get().undone {
+                                tertiary_text()
+                            } else {
+                                AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                            }
+                        }),
                 )
                 .child(badge(
                     move || {

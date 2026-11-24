@@ -71,7 +71,16 @@ impl Call {
         if !service.eq_ignore_ascii_case(&self.service) || name.is_empty() {
             return false;
         }
+        let s3 = self.service.eq_ignore_ascii_case("s3");
         let named = |s: &str| {
+            if s3 {
+                // A bucket: the first part of its ARN or URL, never a key.
+                let rest = s
+                    .strip_prefix("arn:aws:s3:::")
+                    .or_else(|| s.strip_prefix("s3://"))
+                    .unwrap_or(s);
+                return rest.split('/').next() == Some(name);
+            }
             s == name
                 || s.ends_with(&format!("/{name}"))
                 || s.ends_with(&format!(":{name}"))
@@ -140,6 +149,9 @@ pub struct Run {
     pub exit: Option<i32>,
     /// Which fresh start it ran in.
     pub generation: u64,
+    /// What it did is no longer in the account (a rewind or a new account
+    /// undid it): it cannot be rewound to.
+    pub undone: bool,
 }
 
 /// A call from outside that changed the account, kept as it was sent, so
@@ -153,22 +165,38 @@ pub struct Sent {
     pub body: bytes::Bytes,
 }
 
+/// The most calls the list keeps; older ones go first.
+const MAX_CALLS: usize = 20_000;
+/// The most request bytes kept to rebuild the account; past it, rewinding is
+/// off until the next new account.
+const MAX_LOG_BYTES: usize = 512 * 1024 * 1024;
+
 #[derive(Default)]
 struct Inner {
     /// What changed the account, in order, since it was last empty.
     log: Vec<Sent>,
+    log_bytes: usize,
+    /// The log no longer holds everything (it grew past its limit).
+    log_broken: bool,
+    /// The calls, in order of `seq`.
     calls: Vec<Arc<Call>>,
-    /// Each call's place in `calls`, by its id.
+    next_seq: usize,
+    /// Each call's `seq`, by its id.
     by_id: std::collections::HashMap<u64, usize>,
     runs: Vec<Run>,
+    next_run: u64,
     /// The run of the command running now.
     current: Option<u64>,
     permissions: BTreeMap<Access, Vec<usize>>,
     resources: Arc<Vec<Group>>,
     generation: u64,
-    /// The calls before this index were cleared from the list.
-    cleared: usize,
     version: u64,
+}
+
+impl Inner {
+    fn find(&self, seq: usize) -> Option<&Arc<Call>> {
+        self.calls.binary_search_by_key(&seq, |c| c.seq).ok().map(|i| &self.calls[i])
+    }
 }
 
 #[derive(Clone, Default)]
@@ -187,6 +215,16 @@ pub struct Snapshot {
     pub generation: u64,
 }
 
+impl Snapshot {
+    /// Whether the account can go back to before the run `id` (as far as
+    /// the window can tell: the engine has the last word).
+    pub fn can_rewind(&self, id: u64) -> bool {
+        self.runs
+            .iter()
+            .any(|r| r.id == id && !r.undone && r.ended_ms.is_some())
+    }
+}
+
 impl Session {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
@@ -202,7 +240,8 @@ impl Session {
 
     pub fn record(&self, mut call: Call) {
         let mut inner = self.lock();
-        call.seq = inner.calls.len();
+        call.seq = inner.next_seq;
+        inner.next_seq += 1;
         call.generation = inner.generation;
         // A call belongs to the run of the call it happened inside, else to
         // the command running now.
@@ -210,7 +249,8 @@ impl Session {
             call.run = call
                 .parent
                 .and_then(|p| inner.by_id.get(&p))
-                .and_then(|&i| inner.calls[i].run)
+                .and_then(|&seq| inner.find(seq))
+                .and_then(|c| c.run)
                 .or(inner.current);
         }
         if call.id != 0 {
@@ -224,13 +264,27 @@ impl Session {
             }
         }
         inner.calls.push(Arc::new(call));
+        if inner.calls.len() > MAX_CALLS {
+            let gone: Vec<u64> = inner.calls.drain(..MAX_CALLS / 10).map(|c| c.id).collect();
+            for id in gone {
+                inner.by_id.remove(&id);
+            }
+        }
         inner.version += 1;
     }
 
     /// A command starts in the terminal.
     pub fn start_run(&self, command: String) -> u64 {
         let mut inner = self.lock();
-        let id = inner.runs.last().map_or(1, |r| r.id + 1);
+        // A run the shell never said the end of is over now.
+        if let Some(open) = inner.current.take()
+            && let Some(run) = inner.runs.iter_mut().find(|r| r.id == open)
+        {
+            run.ended_ms = Some(now_ms());
+            run.exit = Some(-1);
+        }
+        inner.next_run += 1;
+        let id = inner.next_run;
         let generation = inner.generation;
         inner.runs.push(Run {
             id,
@@ -239,6 +293,7 @@ impl Session {
             ended_ms: None,
             exit: None,
             generation,
+            undone: false,
         });
         inner.current = Some(id);
         inner.version += 1;
@@ -271,26 +326,72 @@ impl Session {
     pub fn fresh(&self) {
         let mut inner = self.lock();
         inner.log.clear();
+        inner.log_bytes = 0;
+        inner.log_broken = false;
+        for run in &mut inner.runs {
+            run.undone = true;
+        }
         inner.generation += 1;
         inner.permissions.clear();
         inner.resources = Arc::default();
         inner.version += 1;
     }
 
-    /// Keep a call that changed the account, to send it again on a rewind.
-    pub fn keep(&self, sent: Sent) {
-        self.lock().log.push(sent);
+    /// Keep a call that changed the account, to send it again on a rewind;
+    /// `generation` is the account it was sent to (a call that raced a new
+    /// account belongs to the old one).
+    pub fn keep(&self, sent: Sent, generation: u64) {
+        let mut inner = self.lock();
+        if generation != inner.generation || inner.log_broken {
+            return;
+        }
+        inner.log_bytes += sent.body.len();
+        if inner.log_bytes > MAX_LOG_BYTES {
+            inner.log.clear();
+            inner.log_bytes = 0;
+            inner.log_broken = true;
+            for run in &mut inner.runs {
+                run.undone = true;
+            }
+            inner.version += 1;
+            return;
+        }
+        inner.log.push(sent);
     }
 
-    /// What changed the account before `at_ms`; what came after is dropped,
-    /// as the account goes back to that moment.
-    pub fn rewind_to(&self, at_ms: u64) -> Vec<Sent> {
+    /// Whether the account can go back to before the run `id`.
+    pub fn can_rewind(&self, id: u64) -> bool {
+        let inner = self.lock();
+        !inner.log_broken
+            && inner.runs.iter().any(|r| r.id == id && !r.undone && r.ended_ms.is_some())
+    }
+
+    /// The account goes back to before the run `id`: what changed it before
+    /// then, to send again. The run and the ones after it are undone.
+    pub fn rewind_to(&self, id: u64) -> Result<Vec<Sent>, String> {
         let mut inner = self.lock();
+        if inner.log_broken {
+            return Err("the session sent too much data to rewind; start a new account to rewind again".into());
+        }
+        let run = inner.runs.iter().find(|r| r.id == id).ok_or("no such run")?;
+        if run.undone {
+            return Err("what this command did is no longer in the account".into());
+        }
+        if run.ended_ms.is_none() {
+            return Err("this command is still running".into());
+        }
+        let at_ms = run.started_ms;
         inner.log.retain(|s| s.at_ms < at_ms);
+        inner.log_bytes = inner.log.iter().map(|s| s.body.len()).sum();
+        for run in &mut inner.runs {
+            if run.started_ms >= at_ms {
+                run.undone = true;
+            }
+        }
         inner.generation += 1;
         inner.resources = Arc::default();
         inner.version += 1;
-        inner.log.clone()
+        Ok(inner.log.clone())
     }
 
     pub fn run(&self, id: u64) -> Option<Run> {
@@ -301,7 +402,8 @@ impl Session {
     /// resources stay.
     pub fn clear(&self) {
         let mut inner = self.lock();
-        inner.cleared = inner.calls.len();
+        inner.calls.clear();
+        inner.by_id.clear();
         inner.permissions.clear();
         let current = inner.current;
         inner.runs.retain(|r| Some(r.id) == current);
@@ -316,7 +418,7 @@ impl Session {
         }
         Some(Snapshot {
             version: inner.version,
-            calls: inner.calls[inner.cleared..].to_vec(),
+            calls: inner.calls.clone(),
             runs: inner.runs.clone(),
             resources: inner.resources.clone(),
             permissions: inner
@@ -337,12 +439,11 @@ impl Session {
 
     /// One call by its sequence number.
     pub fn call(&self, seq: usize) -> Option<Arc<Call>> {
-        self.lock().calls.get(seq).cloned()
+        self.lock().find(seq).cloned()
     }
 
     pub fn call_count(&self) -> usize {
-        let inner = self.lock();
-        inner.calls.len() - inner.cleared
+        self.lock().calls.len()
     }
 }
 
@@ -452,6 +553,53 @@ mod tests {
             "arn:aws:dynamodb:*:*:table/orders",
         )];
         assert!(c.touches("dynamodb", "orders"));
+        // A bucket is the first part of an S3 name, never a key.
+        let mut c = call("s3", None);
+        c.target = Some("s3://shop/data/1.json".into());
+        assert!(c.touches("s3", "shop"));
+        assert!(!c.touches("s3", "data"));
+        assert!(!c.touches("s3", "1.json"));
+        c.access = vec![Access::new("s3:GetObject", "arn:aws:s3:::other/shop")];
+        assert!(c.touches("s3", "other"));
+    }
+
+    #[test]
+    fn a_rewind_undoes_the_run_and_the_ones_after_it() {
+        let session = Session::default();
+        let sent = |at_ms| Sent {
+            at_ms,
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::from_static(b"x"),
+        };
+        let one = session.start_run("one".into());
+        session.keep(sent(now_ms()), session.generation());
+        session.end_run(0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let two = session.start_run("two".into());
+        // Still running: not yet.
+        assert!(session.rewind_to(two).is_err());
+        session.keep(sent(now_ms()), session.generation());
+        session.end_run(0);
+        assert!(session.can_rewind(two));
+        let log = session.rewind_to(two).expect("rewind");
+        assert_eq!(log.len(), 1, "only what came before run two");
+        assert!(!session.can_rewind(two), "run two is undone");
+        assert!(session.can_rewind(one));
+        // A call sent to the account before the rewind is not kept for the new one.
+        session.keep(sent(now_ms()), session.generation() - 1);
+        assert_eq!(session.rewind_to(one).expect("rewind").len(), 0);
+    }
+
+    #[test]
+    fn a_run_left_open_ends_when_the_next_starts() {
+        let session = Session::default();
+        let one = session.start_run("exit".into());
+        session.start_run("ls".into());
+        let run = session.run(one).unwrap();
+        assert_eq!(run.exit, Some(-1));
+        assert!(run.ended_ms.is_some());
     }
 
     fn call(service: &str, resource: Option<&str>) -> Call {

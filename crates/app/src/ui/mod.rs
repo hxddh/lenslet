@@ -126,6 +126,12 @@ pub struct Ui {
     pub focus_search: Signal<u64>,
     /// A command for the terminal to run.
     pub run: Signal<Option<String>>,
+    /// Which message the toast shows, so an older one's timer leaves a newer
+    /// one alone.
+    toasts: Signal<u64>,
+    /// The window's owner: work that outlives the menu or button that
+    /// started it (a dialog, a rewind) runs under it.
+    owner: Owner,
 }
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();
@@ -153,7 +159,22 @@ impl Ui {
             toast: signal(None),
             focus_search: signal(0),
             run: signal(None),
+            toasts: signal(0),
+            owner: Owner::current(),
         }
+    }
+
+    /// Run `future` for as long as the window lives.
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+        self.owner.run(|| drop(spawn(future)));
+    }
+
+    /// Show `message` until another one replaces it.
+    fn hold(&self, message: impl Into<String>) -> u64 {
+        let n = self.toasts.get_untracked() + 1;
+        self.toasts.set(n);
+        self.toast.set(Some(message.into()));
+        n
     }
 
     /// The selected call.
@@ -164,9 +185,15 @@ impl Ui {
     }
 
     pub fn say(&self, message: impl Into<String>) {
-        let toast = self.toast;
-        toast.set(Some(message.into()));
-        set_timeout(Duration::from_millis(1500), move || toast.set(None));
+        let n = self.hold(message);
+        let (toast, toasts) = (self.toast, self.toasts);
+        self.owner.run(|| {
+            set_timeout(Duration::from_millis(2000), move || {
+                if toasts.get_untracked() == n {
+                    toast.set(None);
+                }
+            })
+        });
     }
 
     pub fn copy(&self, what: String, said: &'static str, said_zh: &'static str) {
@@ -182,6 +209,16 @@ impl Ui {
         let page = run.map(Page::Run).unwrap_or(Page::Activity);
         if self.page.get_untracked() != page {
             self.page.set(page);
+        }
+        // A call the filters hide is shown with them off.
+        let hidden = !self.visible.with_untracked(|rows| rows.iter().any(|r| r.call.seq == seq));
+        if hidden && (self.filter.get_untracked() != Filter::All
+            || !self.query.get_untracked().is_empty()
+            || self.service.get_untracked().is_some())
+        {
+            self.filter.set(Filter::All);
+            self.query.set(String::new());
+            self.service.set(None);
         }
         self.selected.set(Some(seq));
         self.inspector.set(true);
@@ -209,6 +246,12 @@ impl Ui {
     pub fn clear(&self) {
         engine().clear();
         self.selected.set(None);
+        // Only the run still going stays.
+        if let Page::Run(id) = self.page.get_untracked()
+            && !engine().snapshot().runs.iter().any(|r| r.id == id)
+        {
+            self.page.set(Page::Activity);
+        }
         self.say(t("Cleared the calls", "已清空调用"));
     }
 
@@ -225,7 +268,7 @@ impl Ui {
             .destructive("new", t("New Account", "新建账户"))
             .close_on_escape(true)
             .show();
-        spawn(async move {
+        ui.spawn(async move {
             if answer.await.ok().and_then(|r| r.action).as_deref() == Some("new") {
                 engine().fresh();
                 if let Page::Resource(..) = ui.page.get_untracked() {
@@ -247,7 +290,10 @@ impl Ui {
         });
         let Some(command) = command else { return };
         let answer = nsh_base::alert_dialog()
-            .title(format!("{} “{command}”?", t("Rewind to before", "回到这次运行之前：")))
+            .title(match lang().get_untracked() {
+                Lang::Zh => format!("回到“{command}”运行之前？"),
+                Lang::En => format!("Rewind to before “{command}”?"),
+            })
             .description(t(
                 "The account goes back to how it was when this command started: what it and later commands created, changed or deleted is undone. The calls stay in the list.",
                 "账户会回到这条命令开始时的样子：它和之后的命令所做的创建、修改、删除都会撤销。调用记录保留。",
@@ -256,16 +302,25 @@ impl Ui {
             .destructive("rewind", t("Rewind", "回到之前"))
             .close_on_escape(true)
             .show();
-        spawn(async move {
+        ui.spawn(async move {
             if answer.await.ok().and_then(|r| r.action).as_deref() != Some("rewind") {
                 return;
             }
-            ui.toast.set(Some(ts("Rewinding…", "正在回到之前…")));
+            ui.hold(ts("Rewinding…", "正在回到之前…"));
             match engine().rewind(id).await {
-                Ok(n) => ui.say(format!(
-                    "{} {n} {}",
+                Ok(r) if r.failed == 0 => ui.say(format!(
+                    "{} {} {}",
                     t("Rewound: replayed", "已回到之前：重放了"),
+                    r.sent,
                     t("calls", "次调用")
+                )),
+                Ok(r) => ui.say(format!(
+                    "{} {} {}, {} {}",
+                    t("Rewound: replayed", "已回到之前：重放了"),
+                    r.sent,
+                    t("calls", "次调用"),
+                    r.failed,
+                    t("failed", "次失败")
                 )),
                 Err(e) => ui.say(e),
             }
@@ -295,7 +350,7 @@ impl Ui {
     pub fn save_policy(&self) {
         let ui = *self;
         let policy = self.policy();
-        spawn(async move {
+        ui.spawn(async move {
             let dialog = nsh_core::file_dialog::SaveDialog::new()
                 .file_name("lenslet-policy.json")
                 .button_label(t("Save", "保存"));
@@ -311,7 +366,7 @@ impl Ui {
     pub fn export_session(&self) {
         let ui = *self;
         let calls = self.snap.with_untracked(|s| s.calls.clone());
-        spawn(async move {
+        ui.spawn(async move {
             let dialog = nsh_core::file_dialog::SaveDialog::new()
                 .file_name("lenslet-session.json")
                 .button_label(t("Export", "导出"));
@@ -516,9 +571,14 @@ fn workbench() -> AnyElement {
         });
         set_badge(failed as u32);
     });
+    let rewindable = computed(move || match ui.page.get() {
+        Page::Run(id) => ui.snap.with(|s| s.can_rewind(id)),
+        _ => false,
+    });
     effect(move || {
         // Follows the language and the views' state, so checks stay right.
         let _ = (
+            rewindable.get(),
             lang().get(),
             ui.sidebar.get(),
             ui.inspector.get(),
@@ -796,6 +856,14 @@ fn sidebar_key() -> String {
 /// elsewhere. Each command is here with its shortcut.
 fn menu(ui: Ui) -> Vec<MenuItem> {
     let mac = os() == Os::MacOs;
+    // Off macOS the shortcuts use Ctrl, which the terminal's shell needs
+    // (Ctrl+R searches history, Ctrl+K cuts, Ctrl+Shift+C copies): there
+    // they take Ctrl+Shift, or none.
+    let key = |item: MenuItem, on_mac: &str, elsewhere: Option<&str>| match (mac, elsewhere) {
+        (true, _) => item.shortcut(on_mac),
+        (false, Some(k)) => item.shortcut(k),
+        (false, None) => item,
+    };
     let check = |label: &'static str, label_zh: &'static str, on: bool| {
         MenuItem::new(t(label, label_zh)).checked(on)
     };
@@ -815,16 +883,22 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
         ));
     }
     let mut file = vec![
-        MenuItem::new(t("Export Session…", "导出会话…"))
-            .shortcut("mod+e")
-            .on_select(move || ui.export_session()),
+        key(
+            MenuItem::new(t("Export Session…", "导出会话…")),
+            "cmd+e",
+            Some("ctrl+shift+e"),
+        )
+        .on_select(move || ui.export_session()),
         MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…"))
             .shortcut("mod+shift+s")
             .on_select(move || ui.save_policy()),
         MenuItem::separator(),
-        MenuItem::new(t("Copy Environment", "复制环境变量"))
-            .shortcut("mod+shift+e")
-            .on_select(move || ui.copy_env()),
+        key(
+            MenuItem::new(t("Copy Environment", "复制环境变量")),
+            "cmd+shift+e",
+            None,
+        )
+        .on_select(move || ui.copy_env()),
         MenuItem::separator(),
         MenuItem::role(MenuRole::Close),
     ];
@@ -843,17 +917,14 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
             MenuItem::role(MenuRole::Paste),
             MenuItem::role(MenuRole::SelectAll),
             MenuItem::separator(),
-            MenuItem::new(t("Find", "查找"))
-                .shortcut("mod+f")
+            key(MenuItem::new(t("Find", "查找")), "cmd+f", Some("ctrl+shift+f"))
                 .on_select(move || {
                     ui.focus_search.update(|n| *n += 1);
                 }),
             MenuItem::separator(),
-            MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI"))
-                .shortcut("mod+shift+c")
+            key(MenuItem::new(t("Copy as AWS CLI", "复制为 AWS CLI")), "cmd+shift+c", None)
                 .on_select(move || ui.copy_call_as(CopyAs::Cli)),
-            MenuItem::new(t("Copy as curl", "复制为 curl"))
-                .shortcut("mod+alt+c")
+            key(MenuItem::new(t("Copy as curl", "复制为 curl")), "cmd+alt+c", None)
                 .on_select(move || ui.copy_call_as(CopyAs::Curl)),
             MenuItem::new(t("Copy as boto3", "复制为 boto3"))
                 .on_select(move || ui.copy_call_as(CopyAs::Boto3)),
@@ -878,9 +949,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 ui.filter.set(Filter::All);
                 ui.show_calls();
             }),
-            check("Failed Calls", "失败的调用", filter == Filter::Failed)
-                .shortcut("mod+shift+f")
-                .on_select(move || {
+            key(
+                check("Failed Calls", "失败的调用", filter == Filter::Failed),
+                "cmd+shift+f",
+                None,
+            )
+            .on_select(move || {
                     ui.filter.set(Filter::Failed);
                     ui.show_calls();
                 }),
@@ -920,14 +994,19 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     menus.push(MenuItem::submenu(
         t("Account", "账户"),
         [
-            MenuItem::new(t("Clear Calls", "清空调用"))
-                .shortcut("mod+k")
+            key(MenuItem::new(t("Clear Calls", "清空调用")), "cmd+k", Some("ctrl+shift+k"))
                 .on_select(move || ui.clear()),
-            MenuItem::new(t("Refresh Resources", "刷新资源"))
-                .shortcut("mod+r")
-                .on_select(|| engine().refresh()),
+            key(
+                MenuItem::new(t("Refresh Resources", "刷新资源")),
+                "cmd+r",
+                Some("ctrl+shift+r"),
+            )
+            .on_select(|| engine().refresh()),
             MenuItem::new(t("Rewind to Before This Run…", "回到这次运行之前…"))
-                .disabled(!matches!(ui.page.get_untracked(), Page::Run(_)))
+                .disabled(!match ui.page.get_untracked() {
+                    Page::Run(id) => ui.snap.with_untracked(|s| s.can_rewind(id)),
+                    _ => false,
+                })
                 .on_select(move || {
                     if let Page::Run(id) = ui.page.get_untracked() {
                         ui.rewind(id);

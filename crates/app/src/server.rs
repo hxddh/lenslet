@@ -31,6 +31,8 @@ pub async fn serve(
 ) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
+            // Out of file descriptors, say: wait instead of spinning.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         };
         let (emulator, session, refresher) = (emulator.clone(), session.clone(), refresher.clone());
@@ -68,6 +70,12 @@ async fn handle(
         && request.uri().path() == "/"
         && request.uri().query().is_none()
         && !request.headers().contains_key(http::header::AUTHORIZATION)
+        && !request.headers().keys().any(|k| k.as_str().starts_with("x-amz"))
+        && request
+            .headers()
+            .get(http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|ua| ua.is_empty() || ua.starts_with("Mozilla") || ua.starts_with("curl"))
     {
         let text = "Lenslet: a local AWS endpoint. Set AWS_ENDPOINT_URL to this address.\n";
         return Ok(Response::builder()
@@ -78,11 +86,16 @@ async fn handle(
     let started = Instant::now();
     let at_ms = now_ms();
     let (parts, body) = request.into_parts();
-    let body = body
-        .collect()
-        .await
-        .map(|b| b.to_bytes())
-        .unwrap_or_default();
+    let body = match body.collect().await {
+        Ok(body) => body.to_bytes(),
+        // The client went away mid-request: nothing was sent to AWS.
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(400)
+                .body(Full::new(Bytes::new()))
+                .expect("static response"));
+        }
+    };
     // The calls this one causes inside the emulator hang under its id: on its
     // task, and through the tracing header AWS carries onto its deliveries.
     let id = crate::observe::next_id();
@@ -94,6 +107,9 @@ async fn handle(
     }
     crate::observe::chain_started(&sent.headers, id);
     let request = http::Request::from_parts(sent, body.clone());
+    // The account this call goes to; a new account started meanwhile does not
+    // get it in its log.
+    let generation = session.generation();
     let response = emulator.handle_traced(request, id).await;
     let (rparts, rbody) = response.into_parts();
     let mut call = record(
@@ -121,7 +137,7 @@ async fn handle(
                 uri: parts.uri.clone(),
                 headers: parts.headers.clone(),
                 body: body.clone(),
-            });
+            }, generation);
         }
     }
     session.record(call);
@@ -315,19 +331,20 @@ fn exchange(
 /// but a read that succeeded or failed).
 pub fn changes_resources(call: &Call) -> bool {
     let op = call.operation.as_str();
-    let read = [
-        "Get",
-        "List",
-        "Describe",
-        "Head",
-        "Query",
-        "Scan",
-        "Receive",
-        "Lookup",
-        "Batch Get",
-        "Filter",
-    ]
-    .iter()
-    .any(|prefix| op.starts_with(prefix));
+    // An operation Lenslet could not name is its HTTP method.
+    let raw_read = matches!(op, "GET" | "HEAD" | "OPTIONS");
+    let read = raw_read
+        || [
+            "Get", "List", "Describe", "Head", "Query", "Scan", "BatchGet", "Select", "Search",
+            "Lookup", "Filter", "Receive", "Decrypt", "Encrypt", "ReEncrypt", "GenerateDataKey",
+            "GenerateRandom", "GenerateMac", "VerifyMac", "Sign", "Verify", "Simulate", "Test",
+            "Validate", "Preview", "Estimate", "Check",
+        ]
+        .iter()
+        .any(|prefix| {
+            // A whole word: "Tag…" and "Test…" are not the same.
+            op.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        });
     !read && call.status < 400
 }

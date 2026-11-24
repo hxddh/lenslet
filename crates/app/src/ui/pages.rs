@@ -4,6 +4,7 @@
 
 use nsh_base::{DataTableColumn, DataTablePress, DataTableRows};
 use nsh_core::prelude::*;
+use std::sync::Arc;
 
 use super::{Page, Ui, calls, engine, sidebar::service_title, style::*, t, ts};
 use crate::{
@@ -162,20 +163,31 @@ pub fn resource(ui: Ui) -> AnyElement {
     });
     let contents = signal(None::<Contents>);
     let preview = signal(None::<(String, String)>);
-    // Fetch what it holds when it is opened, and again when the account changed.
-    effect(move || {
-        let Some((service, resource)) = holder.get() else {
+    // Fetch what it holds when it is opened, and again when what exists
+    // changed (not on every call). A fetch for another resource than the
+    // one now open is dropped.
+    let fetch = move || {
+        let Some((service, resource)) = holder.get_untracked() else {
             return;
         };
-        let _ = ui.snap.with(|s| s.version);
+        let asked = which.get_untracked();
         let fetch = engine().contents(service, resource);
-        spawn(async move {
-            contents.set(Some(fetch.await));
+        ui.spawn(async move {
+            let contents_of = fetch.await;
+            if which.get_untracked() == asked {
+                contents.set(Some(contents_of));
+            }
         });
-    });
+    };
+    let inventory = computed(move || ui.snap.with(|s| Arc::as_ptr(&s.resources) as usize));
     effect(move || {
         let _ = which.get();
+        contents.set(None);
         preview.set(None);
+    });
+    effect(move || {
+        let _ = (which.get(), inventory.get());
+        fetch();
     });
     let touched = computed(move || {
         let Some((service, name)) = which.get() else {
@@ -246,10 +258,7 @@ pub fn resource(ui: Ui) -> AnyElement {
         .child(push_button(
             || ts("Refresh", "刷新"),
             move || {
-                if let Some((service, resource)) = holder.get_untracked() {
-                    let fetch = engine().contents(service, resource);
-                    spawn(async move { contents.set(Some(fetch.await)) });
-                }
+                fetch();
             },
         ));
 

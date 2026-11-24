@@ -119,12 +119,14 @@ fn localize(response: http::Response<Bytes>, endpoint: &str) -> http::Response<B
             *value = local;
         }
     }
-    // Only service documents, never object or blob data.
-    let document = parts
-        .headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.contains("xml") || t.contains("json"));
+    // Only service documents, never object or blob data (an object, even
+    // one that is JSON or XML, comes with its ETag).
+    let document = !parts.headers.contains_key(http::header::ETAG)
+        && parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|t| t.contains("xml") || t.contains("json"));
     let body = match std::str::from_utf8(&body) {
         Ok(text) if document && names_any(text) => {
             parts.headers.remove(http::header::CONTENT_LENGTH);

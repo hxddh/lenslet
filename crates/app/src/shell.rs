@@ -53,6 +53,11 @@ pub struct Shell {
     output: Arc<Mutex<Vec<u8>>>,
     exited: Arc<AtomicBool>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// The shell is being replaced: its reader no longer reports marks.
+    gone: Arc<AtomicBool>,
+    on_mark: OnMark,
+    /// The startup files Lenslet wrote for it, removed with it.
+    dir: Option<PathBuf>,
     pub folder: PathBuf,
     /// The shell marks its commands.
     pub integrated: bool,
@@ -78,20 +83,31 @@ impl Shell {
             })
             .map_err(|e| e.to_string())?;
         let program = program();
-        let (mut command, integrated) = integrate(&program, env).unwrap_or_else(|| {
-            let mut command = CommandBuilder::new(&program);
-            if cfg!(unix) {
-                // A login shell reads the user's profile: their PATH, their tools.
-                command.arg("-l");
+        let (mut command, prefix, dir) = match integrate(&program, env) {
+            Some(Integration { command, prefix, dir }) => (command, Some(prefix), Some(dir)),
+            None => {
+                let mut command = CommandBuilder::new(&program);
+                if cfg!(unix) {
+                    // A login shell reads the user's profile: their PATH, their tools.
+                    command.arg("-l");
+                }
+                (command, None, None)
             }
-            (command, false)
-        });
+        };
+        let integrated = prefix.is_some();
         command.cwd(&folder);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("LENSLET", "1");
         for name in DROPPED {
             command.env_remove(name);
+        }
+        for (name, _) in std::env::vars_os() {
+            if let Some(name) = name.to_str()
+                && name.starts_with("AWS_ENDPOINT_URL_")
+            {
+                command.env_remove(name);
+            }
         }
         for (name, value) in env {
             command.env(name, value);
@@ -105,20 +121,24 @@ impl Shell {
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let output = Arc::new(Mutex::new(Vec::new()));
         let exited = Arc::new(AtomicBool::new(false));
+        let gone = Arc::new(AtomicBool::new(false));
         {
-            let (output, exited) = (output.clone(), exited.clone());
+            let (output, exited, gone, on_mark) =
+                (output.clone(), exited.clone(), gone.clone(), on_mark.clone());
+            let mut marks = prefix.map(Marks::new).unwrap_or_default();
             std::thread::Builder::new()
                 .name("lenslet-shell".into())
                 .spawn(move || {
-                    let mut marks = Marks::default();
                     let mut buf = [0u8; 16 * 1024];
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 let (text, found) = marks.split(&buf[..n]);
-                                for mark in found {
-                                    on_mark(mark);
+                                if !gone.load(Ordering::SeqCst) {
+                                    for mark in found {
+                                        on_mark(mark);
+                                    }
                                 }
                                 output
                                     .lock()
@@ -128,6 +148,11 @@ impl Shell {
                         }
                     }
                     exited.store(true, Ordering::SeqCst);
+                    // The shell ended (`exit`, a crash) in the middle of a
+                    // command, or between them: no command runs now.
+                    if !gone.load(Ordering::SeqCst) {
+                        on_mark(Mark::End(-1));
+                    }
                 })
                 .map_err(|e| e.to_string())?;
         }
@@ -137,6 +162,9 @@ impl Shell {
             output,
             exited,
             child: Mutex::new(child),
+            gone,
+            on_mark,
+            dir,
             folder,
             integrated,
         })
@@ -182,14 +210,21 @@ impl Shell {
 
 impl Drop for Shell {
     fn drop(&mut self) {
+        // What the old shell says from now on is not about the new one.
+        if !self.gone.swap(true, Ordering::SeqCst) && self.integrated {
+            (self.on_mark)(Mark::End(-1));
+        }
         let _ = self.child.lock().unwrap_or_else(|e| e.into_inner()).kill();
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
 /// The user's shell: `$SHELL`, else the platform's.
 fn program() -> String {
     if cfg!(windows) {
-        return std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into());
+        return "powershell.exe".into();
     }
     std::env::var("SHELL")
         .ok()
@@ -216,20 +251,77 @@ pub fn default_folder() -> PathBuf {
 
 // -- Shell integration -------------------------------------------------------------
 
-/// The marks' prefix: an OSC sequence no terminal acts on.
+/// The marks' prefix: an OSC sequence no terminal acts on. Each shell's marks
+/// also carry a key of its own, so a program that prints the prefix (`cat`
+/// of a file) cannot fake a run.
 const MARK: &[u8] = b"\x1b]6973;L;";
+
+/// The longest a mark can be; past it, it was not one.
+const MAX_MARK: usize = 64 * 1024;
 
 /// The command line, hex-encoded so it survives any character.
 const HEX: &str = "od -An -tx1 | tr -d ' \\n'";
 
+struct Integration {
+    command: CommandBuilder,
+    /// What this shell's marks start with.
+    prefix: Vec<u8>,
+    dir: PathBuf,
+}
+
+/// A random number, from the standard library's hasher keys.
+fn random() -> u64 {
+    use std::hash::BuildHasher;
+    std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now())
+}
+
+/// A new folder only this user can read, which did not exist before.
+fn private_dir() -> Option<PathBuf> {
+    for _ in 0..16 {
+        let dir = std::env::temp_dir().join(format!("lenslet-shell-{:016x}", random()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Write a new file (never through a link left in its place).
+fn write_new(path: &Path, text: &str) -> Option<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .ok()?;
+    file.write_all(text.as_bytes()).ok()
+}
+
 /// The shell's start with its marks, for bash and zsh; `None` for others.
-fn integrate(program: &str, env: &[(&str, String)]) -> Option<(CommandBuilder, bool)> {
+fn integrate(program: &str, env: &[(&str, String)]) -> Option<Integration> {
     if cfg!(windows) {
         return None;
     }
     let name = Path::new(program).file_name()?.to_str()?;
-    let dir = std::env::temp_dir().join(format!("lenslet-shell-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
+    if name != "bash" && name != "zsh" {
+        return None;
+    }
+    let dir = private_dir()?;
+    let made = integrate_in(&dir, name, program, env);
+    if made.is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    made
+}
+
+fn integrate_in(dir: &Path, name: &str, program: &str, env: &[(&str, String)]) -> Option<Integration> {
+    let key = format!("{:08x}", random() as u32);
+    let prefix = [MARK, key.as_bytes(), b";"].concat();
+    let mark = format!(r"\033]6973;L;{key};");
     // After the user's files: Lenslet's variables win over anything they set.
     let mut ours = String::new();
     for name in DROPPED {
@@ -252,14 +344,16 @@ elif [ -f ~/.bash_login ]; then . ~/.bash_login
 elif [ -f ~/.profile ]; then . ~/.profile
 fi
 {ours}
-__lenslet_end() {{ local s=$?; printf '\033]6973;L;E;%s\007' "$s"; return $s; }}
+for __lenslet_v in ${{!AWS_ENDPOINT_URL_*}}; do unset "$__lenslet_v"; done; unset __lenslet_v
+__lenslet_end() {{ local s=$?; __lenslet_armed=; printf '{mark}E;%s\007' "$s"; return $s; }}
 __lenslet_start() {{ HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]*[* ] *//' | tr -d '\n' | {HEX}; }}
 if [ -z "$__LENSLET_DEBUG_TRAP" ] && {{ [ "${{BASH_VERSINFO[0]}}" -gt 4 ] || {{ [ "${{BASH_VERSINFO[0]}}" -eq 4 ] && [ "${{BASH_VERSINFO[1]}}" -ge 4 ]; }}; }}; then
   PROMPT_COMMAND="__lenslet_end${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
-  PS0='\[\033]6973;L;S;$(__lenslet_start)\007\]'"$PS0"
+  PS0='\[{mark}S;$(__lenslet_start)\007\]'"$PS0"
 else
   # Bash before 4.4 (macOS's /bin/bash) has no PS0: mark the start from the
-  # DEBUG trap, armed when the prompt shows, once per command line.
+  # DEBUG trap, armed as the prompt shows (after the user's own prompt
+  # commands), once per command line.
   __lenslet_armed=
   __lenslet_arm() {{ __lenslet_armed=1; }}
   __lenslet_debug() {{
@@ -267,92 +361,138 @@ else
     [ -n "$COMP_LINE" ] && return 0
     case "$BASH_COMMAND" in __lenslet_*) return 0 ;; esac
     __lenslet_armed=
-    printf '\033]6973;L;S;%s\007' "$(__lenslet_start)"
+    printf '{mark}S;%s\007' "$(__lenslet_start)"
   }}
   PROMPT_COMMAND="__lenslet_end;${{PROMPT_COMMAND:+$PROMPT_COMMAND;}}__lenslet_arm"
   trap '__lenslet_debug' DEBUG
 fi
 "#
             );
-            std::fs::write(&rc, script).ok()?;
+            write_new(&rc, &script)?;
             let mut command = CommandBuilder::new(program);
             command.args(["--rcfile", rc.to_str()?, "-i"]);
-            Some((command, true))
+            Some(Integration { command, prefix, dir: dir.to_path_buf() })
         }
         "zsh" => {
+            // As VS Code does: zsh reads Lenslet's startup files, each of
+            // which reads the user's own with ZDOTDIR as the user has it, and
+            // the last one puts the user's ZDOTDIR back (their history, their
+            // completion cache, and the shells started from this one).
             let zdot = dir.join("zsh");
-            std::fs::create_dir_all(&zdot).ok()?;
-            let user = std::env::var("ZDOTDIR")
-                .ok()
-                .or_else(|| std::env::var("HOME").ok())
-                .unwrap_or_default();
-            for file in [".zshenv", ".zprofile", ".zlogin"] {
-                let script = format!("[ -f '{user}/{file}' ] && . '{user}/{file}'\n");
-                std::fs::write(zdot.join(file), script).ok()?;
-            }
+            std::fs::create_dir(&zdot).ok()?;
+            let source = |file: &str| {
+                format!(
+                    r#"if [ -f "$__lenslet_user/{file}" ]; then
+  ZDOTDIR="$__lenslet_user"; . "$__lenslet_user/{file}"; __lenslet_user="$ZDOTDIR"; ZDOTDIR="$__lenslet_zdot"
+fi
+"#
+                )
+            };
+            let zshenv = format!(
+                r#"__lenslet_zdot="$ZDOTDIR"
+__lenslet_user="${{LENSLET_USER_ZDOTDIR:-$HOME}}"
+unset LENSLET_USER_ZDOTDIR
+{}"#,
+                source(".zshenv")
+            );
+            write_new(&zdot.join(".zshenv"), &zshenv)?;
+            write_new(&zdot.join(".zprofile"), &source(".zprofile"))?;
             let script = format!(
                 r#"# Lenslet: the user's .zshrc, then marks around each command.
-[ -f '{user}/.zshrc' ] && . '{user}/.zshrc'
+{}
+if [ "$__lenslet_user" != "$HOME" ]; then ZDOTDIR="$__lenslet_user"; else unset ZDOTDIR; fi
+unset __lenslet_zdot __lenslet_user
+__lenslet_env() {{
 {ours}
-__lenslet_preexec() {{ printf '\033]6973;L;S;%s\007' "$(printf '%s' "$1" | {HEX})"; }}
-__lenslet_precmd() {{ local s=$?; printf '\033]6973;L;E;%s\007' "$s"; }}
+unset -m 'AWS_ENDPOINT_URL_*'
+}}
+__lenslet_env
+__lenslet_preexec() {{ printf '{mark}S;%s\007' "$(printf '%s' "$1" | {HEX})"; }}
+__lenslet_precmd() {{ local s=$?; printf '{mark}E;%s\007' "$s"; }}
+# The user's .zlogin runs after this file: Lenslet's variables again, once.
+__lenslet_first() {{ __lenslet_env; add-zsh-hook -d precmd __lenslet_first; unset -f __lenslet_first; }}
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec __lenslet_preexec
 add-zsh-hook precmd __lenslet_precmd
-"#
+add-zsh-hook precmd __lenslet_first
+"#,
+                source(".zshrc")
             );
-            std::fs::write(zdot.join(".zshrc"), script).ok()?;
+            write_new(&zdot.join(".zshrc"), &script)?;
             let mut command = CommandBuilder::new(program);
             command.arg("-l");
             command.env("ZDOTDIR", zdot.to_str()?);
-            Some((command, true))
+            if let Some(user) = std::env::var_os("ZDOTDIR") {
+                command.env("LENSLET_USER_ZDOTDIR", user);
+            }
+            Some(Integration { command, prefix, dir: dir.to_path_buf() })
         }
         _ => None,
     }
 }
 
 /// Takes the marks out of the shell's output, across reads.
-#[derive(Default)]
 pub struct Marks {
+    prefix: Vec<u8>,
     pending: Vec<u8>,
 }
 
+impl Default for Marks {
+    fn default() -> Self {
+        Self::new(MARK.to_vec())
+    }
+}
+
 impl Marks {
+    /// Marks that start with `prefix`.
+    fn new(prefix: Vec<u8>) -> Self {
+        Self { prefix, pending: Vec::new() }
+    }
+
     /// The output without its marks, and the marks found in it.
     pub fn split(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<Mark>) {
         self.pending.extend_from_slice(chunk);
-        let mut text = Vec::with_capacity(self.pending.len());
+        let pending = std::mem::take(&mut self.pending);
+        let prefix = &self.prefix;
+        let mut text = Vec::with_capacity(pending.len());
         let mut marks = Vec::new();
-        let mut rest: &[u8] = &self.pending;
+        let mut rest: &[u8] = &pending;
         loop {
-            match find(rest, MARK) {
+            match find(rest, prefix) {
                 Some(i) => {
                     text.extend_from_slice(&rest[..i]);
-                    let after = &rest[i + MARK.len()..];
-                    match after.iter().position(|&b| b == 0x07) {
-                        Some(end) => {
+                    let after = &rest[i + prefix.len()..];
+                    match after.iter().position(|&b| b == 0x07 || b == 0x1b) {
+                        Some(end) if after[end] == 0x07 => {
                             if let Some(mark) = parse(&after[..end]) {
                                 marks.push(mark);
                             }
                             rest = &after[end + 1..];
                         }
+                        // Another escape before the end: it was not a mark.
+                        Some(_) => {
+                            text.extend_from_slice(&rest[i..i + prefix.len()]);
+                            rest = after;
+                        }
+                        None if after.len() > MAX_MARK => {
+                            text.extend_from_slice(&rest[i..i + prefix.len()]);
+                            rest = after;
+                        }
                         None => {
                             // The mark continues in the next read.
-                            let keep = rest[i..].to_vec();
-                            self.pending = keep;
+                            self.pending = rest[i..].to_vec();
                             return (text, marks);
                         }
                     }
                 }
                 None => {
                     // The tail may be the start of a mark.
-                    let keep = (1..MARK.len().min(rest.len() + 1))
+                    let keep = (1..prefix.len().min(rest.len() + 1))
                         .rev()
-                        .find(|&n| rest.ends_with(&MARK[..n]))
+                        .find(|&n| rest.ends_with(&prefix[..n]))
                         .unwrap_or(0);
                     text.extend_from_slice(&rest[..rest.len() - keep]);
-                    let keep = rest[rest.len() - keep..].to_vec();
-                    self.pending = keep;
+                    self.pending = rest[rest.len() - keep..].to_vec();
                     return (text, marks);
                 }
             }
@@ -365,18 +505,23 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn parse(mark: &[u8]) -> Option<Mark> {
-    let text = std::str::from_utf8(mark).ok()?;
-    let (kind, value) = text.split_once(';')?;
+    let at = mark.iter().position(|&b| b == b';')?;
+    let (kind, value) = (&mark[..at], &mark[at + 1..]);
+    let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     match kind {
-        "S" => {
-            let bytes: Option<Vec<u8>> = (0..value.len() / 2)
-                .map(|i| u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).ok())
+        b"S" => {
+            let bytes: Option<Vec<u8>> = value
+                .chunks(2)
+                .filter(|pair| pair.len() == 2)
+                .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
                 .collect();
             Some(Mark::Start(
                 String::from_utf8_lossy(&bytes?).trim().to_string(),
             ))
         }
-        "E" => Some(Mark::End(value.trim().parse().unwrap_or(0))),
+        b"E" => Some(Mark::End(
+            std::str::from_utf8(value).ok()?.trim().parse().unwrap_or(0),
+        )),
         _ => None,
     }
 }
@@ -399,35 +544,60 @@ mod tests {
         assert!(m.is_empty());
     }
 
+    #[test]
+    fn what_only_looks_like_a_mark_stays_text() {
+        let mut marks = Marks::default();
+        // Not hex, not UTF-8 at a byte boundary: no mark, and no panic.
+        let (a, m) = marks.split("\x1b]6973;L;S;aé\x07!".as_bytes());
+        assert_eq!(a, b"!");
+        assert!(m.is_empty());
+        // A mark cut off by another escape gives its text back.
+        let (b, m) = marks.split(b"\x1b]6973;L;S;6c\x1b[0m ok");
+        assert_eq!(b, b"\x1b]6973;L;S;6c\x1b[0m ok");
+        assert!(m.is_empty());
+        // Another shell's key is not this one's.
+        let mut keyed = Marks::new(b"\x1b]6973;L;abcd;".to_vec());
+        let (c, m) = keyed.split(b"\x1b]6973;L;S;6c73\x07\x1b]6973;L;abcd;E;0\x07");
+        assert_eq!(c, b"\x1b]6973;L;S;6c73\x07");
+        assert_eq!(m, vec![Mark::End(0)]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bash_marks_each_command_with_its_line_and_status() {
-        bash_marks(false);
+        shell_marks("/bin/bash", false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_marks_each_command_and_gives_zdotdir_back() {
+        shell_marks("/bin/zsh", false);
     }
 
     /// The DEBUG-trap way, which bash before 4.4 (macOS's) uses.
     #[cfg(unix)]
     #[test]
     fn bash_without_ps0_marks_each_command_too() {
-        bash_marks(true);
+        shell_marks("/bin/bash", true);
     }
 
     #[cfg(unix)]
-    fn bash_marks(debug_trap: bool) {
+    fn shell_marks(program: &str, debug_trap: bool) {
         use std::time::{Duration, Instant};
-        if !Path::new("/bin/bash").exists() {
+        if !Path::new(program).exists() {
             return;
         }
         // SAFETY of the test: the shell is chosen by $SHELL; this test runs bash.
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = seen.clone();
+        let printed = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let shown = printed.clone();
         let dir = std::env::temp_dir();
-        let (mut command, integrated) = integrate(
-            "/bin/bash",
+        let Integration { mut command, prefix, dir: rc } = integrate(
+            program,
             &[("AWS_ENDPOINT_URL", "http://127.0.0.1:4999".into())],
         )
-        .expect("bash integrates");
-        assert!(integrated);
+        .expect("the shell integrates");
         command.cwd(&dir);
         if debug_trap {
             command.env("__LENSLET_DEBUG_TRAP", "1");
@@ -446,19 +616,20 @@ mod tests {
         let mut reader = pair.master.try_clone_reader().unwrap();
         let mut writer = pair.master.take_writer().unwrap();
         std::thread::spawn(move || {
-            let mut marks = Marks::default();
+            let mut marks = Marks::new(prefix);
             let mut buf = [0u8; 4096];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
-                let (_, found) = marks.split(&buf[..n]);
+                let (text, found) = marks.split(&buf[..n]);
+                shown.lock().unwrap().extend(text);
                 heard.lock().unwrap().extend(found);
             }
         });
         std::thread::sleep(Duration::from_millis(500));
         writer
-            .write_all(b"echo \"$AWS_ENDPOINT_URL\" && false\r")
+            .write_all(b"echo \"$AWS_ENDPOINT_URL\" \"${ZDOTDIR-}\" && false\r")
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -469,9 +640,13 @@ mod tests {
             {
                 assert_eq!(
                     marks[i],
-                    Mark::Start("echo \"$AWS_ENDPOINT_URL\" && false".into())
+                    Mark::Start("echo \"$AWS_ENDPOINT_URL\" \"${ZDOTDIR-}\" && false".into())
                 );
                 let _ = child.kill();
+                let _ = std::fs::remove_dir_all(&rc);
+                // Lenslet's endpoint, and ZDOTDIR as the user had it (unset).
+                let out = String::from_utf8_lossy(&printed.lock().unwrap()).into_owned();
+                assert!(out.contains("http://127.0.0.1:4999 \r\n"), "{out:?}");
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

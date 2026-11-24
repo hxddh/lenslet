@@ -430,7 +430,7 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                         c.as_ref().map(|c| c.0.access.clone()).unwrap_or_default()
                     });
                     let done = super::engine().grant(role.clone(), accesses);
-                    spawn(async move {
+                    ui.spawn(async move {
                         match done.await {
                             Ok(()) => ui.say(format!("{} {role}", t("Allowed for", "已授权给"))),
                             Err(e) => ui.say(e),
