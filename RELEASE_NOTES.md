@@ -25,6 +25,15 @@ A bug-fix release.
 - Clearing the calls goes back to All Activity if the run on show is gone.
 
 ## Runs and the terminal
+- **The terminal survives hiding it.** Hiding and showing the terminal
+  (Ctrl+`) re-wrapped its lines to one column and lost what it showed. Now
+  it shows what the shell printed, and the command keeps running.
+- On Linux the terminal could stay blank after launch. It now draws once
+  the window has its size.
+- A long command line no longer pushes the toolbar's search field and
+  buttons out of the window.
+- A run whose shell ended mid-command says "Ended with the shell", not
+  "Exited with -1".
 - **A run ends when its shell does.** Typing `exit`, restarting the shell or
   choosing another folder in the middle of a command used to leave its run
   open forever, and every later call went to it.
