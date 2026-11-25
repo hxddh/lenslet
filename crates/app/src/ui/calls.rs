@@ -190,19 +190,23 @@ pub fn calls(ui: Ui) -> AnyElement {
         ms.align = nsh_base::DataTableAlign::End;
         let mut status = column("status", ts("Status", "状态"), 72.0, 56.0);
         status.align = nsh_base::DataTableAlign::End;
+        // The resource or error takes the room that is left, so the table
+        // fills its pane at any width.
+        let mut target = column(
+            "target",
+            ts("Resource or Error", "资源或错误"),
+            220.0,
+            120.0,
+        );
+        target.grow = Some(1.0);
         vec![
-            column("time", ts("Time", "时间"), 82.0, 70.0),
+            column("time", ts("Time", "时间"), 80.0, 70.0),
             status,
-            column("service", ts("Service", "服务"), 100.0, 60.0),
-            column("operation", ts("Operation", "操作"), 220.0, 80.0),
+            column("service", ts("Service", "服务"), 96.0, 60.0),
+            column("operation", ts("Operation", "操作"), 190.0, 80.0),
             ms,
-            column(
-                "target",
-                ts("Resource or Error", "资源或错误"),
-                300.0,
-                120.0,
-            ),
-            column("client", ts("Client", "客户端"), 130.0, 80.0),
+            target,
+            column("client", ts("Client", "客户端"), 120.0, 80.0),
         ]
     };
     let data = move || {

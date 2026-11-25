@@ -24,7 +24,7 @@ use nsh_base::DataTableSort;
 use nsh_core::{
     desktop::{Backdrop, MenuRole, QuitMode, TitleBarOptions, TitleBarStyle, WindowAttributes},
     element::desktop::{
-        MenuItem, popup_menu, set_application_menu, set_quit_mode, title_bar, window as app_window,
+        MenuItem, popup_menu, set_application_menu, set_quit_mode, window as app_window,
     },
     platform::Os,
     prelude::*,
@@ -773,22 +773,16 @@ fn toolbar(ui: Ui) -> impl IntoElement {
         }
         Page::Resource(service, _) => sidebar::service_title(service),
     };
-    let left_inset = move || {
-        if ui.sidebar.get() {
-            px(12.0)
-        } else {
-            title_bar().left + px(4.0)
-        }
-    };
-    view()
+    // nsh's TitleBar keeps the bar clear of the window's controls where it
+    // meets them: past the sidebar it needs no room for them, alone at the
+    // window's edge it steps aside.
+    let bar = view()
+        .flex_1()
         .flex_row()
         .items_center()
         .h(bar_height())
-        .pl(left_inset)
-        .pr(move || title_bar().right + px(10.0))
+        .px(px(10.0))
         .gap(px(6.0))
-        .bg(chrome_bg())
-        .window_drag(true)
         .child(when(
             move || !ui.sidebar.get(),
             move || {
@@ -883,7 +877,10 @@ fn toolbar(ui: Ui) -> impl IntoElement {
                     .hover(|s| s.bg(hover_bg()))
                     .child(icon(Icon::Menu, 17.0))
             },
-        ))
+        ));
+    view()
+        .bg(chrome_bg())
+        .child(nsh_base::title_bar().child(bar))
 }
 
 fn search_field(ui: Ui) -> impl IntoElement {

@@ -19,11 +19,9 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     let size = Rc::new(RefCell::new((100u16, 16u16)));
     let folder = signal(default_folder());
     let exited = signal(false);
-    // UTF-8 split across reads waits for its tail.
-    let carry = Rc::new(RefCell::new(Vec::<u8>::new()));
     // What the shell printed lately, shown again when the terminal's view is
     // made anew (hiding the panel takes the view away, not the shell).
-    let history = Rc::new(RefCell::new(String::new()));
+    let history = Rc::new(RefCell::new(Vec::<u8>::new()));
     // While the history is shown again, what the view would answer (a
     // cursor position report) is not the user's typing.
     let replaying = Rc::new(std::cell::Cell::new(false));
@@ -56,7 +54,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     };
     // Output, at the display's pace.
     {
-        let (shell, carry, history) = (shell.clone(), carry.clone(), history.clone());
+        let (shell, history) = (shell.clone(), history.clone());
         set_interval(Duration::from_millis(16), move || {
             let guard = shell.borrow();
             let Some(s) = guard.as_ref() else { return };
@@ -67,26 +65,23 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             if bytes.is_empty() {
                 return;
             }
-            let mut carry = carry.borrow_mut();
-            carry.extend(bytes);
-            let valid = carry.len() - incomplete_tail(&carry);
-            let rest = carry.split_off(valid);
-            let text = String::from_utf8_lossy(&carry).into_owned();
-            *carry = rest;
             {
                 let mut history = history.borrow_mut();
-                history.push_str(&text);
+                history.extend_from_slice(&bytes);
                 if history.len() > HISTORY {
+                    // From a line's start, so no sequence is cut in two.
                     let from = history.len() - HISTORY * 3 / 4;
-                    let cut = history[from..].find('\n').map_or(from, |n| from + n + 1);
-                    let cut = (cut..history.len())
-                        .find(|&i| history.is_char_boundary(i))
-                        .unwrap_or(history.len());
+                    let cut = history[from..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map_or(from, |n| from + n + 1);
                     history.drain(..cut);
                 }
             }
+            // The view takes the bytes as they come: a character or an
+            // escape split across reads is joined there.
             if let Some(api) = term.api::<TerminalApi>() {
-                api.write(text);
+                api.write_bytes(&bytes);
             }
         });
     }
@@ -239,11 +234,6 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             move || ui.terminal.set(false),
         ));
 
-    // The terminal mounts once the window has its size: laid out first at
-    // the tiny size the window's content starts at, its rows never caught
-    // up (a blank terminal, on GTK).
-    let ready = signal(false);
-    set_timeout(Duration::from_millis(150), move || ready.set(true));
     let on_data = Rc::new(on_data);
     let on_resize = Rc::new(on_resize);
     view()
@@ -254,7 +244,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         // Hidden, the view goes (laid out at no size, it would lose its lines);
         // shown again, a new one shows what the shell printed meanwhile.
         .child(when(
-            move || ready.get() && ui.terminal.get(),
+            move || ui.terminal.get(),
             move || {
                 let (on_data, on_resize) = (on_data.clone(), on_resize.clone());
                 let (history, replaying) = (history.clone(), replaying.clone());
@@ -271,7 +261,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                         let shown = history.borrow().clone();
                         if !shown.is_empty() {
                             replaying.set(true);
-                            api.write(shown);
+                            api.write_bytes(&shown);
                             replaying.set(false);
                         }
                     }
@@ -299,23 +289,4 @@ fn tilde(path: &std::path::Path) -> String {
         Some(h) if shown.starts_with(&h) => format!("~{}", &shown[h.len()..]),
         _ => shown,
     }
-}
-
-/// How many bytes at the end of `bytes` begin a UTF-8 character whose rest
-/// has not arrived yet.
-fn incomplete_tail(bytes: &[u8]) -> usize {
-    for back in 1..=bytes.len().min(3) {
-        let b = bytes[bytes.len() - back];
-        if b & 0xC0 == 0x80 {
-            continue; // a continuation byte: look further back
-        }
-        let needs = match b {
-            0xC0..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF7 => 4,
-            _ => 1,
-        };
-        return if needs > back { back } else { 0 };
-    }
-    0
 }
