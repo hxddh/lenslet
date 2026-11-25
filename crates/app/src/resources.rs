@@ -39,11 +39,16 @@ impl Refresher {
             self.notify.notified().await;
             tokio::time::sleep(SETTLE).await;
             let generation = session.generation();
+            let started = std::time::Instant::now();
             let groups = inventory(&emulator).await;
             // A fresh start during the refresh makes these stale.
             if session.generation() == generation {
                 session.set_resources(groups);
             }
+            // Under a stream of changes, look again only after resting as
+            // long as looking took: the calls themselves keep most of the
+            // engine.
+            tokio::time::sleep(started.elapsed().min(std::time::Duration::from_secs(5))).await;
         }
     }
 }

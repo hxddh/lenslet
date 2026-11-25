@@ -190,19 +190,23 @@ pub fn calls(ui: Ui) -> AnyElement {
         ms.align = nsh_base::DataTableAlign::End;
         let mut status = column("status", ts("Status", "状态"), 72.0, 56.0);
         status.align = nsh_base::DataTableAlign::End;
+        // The resource or error takes the room that is left, so the table
+        // fills its pane at any width.
+        let mut target = column(
+            "target",
+            ts("Resource or Error", "资源或错误"),
+            220.0,
+            120.0,
+        );
+        target.grow = Some(1.0);
         vec![
-            column("time", ts("Time", "时间"), 82.0, 70.0),
+            column("time", ts("Time", "时间"), 80.0, 70.0),
             status,
-            column("service", ts("Service", "服务"), 100.0, 60.0),
-            column("operation", ts("Operation", "操作"), 220.0, 80.0),
+            column("service", ts("Service", "服务"), 96.0, 60.0),
+            column("operation", ts("Operation", "操作"), 190.0, 80.0),
             ms,
-            column(
-                "target",
-                ts("Resource or Error", "资源或错误"),
-                300.0,
-                120.0,
-            ),
-            column("client", ts("Client", "客户端"), 130.0, 80.0),
+            target,
+            column("client", ts("Client", "客户端"), 120.0, 80.0),
         ]
     };
     let data = move || {
@@ -472,23 +476,14 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
                 }),
             )
     };
-    let scope = move |f: &dyn Fn(&Call) -> bool| {
+    let tally = move || {
         let run = ui.run();
-        ui.snap.with(|s| {
-            s.calls
-                .iter()
-                .filter(|c| (run.is_none() || c.run == run) && f(c))
-                .count()
-        })
+        ui.snap.with(|s| s.stats.of_run(run))
     };
-    let failed = move || scope(&|c: &Call| c.failed() && !c.unsupported);
-    let unsupported = move || scope(&|c: &Call| c.unsupported);
+    let failed = move || tally().failed;
+    let unsupported = move || tally().unsupported;
     let services = move || {
-        let mut names: Vec<String> = ui
-            .snap
-            .with(|s| s.calls.iter().map(|c| c.service.clone()).collect());
-        names.sort();
-        names.dedup();
+        let names: Vec<String> = ui.snap.with(|s| s.stats.services.iter().cloned().collect());
         let mut items = vec![SelectItem::new("", t("All Services", "全部服务"))];
         items.extend(
             names

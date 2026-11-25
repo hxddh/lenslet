@@ -163,19 +163,30 @@ impl Engine {
             .session
             .snapshot()
             .permissions
-            .into_iter()
-            .map(|p| p.access)
+            .iter()
+            .map(|p| p.access.clone())
             .collect();
         lenslet_core::policy::compile(&accesses)
     }
 
-    /// The variables that point SDKs and the AWS CLI at Lenslet.
+    /// The variables that point SDKs and the AWS CLI at Lenslet, from any
+    /// shell.
     pub fn env_vars(&self) -> Vec<(&'static str, String)> {
+        self.vars("lenslet")
+    }
+
+    /// The variables of the built-in terminal: its own access key, so its
+    /// commands' calls are told from everyone else's.
+    pub fn terminal_vars(&self) -> Vec<(&'static str, String)> {
+        self.vars(crate::session::TERMINAL_KEY)
+    }
+
+    fn vars(&self, key: &str) -> Vec<(&'static str, String)> {
         vec![
             ("AWS_ENDPOINT_URL", self.endpoint()),
             ("AWS_REGION", REGION.into()),
             ("AWS_DEFAULT_REGION", REGION.into()),
-            ("AWS_ACCESS_KEY_ID", "lenslet".into()),
+            ("AWS_ACCESS_KEY_ID", key.into()),
             ("AWS_SECRET_ACCESS_KEY", "lenslet".into()),
         ]
     }
@@ -223,6 +234,62 @@ impl Engine {
             }
             crate::observe::pause(true);
             let result = replay(&emulator, &session, run).await;
+            crate::observe::pause(false);
+            busy.store(false, Ordering::SeqCst);
+            refresher.poke();
+            let _ = tx.send(result);
+        });
+        async move {
+            rx.await
+                .unwrap_or_else(|_| Err("the engine stopped".into()))
+        }
+    }
+
+    /// The account as a file's text, to save it.
+    pub fn save_account(&self) -> Result<String, String> {
+        Ok(crate::account::to_json(&self.session.log()?))
+    }
+
+    /// Replace the account with the one saved in `text`: a new, empty
+    /// engine, and the calls that made the saved one sent to it again.
+    pub fn open_account(
+        &self,
+        text: String,
+    ) -> impl Future<Output = Result<Replayed, String>> + use<> {
+        let (emulator, session, refresher, busy) = (
+            self.emulator.clone(),
+            self.session.clone(),
+            self.refresher.clone(),
+            self.rewinding.clone(),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            use std::sync::atomic::Ordering;
+            let log = match crate::account::from_json(&text) {
+                Ok(log) => log,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            if busy.swap(true, Ordering::SeqCst) {
+                let _ = tx.send(Err("the account is already being rebuilt".into()));
+                return;
+            }
+            crate::observe::pause(true);
+            let fresh = (emulator.clone(), session.clone());
+            let result = match tokio::task::spawn_blocking(move || {
+                fresh.0.fresh();
+                fresh.1.fresh();
+            })
+            .await
+            {
+                Ok(()) => {
+                    session.adopt(log.clone());
+                    Ok(send_again(&emulator, &log, 200).await)
+                }
+                Err(_) => Err("could not start a new engine".to_string()),
+            };
             crate::observe::pause(false);
             busy.store(false, Ordering::SeqCst);
             refresher.poke();
@@ -292,13 +359,23 @@ async fn replay(emulator: &Emulator, session: &Session, run: u64) -> Result<Repl
     tokio::task::spawn_blocking(move || fresh.fresh())
         .await
         .map_err(|_| "could not start a new engine".to_string())?;
+    Ok(send_again(emulator, &log, 3000).await)
+}
+
+/// Send `log` to the emulator again, in order, keeping the gaps between
+/// the calls up to `max_gap_ms`, then let what they set off finish.
+async fn send_again(
+    emulator: &Emulator,
+    log: &[crate::session::Sent],
+    max_gap_ms: u64,
+) -> Replayed {
     let mut replayed = Replayed::default();
     for (i, sent) in log.iter().enumerate() {
         // Keep the session's pace, up to a few seconds a gap: what the code
         // waited for (a table, a function becoming ready) is ready again
         // before the next call.
         if let Some(previous) = i.checked_sub(1).map(|p| log[p].at_ms) {
-            let gap = sent.at_ms.saturating_sub(previous).min(3000);
+            let gap = sent.at_ms.saturating_sub(previous).min(max_gap_ms);
             tokio::time::sleep(std::time::Duration::from_millis(gap)).await;
         }
         // Each call succeeded the first time. Sent again sooner than it was,
@@ -330,5 +407,5 @@ async fn replay(emulator: &Emulator, session: &Session, run: u64) -> Result<Repl
     while !crate::observe::settled(1500) && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    Ok(replayed)
+    replayed
 }

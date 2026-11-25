@@ -232,6 +232,7 @@ mod tests {
             attempt: None,
             max_attempts: None,
             invocation: None,
+            key: None,
             request_id: None,
             request: Exchange {
                 headers: vec![

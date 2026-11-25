@@ -50,6 +50,8 @@ pub struct Call {
     pub max_attempts: Option<u32>,
     /// The SDK's id of the invocation, the same on every retry of it.
     pub invocation: Option<String>,
+    /// The access key it was signed with, if any.
+    pub key: Option<String>,
     /// The id the service gave the request.
     pub request_id: Option<String>,
     pub request: Exchange,
@@ -165,6 +167,33 @@ pub struct Sent {
     pub body: bytes::Bytes,
 }
 
+/// The access key the built-in terminal's programs sign with: their calls,
+/// and only theirs, make up a run.
+pub const TERMINAL_KEY: &str = "lenslet-terminal";
+
+/// The access key ids in a response (STS's AssumeRole and the like, in XML
+/// or JSON).
+fn vended_keys(body: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (open, close) in [
+        ("<AccessKeyId>", "</AccessKeyId>"),
+        ("\"AccessKeyId\":\"", "\""),
+        ("\"AccessKeyId\": \"", "\""),
+    ] {
+        let mut rest = body;
+        while let Some(at) = rest.find(open) {
+            rest = &rest[at + open.len()..];
+            let Some(end) = rest.find(close) else { break };
+            let key = rest[..end].trim();
+            if !key.is_empty() && key.len() <= 128 {
+                keys.push(key.to_string());
+            }
+            rest = &rest[end..];
+        }
+    }
+    keys
+}
+
 /// The most calls the list keeps; older ones go first.
 const MAX_CALLS: usize = 20_000;
 /// The most request bytes kept to rebuild the account; past it, rewinding is
@@ -187,7 +216,13 @@ struct Inner {
     next_run: u64,
     /// The run of the command running now.
     current: Option<u64>,
+    /// The access keys the terminal's programs sign with: its own, and the
+    /// ones AWS handed them (an assumed role's).
+    terminal_keys: std::collections::HashSet<String>,
     permissions: BTreeMap<Access, Vec<usize>>,
+    /// `permissions` as the last snapshot had them, until they change.
+    permissions_shown: Option<Arc<Vec<Permission>>>,
+    stats: Arc<Stats>,
     resources: Arc<Vec<Group>>,
     generation: u64,
     version: u64,
@@ -207,6 +242,62 @@ pub struct Session {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// How many calls, failed calls and calls the emulator does not serve.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tally {
+    pub calls: usize,
+    pub failed: usize,
+    pub unsupported: usize,
+}
+
+impl Tally {
+    fn add(&mut self, call: &Call) {
+        self.calls += 1;
+        if call.unsupported {
+            self.unsupported += 1;
+        } else if call.failed() {
+            self.failed += 1;
+        }
+    }
+}
+
+/// Counts kept as calls arrive, so the window never counts them itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stats {
+    pub all: Tally,
+    pub runs: std::collections::HashMap<u64, Tally>,
+    /// The services the calls went to.
+    pub services: std::collections::BTreeSet<String>,
+}
+
+impl Stats {
+    fn add(&mut self, call: &Call) {
+        self.all.add(call);
+        if let Some(run) = call.run {
+            self.runs.entry(run).or_default().add(call);
+        }
+        if !self.services.contains(&call.service) {
+            self.services.insert(call.service.clone());
+        }
+    }
+
+    fn of(calls: &[Arc<Call>]) -> Stats {
+        let mut stats = Stats::default();
+        for call in calls {
+            stats.add(call);
+        }
+        stats
+    }
+
+    /// The tally of the run `run`, or of every call.
+    pub fn of_run(&self, run: Option<u64>) -> Tally {
+        match run {
+            Some(run) => self.runs.get(&run).copied().unwrap_or_default(),
+            None => self.all,
+        }
+    }
+}
+
 /// The session at one version.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
@@ -214,7 +305,8 @@ pub struct Snapshot {
     pub calls: Vec<Arc<Call>>,
     pub runs: Vec<Run>,
     pub resources: Arc<Vec<Group>>,
-    pub permissions: Vec<Permission>,
+    pub permissions: Arc<Vec<Permission>>,
+    pub stats: Arc<Stats>,
     pub generation: u64,
 }
 
@@ -247,14 +339,32 @@ impl Session {
         inner.next_seq += 1;
         call.generation = inner.generation;
         // A call belongs to the run of the call it happened inside, else to
-        // the command running now.
+        // the command running now when the terminal sent it: signed with one
+        // of the terminal's keys (a call with no key could be anyone's, as
+        // a curl: the command's, while it runs).
+        let terminal = match &call.key {
+            Some(key) => key == TERMINAL_KEY || inner.terminal_keys.contains(key),
+            None => true,
+        };
         if call.run.is_none() {
             call.run = call
                 .parent
                 .and_then(|p| inner.by_id.get(&p))
                 .and_then(|&seq| inner.find(seq))
                 .and_then(|c| c.run)
-                .or(inner.current);
+                .or(if terminal && !call.internal {
+                    inner.current
+                } else {
+                    None
+                });
+        }
+        // Keys AWS hands the terminal's programs are the terminal's too.
+        if call.key.is_some() && terminal && call.status < 400 {
+            for key in vended_keys(&call.response.body) {
+                if inner.terminal_keys.len() < 10_000 {
+                    inner.terminal_keys.insert(key);
+                }
+            }
         }
         if call.id != 0 {
             let seq = call.seq;
@@ -266,12 +376,17 @@ impl Session {
                 calls.push(call.seq);
             }
         }
+        if !call.access.is_empty() {
+            inner.permissions_shown = None;
+        }
+        Arc::make_mut(&mut inner.stats).add(&call);
         inner.calls.push(Arc::new(call));
         if inner.calls.len() > MAX_CALLS {
             let gone: Vec<u64> = inner.calls.drain(..MAX_CALLS / 10).map(|c| c.id).collect();
             for id in gone {
                 inner.by_id.remove(&id);
             }
+            inner.stats = Arc::new(Stats::of(&inner.calls));
         }
         inner.version += 1;
     }
@@ -336,6 +451,7 @@ impl Session {
         }
         inner.generation += 1;
         inner.permissions.clear();
+        inner.permissions_shown = None;
         inner.resources = Arc::default();
         inner.version += 1;
     }
@@ -360,6 +476,24 @@ impl Session {
             return;
         }
         inner.log.push(sent);
+    }
+
+    /// What changed the account since it was empty, to save it.
+    pub fn log(&self) -> Result<Vec<Sent>, String> {
+        let inner = self.lock();
+        if inner.log_broken {
+            return Err("the session sent too much data to keep the account; start a new account to save one".into());
+        }
+        Ok(inner.log.clone())
+    }
+
+    /// The account, newly empty, is being built from `log`: it is what
+    /// made it.
+    pub fn adopt(&self, log: Vec<Sent>) {
+        let mut inner = self.lock();
+        inner.log_bytes = log.iter().map(|s| s.body.len()).sum();
+        inner.log = log;
+        inner.version += 1;
     }
 
     /// Whether the account can go back to before the run `id`.
@@ -418,6 +552,8 @@ impl Session {
         inner.calls.clear();
         inner.by_id.clear();
         inner.permissions.clear();
+        inner.permissions_shown = None;
+        inner.stats = Arc::default();
         let current = inner.current;
         inner.runs.retain(|r| Some(r.id) == current);
         inner.version += 1;
@@ -425,23 +561,34 @@ impl Session {
 
     /// The session, when it changed since `version`.
     pub fn snapshot_since(&self, version: Option<u64>) -> Option<Snapshot> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         if version == Some(inner.version) {
             return None;
         }
+        let permissions = match &inner.permissions_shown {
+            Some(shown) => shown.clone(),
+            None => {
+                let shown: Arc<Vec<Permission>> = Arc::new(
+                    inner
+                        .permissions
+                        .iter()
+                        .map(|(access, calls)| Permission {
+                            access: access.clone(),
+                            calls: calls.clone(),
+                        })
+                        .collect(),
+                );
+                inner.permissions_shown = Some(shown.clone());
+                shown
+            }
+        };
         Some(Snapshot {
             version: inner.version,
             calls: inner.calls.clone(),
             runs: inner.runs.clone(),
             resources: inner.resources.clone(),
-            permissions: inner
-                .permissions
-                .iter()
-                .map(|(access, calls)| Permission {
-                    access: access.clone(),
-                    calls: calls.clone(),
-                })
-                .collect(),
+            permissions,
+            stats: inner.stats.clone(),
             generation: inner.generation,
         })
     }
@@ -606,6 +753,30 @@ mod tests {
     }
 
     #[test]
+    fn a_run_holds_the_terminals_calls_only() {
+        let session = Session::default();
+        let run = session.start_run("pytest".into());
+        let signed = |key: &str| {
+            let mut c = call("sqs", None);
+            c.key = Some(key.into());
+            c
+        };
+        session.record(signed(TERMINAL_KEY));
+        // Another program, at the same time: not the run's.
+        session.record(signed("lenslet"));
+        // The terminal assumes a role: its keys are the terminal's too.
+        let mut assumed = signed(TERMINAL_KEY);
+        assumed.response.body =
+            "<Credentials><AccessKeyId>ASIAROLE</AccessKeyId></Credentials>".into();
+        session.record(assumed);
+        session.record(signed("ASIAROLE"));
+        // No key at all (a curl): the command's while it runs.
+        session.record(call("s3", None));
+        let runs: Vec<_> = session.snapshot().calls.iter().map(|c| c.run).collect();
+        assert_eq!(runs, vec![Some(run), None, Some(run), Some(run), Some(run)]);
+    }
+
+    #[test]
     fn a_run_left_open_ends_when_the_next_starts() {
         let session = Session::default();
         let one = session.start_run("exit".into());
@@ -641,6 +812,7 @@ mod tests {
             attempt: None,
             max_attempts: None,
             invocation: None,
+            key: None,
             request_id: None,
             request: Exchange::default(),
             response: Exchange::default(),

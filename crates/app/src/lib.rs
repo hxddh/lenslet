@@ -2,9 +2,11 @@
 //! it on one local endpoint, runs your commands in a terminal pointed at it,
 //! and shows every call, what exists, and the IAM permissions used.
 
+pub mod account;
 pub mod copy_as;
 pub mod emulator;
 pub mod engine;
+pub mod gaps;
 pub mod observe;
 pub mod resources;
 pub mod server;

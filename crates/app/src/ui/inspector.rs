@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nsh_core::prelude::*;
 
-use super::{CopyAs, Tab, Ui, calls, sidebar::service_title, style::*, t, ts};
+use super::{CopyAs, Lang, Tab, Ui, calls, lang, sidebar::service_title, style::*, t, ts};
 use crate::{resources::clock, session::Call};
 
 pub fn inspector(ui: Ui) -> impl IntoElement {
@@ -500,6 +500,89 @@ fn failure_box(call: Held) -> impl IntoElement {
                     .text_color(secondary_text())
             },
         ))
+        .child(known_gap(call))
+}
+
+/// Whether AWS Emulator is known to get this call wrong: then the failure
+/// may be the emulator's, not your code's.
+fn known_gap(call: Held) -> impl IntoElement {
+    let known = computed(move || {
+        call.with(|c| {
+            let c = &c.as_ref()?.0;
+            crate::gaps::known(
+                &c.service,
+                &c.operation,
+                c.failure.as_ref().map(|f| f.code.as_str()),
+            )
+        })
+    });
+    when(
+        move || known.with(|k| k.is_some()),
+        move || {
+            view()
+                .gap(px(4.0))
+                .mt(px(4.0))
+                .pt(px(6.0))
+                .border_t_1()
+                .border_color(separator())
+                .child(
+                    text(move || {
+                        known.with(|k| {
+                            let Some(k) = k else { return String::new() };
+                            let op = call.with(|c| {
+                                c.as_ref()
+                                    .map(|c| c.0.operation.clone())
+                                    .unwrap_or_default()
+                            });
+                            let code = call.with(|c| {
+                                c.as_ref()
+                                    .and_then(|c| c.0.failure.as_ref().map(|f| f.code.clone()))
+                                    .unwrap_or_default()
+                            });
+                            // Only an operation the emulator does not do yet is
+                            // surely its fault; otherwise this is what it is known
+                            // to get wrong there, for you to weigh.
+                            let missing = k.exact && code == "NotImplemented";
+                            match (missing, k.exact, lang().get()) {
+                                (true, _, Lang::Zh) => format!("AWS Emulator 还没有实现这个操作：{}", k.title),
+                                (true, _, Lang::En) => format!("AWS Emulator does not do this yet: {}", k.title),
+                                (false, true, Lang::Zh) => format!(
+                                    "AWS Emulator 列出了 {op} 返回 {code} 时的已知差异：{}",
+                                    k.title
+                                ),
+                                (false, true, Lang::En) => format!(
+                                    "AWS Emulator lists a known difference from AWS for {op} answering {code}: {}",
+                                    k.title
+                                ),
+                                (false, false, Lang::Zh) => format!(
+                                    "AWS Emulator 列出了 {op} 的 {} 个已知差异，例如：{}",
+                                    k.count, k.title
+                                ),
+                                (false, false, Lang::En) => format!(
+                                    "AWS Emulator lists {} known differences from AWS in {op}, such as: {}",
+                                    k.count, k.title
+                                ),
+                            }
+                        })
+                    })
+                    .text_size(small())
+                    .selectable(true),
+                )
+                .child(
+                    nsh_base::button()
+                        .on_press(move || {
+                            if let Some(k) = known.get_untracked() {
+                                drop(open_url(&k.url));
+                            }
+                        })
+                        .child(
+                            text(move || ts("Open the issue", "查看这个问题"))
+                                .text_size(small())
+                                .text_color(accent()),
+                        ),
+                )
+        },
+    )
 }
 
 fn exchange(call: Held, request: bool) -> impl IntoElement {

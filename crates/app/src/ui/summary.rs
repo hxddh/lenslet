@@ -40,20 +40,22 @@ impl Summary {
             .get(((ms.len() as f64 - 1.0) * 0.95).round().max(0.0) as usize)
             .copied()
             .unwrap_or(0);
+        // The first few, in order, and how many more: a set, not a scan of
+        // the list, so thousands of objects stay cheap.
         let mut changed: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for c in &scope {
             if changes_resources(c) && !c.unsupported {
                 let what = c
                     .target
                     .clone()
                     .unwrap_or_else(|| format!("{} {}", service_title(&c.service), c.operation));
-                if !changed.contains(&what) {
+                if seen.insert(what.clone()) && changed.len() < 6 {
                     changed.push(what);
                 }
             }
         }
-        let more_changed = changed.len().saturating_sub(6);
-        changed.truncate(6);
+        let more_changed = seen.len() - changed.len();
         let mut accesses: Vec<_> = scope
             .iter()
             .flat_map(|c| c.access.iter().cloned())

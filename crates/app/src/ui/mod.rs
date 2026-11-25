@@ -22,8 +22,10 @@ use std::{
 
 use nsh_base::DataTableSort;
 use nsh_core::{
-    desktop::{Backdrop, MenuRole, TitleBarOptions, TitleBarStyle, WindowAttributes},
-    element::desktop::{MenuItem, main_window, popup_menu, set_application_menu, title_bar},
+    desktop::{Backdrop, MenuRole, QuitMode, TitleBarOptions, TitleBarStyle, WindowAttributes},
+    element::desktop::{
+        MenuItem, popup_menu, set_application_menu, set_quit_mode, window as app_window,
+    },
     platform::Os,
     prelude::*,
 };
@@ -195,8 +197,17 @@ impl Ui {
     }
 
     pub fn copy(&self, what: String, said: &'static str, said_zh: &'static str) {
-        set_clipboard(what);
-        self.say(t(said, said_zh));
+        // The system says whether the copy reached it.
+        let copied = set_clipboard(what);
+        let ui = *self;
+        self.spawn(async move {
+            match copied.await {
+                nsh_core::element::ClipboardWrite::Failed => {
+                    ui.say(t("Could not copy", "无法复制"))
+                }
+                _ => ui.say(t(said, said_zh)),
+            }
+        });
     }
 
     /// Show a call in the list and the inspector.
@@ -365,6 +376,75 @@ impl Ui {
         });
     }
 
+    /// Keep the account in a file, to open again later or elsewhere.
+    pub fn save_account(&self) {
+        let ui = *self;
+        let saved = match engine().save_account() {
+            Ok(saved) => saved,
+            Err(e) => return self.say(e),
+        };
+        ui.spawn(async move {
+            let dialog = nsh_core::file_dialog::SaveDialog::new()
+                .file_name("account.lenslet.json")
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    t("Lenslet account", "Lenslet 账户"),
+                    ["json"],
+                ))
+                .button_label(t("Save", "保存"));
+            if let Ok(Some(path)) = pick_save_path(dialog).await {
+                match std::fs::write(&path, saved) {
+                    Ok(()) => ui.say(t("Saved the account", "已保存账户")),
+                    Err(e) => ui.say(e.to_string()),
+                }
+            }
+        });
+    }
+
+    /// Replace the account with one saved before: its resources are built
+    /// again, in a new engine.
+    pub fn open_account(&self) {
+        let ui = *self;
+        ui.spawn(async move {
+            let dialog = nsh_core::file_dialog::OpenDialog::files()
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    t("Lenslet account", "Lenslet 账户"),
+                    ["json"],
+                ))
+                .button_label(t("Open", "打开"));
+            let Ok(Some(paths)) = pick_paths(dialog).await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => return ui.say(e.to_string()),
+            };
+            if let Page::Resource(..) = ui.page.get_untracked() {
+                ui.page.set(Page::Activity);
+            }
+            ui.hold(ts("Opening the account…", "正在打开账户…"));
+            match engine().open_account(text).await {
+                Ok(r) if r.failed == 0 => ui.say(format!(
+                    "{} {} {}",
+                    t("Opened the account: replayed", "已打开账户：重放了"),
+                    r.sent,
+                    t("calls", "次调用")
+                )),
+                Ok(r) => ui.say(format!(
+                    "{} {} {}, {} {}",
+                    t("Opened the account: replayed", "已打开账户：重放了"),
+                    r.sent,
+                    t("calls", "次调用"),
+                    r.failed,
+                    t("failed", "次失败")
+                )),
+                Err(e) => ui.say(e),
+            }
+        });
+    }
+
     pub fn export_session(&self) {
         let ui = *self;
         let calls = self.snap.with_untracked(|s| s.calls.clone());
@@ -464,13 +544,20 @@ pub fn App() -> impl IntoElement {
     if matches!(os(), Os::MacOs | Os::Windows) {
         attributes.backdrop = Some(Backdrop::Sidebar);
     }
-    // The root renders in the platform's main window, which the platform
-    // opens and keeps the place of; a `window()` here would open a second.
-    main_window().set(attributes);
-    match &started {
-        Ok(_) => workbench(),
-        Err(error) => cannot_start(error.clone()),
-    }
+    // One window, the app: closing it quits Lenslet on every platform (the
+    // account lives in memory, there is nothing to come back to). The
+    // platform's own host window stays hidden.
+    set_quit_mode(QuitMode::LastWindowClosed);
+    app_window()
+        .id("main")
+        .title("Lenslet")
+        .default_size(size(px(1320.0), px(840.0)))
+        .restore_bounds(true)
+        .attributes(attributes)
+        .content(move || match &started {
+            Ok(_) => workbench(),
+            Err(error) => cannot_start(error.clone()),
+        })
 }
 
 fn cannot_start(error: String) -> AnyElement {
@@ -517,9 +604,18 @@ fn workbench() -> AnyElement {
     // Take the session when it changed: a pointer copy, not the bodies.
     {
         let version = std::cell::Cell::new(None::<u64>);
+        let taken = std::cell::Cell::new(std::time::Instant::now());
         set_interval(Duration::from_millis(80), move || {
+            // A large session is redrawn less often while calls stream in,
+            // so the window keeps up with the hand rather than the calls.
+            let calls = ui.snap.with_untracked(|s| s.calls.len());
+            let pace = Duration::from_millis(80 + (calls as u64 / 40).min(420));
+            if taken.get().elapsed() < pace {
+                return;
+            }
             if let Some(next) = engine().snapshot_since(version.get()) {
                 version.set(Some(next.version));
+                taken.set(std::time::Instant::now());
                 ui.snap.set(Rc::new(next));
             }
         });
@@ -565,12 +661,7 @@ fn workbench() -> AnyElement {
     }
     // The Dock's badge counts the failed calls.
     effect(move || {
-        let failed = ui.snap.with(|s| {
-            s.calls
-                .iter()
-                .filter(|c| c.failed() && !c.unsupported)
-                .count()
-        });
+        let failed = ui.snap.with(|s| s.stats.all.failed);
         set_badge(failed as u32);
     });
     let rewindable = computed(move || match ui.page.get() {
@@ -682,22 +773,16 @@ fn toolbar(ui: Ui) -> impl IntoElement {
         }
         Page::Resource(service, _) => sidebar::service_title(service),
     };
-    let left_inset = move || {
-        if ui.sidebar.get() {
-            px(12.0)
-        } else {
-            title_bar().left + px(4.0)
-        }
-    };
-    view()
+    // nsh's TitleBar keeps the bar clear of the window's controls where it
+    // meets them: past the sidebar it needs no room for them, alone at the
+    // window's edge it steps aside.
+    let bar = view()
+        .flex_1()
         .flex_row()
         .items_center()
         .h(bar_height())
-        .pl(left_inset)
-        .pr(move || title_bar().right + px(10.0))
+        .px(px(10.0))
         .gap(px(6.0))
-        .bg(chrome_bg())
-        .window_drag(true)
         .child(when(
             move || !ui.sidebar.get(),
             move || {
@@ -792,7 +877,10 @@ fn toolbar(ui: Ui) -> impl IntoElement {
                     .hover(|s| s.bg(hover_bg()))
                     .child(icon(Icon::Menu, 17.0))
             },
-        ))
+        ));
+    view()
+        .bg(chrome_bg())
+        .child(nsh_base::title_bar().child(bar))
 }
 
 fn search_field(ui: Ui) -> impl IntoElement {
@@ -899,14 +987,30 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     }
     let mut file = vec![
         key(
+            MenuItem::new(t("Open Account…", "打开账户…")),
+            "cmd+o",
+            Some("ctrl+shift+o"),
+        )
+        .on_select(move || ui.open_account()),
+        key(
+            MenuItem::new(t("Save Account…", "保存账户…")),
+            "cmd+s",
+            Some("ctrl+shift+s"),
+        )
+        .on_select(move || ui.save_account()),
+        MenuItem::separator(),
+        key(
             MenuItem::new(t("Export Session…", "导出会话…")),
             "cmd+e",
             Some("ctrl+shift+e"),
         )
         .on_select(move || ui.export_session()),
-        MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…"))
-            .shortcut("mod+shift+s")
-            .on_select(move || ui.save_policy()),
+        key(
+            MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…")),
+            "cmd+shift+s",
+            None,
+        )
+        .on_select(move || ui.save_policy()),
         MenuItem::separator(),
         key(
             MenuItem::new(t("Copy Environment", "复制环境变量")),

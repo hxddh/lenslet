@@ -18,9 +18,15 @@ inside AWS:
   to DynamoDB, and why one was denied. Deliveries, triggers and your
   functions' code are all there. On AWS this takes CloudTrail, X-Ray and
   CloudWatch together.
+- **Your code or the emulator?** When a call fails, Lenslet says whether
+  AWS Emulator is known to differ from AWS there, from the emulator's own
+  list of what it does not do yet, with a link to the issue.
 - **Fix it, then go back and run it again.** A function denied by its role?
   One click allows the role what it needed. Rewind puts the account back as
   it was before any run. Run Again repeats the command.
+- **Keep the account.** Save the account to a file and open it again later,
+  or on a teammate's machine: Lenslet builds it again from the calls that
+  made it.
 - **Every resource, opened.** Buckets, tables, queues, topics, functions, log
   groups, secrets and parameters, with their counts as they change. Open one
   to see what it holds and every call that touched it.
@@ -39,7 +45,7 @@ Lenslet from, with these already set:
 ```bash
 AWS_ENDPOINT_URL=http://127.0.0.1:4510
 AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=lenslet
+AWS_ACCESS_KEY_ID=lenslet-terminal
 AWS_SECRET_ACCESS_KEY=lenslet
 ```
 
@@ -59,15 +65,18 @@ account. If port 4510 is taken, Lenslet takes a free port and shows it; set
 `LENSLET_PORT` to choose one.
 
 Runs come from the terminal's shell integration (bash and zsh): Lenslet adds
-marks around each command, after your own startup files. Calls from other
-shells and programs appear under All Activity.
+marks around each command, after your own startup files. A run holds only
+the terminal's calls, told by the access key they are signed with (and the
+keys AWS hands the terminal's programs, as an assumed role's). Calls from
+other shells and programs appear under All Activity.
 
 Every command is in the menu bar (macOS) or the main menu (☰), with its
 shortcut, and on the context menu of what it acts on: Find (⌘F), Clear Calls
-(⌘K), New Empty Account (⇧⌘N), Copy as AWS CLI (⇧⌘C), Export Session (⌘E),
-Save IAM Policy (⇧⌘S). On Linux and Windows the shortcuts that the terminal's
-shell needs take Ctrl+Shift instead (Find is Ctrl+Shift+F, Clear Calls
-Ctrl+Shift+K), so Ctrl+R, Ctrl+K and the rest still reach your shell.
+(⌘K), New Empty Account (⇧⌘N), Open Account (⌘O), Save Account (⌘S), Copy as
+AWS CLI (⇧⌘C), Export Session (⌘E), Save IAM Policy (⇧⌘S). On Linux and
+Windows the shortcuts that the terminal's shell needs take Ctrl+Shift
+instead (Find is Ctrl+Shift+F, Save Account Ctrl+Shift+S), so Ctrl+R, Ctrl+K
+and the rest still reach your shell.
 
 ## Services
 
@@ -75,8 +84,9 @@ S3, DynamoDB, SQS, SNS, STS, IAM, KMS, Lambda, Secrets Manager, SSM
 Parameter Store, EventBridge, CloudWatch Logs, Step Functions and Kinesis.
 
 The account is `000000000000` in `us-east-1`. It lives in memory: quitting
-Lenslet or starting a new empty account throws it away. Request signatures are
-not checked, so any credentials work.
+Lenslet or starting a new empty account throws it away, unless you save it
+(File → Save Account). Request signatures are not checked, so any
+credentials work.
 
 ## Install
 
@@ -116,7 +126,10 @@ permissions it needs on which resources, and why it failed. The observer
 patch reports the calls AWS makes inside the emulator too; Lenslet hangs each
 under its cause, on the same task, or through the X-Ray tracing header AWS
 carries onto everything a call causes. Rewind sends the calls that changed
-the account again, in order, to a new engine. After a call
+the account again, in order, to a new engine; a saved account is those
+calls in a file, and opening it sends them the same way. The build indexes
+AWS Emulator's `issues/things-that-do-not-work/` by service and operation
+for the known differences a failed call shows. After a call
 that changes something, Lenslet asks the emulator for its resources with the
 services' own List operations, and opens a resource with their Describe and Get
 operations. A new empty account swaps in a new, empty engine. The terminal
