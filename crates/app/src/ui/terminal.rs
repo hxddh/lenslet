@@ -34,7 +34,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             let (cols, rows) = *size.borrow();
             match Shell::start(
                 folder.get_untracked(),
-                &engine().env_vars(),
+                &engine().terminal_vars(),
                 cols,
                 rows,
                 engine().on_mark(),

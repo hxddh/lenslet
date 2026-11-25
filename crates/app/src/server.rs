@@ -251,6 +251,7 @@ pub fn record(
         attempt: info.attempt,
         max_attempts: info.max_attempts,
         invocation: info.invocation_id.clone(),
+        key: info.access_key_id.clone(),
         request_id: ["x-amzn-requestid", "x-amz-request-id", "x-amz-id-2"]
             .iter()
             .find_map(|name| header(&response.headers, name)),

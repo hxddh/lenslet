@@ -169,13 +169,24 @@ impl Engine {
         lenslet_core::policy::compile(&accesses)
     }
 
-    /// The variables that point SDKs and the AWS CLI at Lenslet.
+    /// The variables that point SDKs and the AWS CLI at Lenslet, from any
+    /// shell.
     pub fn env_vars(&self) -> Vec<(&'static str, String)> {
+        self.vars("lenslet")
+    }
+
+    /// The variables of the built-in terminal: its own access key, so its
+    /// commands' calls are told from everyone else's.
+    pub fn terminal_vars(&self) -> Vec<(&'static str, String)> {
+        self.vars(crate::session::TERMINAL_KEY)
+    }
+
+    fn vars(&self, key: &str) -> Vec<(&'static str, String)> {
         vec![
             ("AWS_ENDPOINT_URL", self.endpoint()),
             ("AWS_REGION", REGION.into()),
             ("AWS_DEFAULT_REGION", REGION.into()),
-            ("AWS_ACCESS_KEY_ID", "lenslet".into()),
+            ("AWS_ACCESS_KEY_ID", key.into()),
             ("AWS_SECRET_ACCESS_KEY", "lenslet".into()),
         ]
     }
