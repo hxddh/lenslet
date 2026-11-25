@@ -20,6 +20,10 @@ use crate::{
     session::{Call, Exchange, Failure, Session, now_ms},
 };
 
+/// The largest body read as text (to find what a call names); larger ones
+/// are data, as an object's.
+const MAX_TEXT: usize = 32 * 1024 * 1024;
+
 /// The most body text a call keeps for the window.
 const MAX_BODY: usize = 256 * 1024;
 
@@ -65,6 +69,17 @@ async fn handle(
     session: Session,
     refresher: Refresher,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    // Only this machine's names: a web page whose name was made to point at
+    // 127.0.0.1 (DNS rebinding) must not reach the account.
+    if !loopback_host(request.headers().get(http::header::HOST)) {
+        return Ok(Response::builder()
+            .status(403)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(Full::new(Bytes::from_static(
+                b"Lenslet serves this machine only: use 127.0.0.1 or localhost.\n",
+            )))
+            .expect("static response"));
+    }
     // A browser or a readiness check, not an AWS SDK: say what this is.
     if request.method() == http::Method::GET
         && request.uri().path() == "/"
@@ -109,6 +124,9 @@ async fn handle(
         sent.headers.insert("x-amzn-trace-id", value);
     }
     crate::observe::chain_started(&sent.headers, id);
+    let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+    let key = lenslet_core::wire::wire_info(&parts.headers, path).access_key_id;
+    session.arrive(id, key.as_deref());
     let request = http::Request::from_parts(sent, body.clone());
     // The account this call goes to; a new account started meanwhile does not
     // get it in its log.
@@ -148,6 +166,27 @@ async fn handle(
     }
     session.record(call);
     Ok(Response::from_parts(rparts, Full::new(rbody)))
+}
+
+/// Whether a request's `Host` names this machine: 127.0.0.1, ::1,
+/// localhost or a name under it (an S3 bucket's virtual host). A request
+/// with no `Host` (HTTP/1.0) comes from a local client.
+pub fn loopback_host(host: Option<&http::HeaderValue>) -> bool {
+    let Some(host) = host.and_then(|h| h.to_str().ok()) else {
+        return host.is_none();
+    };
+    let name = match host.strip_prefix('[') {
+        // [::1]:4510
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name == "::1"
+        || name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// What a request was: its method, address and headers.
@@ -283,6 +322,10 @@ fn text_of(body: &Bytes, content_type: Option<&str>) -> String {
     if body.is_empty() {
         return String::new();
     }
+    // An object's data, not a request to read: never copied whole.
+    if body.len() > MAX_TEXT {
+        return format!("({} bytes)", body.len());
+    }
     if content_type.is_some_and(|t| t.contains("cbor"))
         && let Some(json) = cbor::decode_cbor_json(body)
     {
@@ -295,6 +338,12 @@ fn text_of(body: &Bytes, content_type: Option<&str>) -> String {
 }
 
 fn body_trace(body: &Bytes, text: &str) -> Option<BodyTrace> {
+    if body.len() > MAX_TEXT {
+        return Some(BodyTrace {
+            bytes: body.len() as u64,
+            ..Default::default()
+        });
+    }
     (!body.is_empty()).then(|| BodyTrace {
         text: std::str::from_utf8(body)
             .is_ok()
@@ -378,4 +427,23 @@ pub fn changes_resources(call: &Call) -> bool {
             })
         });
     !read && call.status < 400
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_this_machines_names_are_served() {
+        let ok = |h: &str| loopback_host(Some(&http::HeaderValue::from_str(h).unwrap()));
+        assert!(ok("127.0.0.1:4510"));
+        assert!(ok("localhost:4510"));
+        assert!(ok("shop.localhost:4510"));
+        assert!(ok("[::1]:4510"));
+        assert!(ok("127.0.0.1"));
+        assert!(!ok("evil.example:4510"));
+        assert!(!ok("192.168.1.5:4510"));
+        assert!(!ok("localhost.evil.example"));
+        assert!(loopback_host(None));
+    }
 }

@@ -167,6 +167,22 @@ pub struct Sent {
     pub body: bytes::Bytes,
 }
 
+impl Sent {
+    /// About how much memory it takes: its body and headers.
+    fn size(&self) -> usize {
+        self.body.len()
+            + self.uri.to_string().len()
+            + self
+                .headers
+                .iter()
+                .map(|(n, v)| n.as_str().len() + v.len() + 8)
+                .sum::<usize>()
+    }
+}
+
+/// The most calls the account's history keeps, whatever their size.
+const MAX_LOG_CALLS: usize = 200_000;
+
 /// The access key the built-in terminal's programs sign with: their calls,
 /// and only theirs, make up a run.
 pub const TERMINAL_KEY: &str = "lenslet-terminal";
@@ -219,9 +235,12 @@ struct Inner {
     /// The access keys the terminal's programs sign with: its own, and the
     /// ones AWS handed them (an assumed role's).
     terminal_keys: std::collections::HashSet<String>,
+    /// The run of each call from outside still being served, decided as it
+    /// arrived: the calls AWS makes inside it end, and are recorded, first.
+    arriving: std::collections::HashMap<u64, Option<u64>>,
+    /// The caller of each call AWS makes, while its caller is not recorded.
+    callers: std::collections::HashMap<u64, u64>,
     permissions: BTreeMap<Access, Vec<usize>>,
-    /// `permissions` as the last snapshot had them, until they change.
-    permissions_shown: Option<Arc<Vec<Permission>>>,
     stats: Arc<Stats>,
     resources: Arc<Vec<Group>>,
     generation: u64,
@@ -234,6 +253,39 @@ impl Inner {
             .binary_search_by_key(&seq, |c| c.seq)
             .ok()
             .map(|i| &self.calls[i])
+    }
+
+    /// When the run `id` started, if the account can go back to then.
+    fn rewind_start(&self, id: u64) -> Result<u64, String> {
+        if self.log_broken {
+            return Err(
+                "the session sent too much data to rewind; start a new account to rewind again"
+                    .into(),
+            );
+        }
+        let run = self.runs.iter().find(|r| r.id == id).ok_or("no such run")?;
+        if run.undone {
+            return Err("what this command did is no longer in the account".into());
+        }
+        if run.ended_ms.is_none() {
+            return Err("this command is still running".into());
+        }
+        Ok(run.started_ms)
+    }
+
+    /// The run of the call `id`: recorded, still arriving, or inside one of
+    /// those.
+    fn run_of(&self, mut id: u64) -> Option<u64> {
+        for _ in 0..64 {
+            if let Some(call) = self.by_id.get(&id).and_then(|&seq| self.find(seq)) {
+                return call.run;
+            }
+            if let Some(&run) = self.arriving.get(&id) {
+                return run;
+            }
+            id = *self.callers.get(&id)?;
+        }
+        None
     }
 }
 
@@ -305,7 +357,6 @@ pub struct Snapshot {
     pub calls: Vec<Arc<Call>>,
     pub runs: Vec<Run>,
     pub resources: Arc<Vec<Group>>,
-    pub permissions: Arc<Vec<Permission>>,
     pub stats: Arc<Stats>,
     pub generation: u64,
 }
@@ -333,6 +384,31 @@ impl Session {
         self.lock().version
     }
 
+    /// A call from outside arrives, signed with `key`: its run is the
+    /// command running now when the terminal sent it (one of the
+    /// terminal's keys, or no key at all, which could be anyone's, as a curl).
+    pub fn arrive(&self, id: u64, key: Option<&str>) {
+        let mut inner = self.lock();
+        let terminal = match key {
+            Some(key) => key == TERMINAL_KEY || inner.terminal_keys.contains(key),
+            None => true,
+        };
+        let run = if terminal { inner.current } else { None };
+        if inner.arriving.len() > 100_000 {
+            inner.arriving.clear();
+        }
+        inner.arriving.insert(id, run);
+    }
+
+    /// AWS began the call `id` inside the call `caller`.
+    pub fn link(&self, id: u64, caller: u64) {
+        let mut inner = self.lock();
+        if inner.callers.len() > 100_000 {
+            inner.callers.clear();
+        }
+        inner.callers.insert(id, caller);
+    }
+
     pub fn record(&self, mut call: Call) {
         let mut inner = self.lock();
         call.seq = inner.next_seq;
@@ -347,17 +423,20 @@ impl Session {
             None => true,
         };
         if call.run.is_none() {
-            call.run = call
-                .parent
-                .and_then(|p| inner.by_id.get(&p))
-                .and_then(|&seq| inner.find(seq))
-                .and_then(|c| c.run)
-                .or(if terminal && !call.internal {
-                    inner.current
-                } else {
-                    None
-                });
+            call.run = match (call.internal, call.parent) {
+                // Inside another call: that call's run, recorded or not yet.
+                (true, Some(parent)) => inner.run_of(parent),
+                (true, None) => None,
+                // From outside: as it was when it arrived.
+                (false, _) => match inner.arriving.get(&call.id) {
+                    Some(&run) => run,
+                    None if terminal => inner.current,
+                    None => None,
+                },
+            };
         }
+        inner.arriving.remove(&call.id);
+        inner.callers.remove(&call.id);
         // Keys AWS hands the terminal's programs are the terminal's too.
         if call.key.is_some() && terminal && call.status < 400 {
             for key in vended_keys(&call.response.body) {
@@ -376,9 +455,6 @@ impl Session {
                 calls.push(call.seq);
             }
         }
-        if !call.access.is_empty() {
-            inner.permissions_shown = None;
-        }
         Arc::make_mut(&mut inner.stats).add(&call);
         inner.calls.push(Arc::new(call));
         if inner.calls.len() > MAX_CALLS {
@@ -387,6 +463,11 @@ impl Session {
                 inner.by_id.remove(&id);
             }
             inner.stats = Arc::new(Stats::of(&inner.calls));
+            // The permissions keep only calls that are still listed.
+            let oldest = inner.calls.first().map_or(0, |c| c.seq);
+            for seqs in inner.permissions.values_mut() {
+                seqs.retain(|&seq| seq >= oldest);
+            }
         }
         inner.version += 1;
     }
@@ -451,7 +532,6 @@ impl Session {
         }
         inner.generation += 1;
         inner.permissions.clear();
-        inner.permissions_shown = None;
         inner.resources = Arc::default();
         inner.version += 1;
     }
@@ -464,8 +544,8 @@ impl Session {
         if generation != inner.generation || inner.log_broken {
             return;
         }
-        inner.log_bytes += sent.body.len();
-        if inner.log_bytes > MAX_LOG_BYTES {
+        inner.log_bytes += sent.size();
+        if inner.log_bytes > MAX_LOG_BYTES || inner.log.len() >= MAX_LOG_CALLS {
             inner.log.clear();
             inner.log_bytes = 0;
             inner.log_broken = true;
@@ -491,7 +571,7 @@ impl Session {
     /// made it.
     pub fn adopt(&self, log: Vec<Sent>) {
         let mut inner = self.lock();
-        inner.log_bytes = log.iter().map(|s| s.body.len()).sum();
+        inner.log_bytes = log.iter().map(Sent::size).sum();
         inner.log = log;
         inner.version += 1;
     }
@@ -508,28 +588,17 @@ impl Session {
 
     /// The account goes back to before the run `id`: what changed it before
     /// then, to send again. The run and the ones after it are undone.
+    /// Whether the account can go back to before the run `id`, and if not,
+    /// why.
+    pub fn check_rewind(&self, id: u64) -> Result<(), String> {
+        self.lock().rewind_start(id).map(|_| ())
+    }
+
     pub fn rewind_to(&self, id: u64) -> Result<Vec<Sent>, String> {
         let mut inner = self.lock();
-        if inner.log_broken {
-            return Err(
-                "the session sent too much data to rewind; start a new account to rewind again"
-                    .into(),
-            );
-        }
-        let run = inner
-            .runs
-            .iter()
-            .find(|r| r.id == id)
-            .ok_or("no such run")?;
-        if run.undone {
-            return Err("what this command did is no longer in the account".into());
-        }
-        if run.ended_ms.is_none() {
-            return Err("this command is still running".into());
-        }
-        let at_ms = run.started_ms;
+        let at_ms = inner.rewind_start(id)?;
         inner.log.retain(|s| s.at_ms < at_ms);
-        inner.log_bytes = inner.log.iter().map(|s| s.body.len()).sum();
+        inner.log_bytes = inner.log.iter().map(Sent::size).sum();
         for run in &mut inner.runs {
             if run.started_ms >= at_ms {
                 run.undone = true;
@@ -552,7 +621,6 @@ impl Session {
         inner.calls.clear();
         inner.by_id.clear();
         inner.permissions.clear();
-        inner.permissions_shown = None;
         inner.stats = Arc::default();
         let current = inner.current;
         inner.runs.retain(|r| Some(r.id) == current);
@@ -561,36 +629,30 @@ impl Session {
 
     /// The session, when it changed since `version`.
     pub fn snapshot_since(&self, version: Option<u64>) -> Option<Snapshot> {
-        let mut inner = self.lock();
+        let inner = self.lock();
         if version == Some(inner.version) {
             return None;
         }
-        let permissions = match &inner.permissions_shown {
-            Some(shown) => shown.clone(),
-            None => {
-                let shown: Arc<Vec<Permission>> = Arc::new(
-                    inner
-                        .permissions
-                        .iter()
-                        .map(|(access, calls)| Permission {
-                            access: access.clone(),
-                            calls: calls.clone(),
-                        })
-                        .collect(),
-                );
-                inner.permissions_shown = Some(shown.clone());
-                shown
-            }
-        };
         Some(Snapshot {
             version: inner.version,
             calls: inner.calls.clone(),
             runs: inner.runs.clone(),
             resources: inner.resources.clone(),
-            permissions,
             stats: inner.stats.clone(),
             generation: inner.generation,
         })
+    }
+
+    /// Every permission the session's calls needed, with those calls.
+    pub fn permissions(&self) -> Vec<Permission> {
+        self.lock()
+            .permissions
+            .iter()
+            .map(|(access, calls)| Permission {
+                access: access.clone(),
+                calls: calls.clone(),
+            })
+            .collect()
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -690,11 +752,12 @@ mod tests {
         session.record(call("s3", Some("bucket/a")));
         let s = session.snapshot_since(Some(first.version)).unwrap();
         assert_eq!(s.calls.len(), 1);
-        assert_eq!(s.permissions.len(), 1);
-        assert_eq!(s.permissions[0].calls, vec![0]);
+        let permissions = session.permissions();
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(permissions[0].calls, vec![0]);
         session.clear();
         let s = session.snapshot();
-        assert!(s.calls.is_empty() && s.permissions.is_empty());
+        assert!(s.calls.is_empty() && session.permissions().is_empty());
         assert_eq!(s.resources.len(), 1);
         session.record(call("s3", None));
         assert_eq!(session.snapshot().calls[0].seq, 1);
@@ -774,6 +837,32 @@ mod tests {
         session.record(call("s3", None));
         let runs: Vec<_> = session.snapshot().calls.iter().map(|c| c.run).collect();
         assert_eq!(runs, vec![Some(run), None, Some(run), Some(run), Some(run)]);
+    }
+
+    #[test]
+    fn aws_own_calls_join_the_run_of_their_cause_before_it_is_recorded() {
+        let session = Session::default();
+        let run = session.start_run("aws lambda invoke".into());
+        // The Invoke arrives; inside it the function's call, inside that a
+        // delivery: both end, and are recorded, before the Invoke.
+        session.arrive(10, Some(TERMINAL_KEY));
+        session.link(11, 10);
+        session.link(12, 11);
+        let inner = |id, parent| {
+            let mut c = call("dynamodb", None);
+            c.id = id;
+            c.parent = Some(parent);
+            c.internal = true;
+            c
+        };
+        session.record(inner(12, 11));
+        session.record(inner(11, 10));
+        let mut outer = call("lambda", None);
+        outer.id = 10;
+        outer.key = Some(TERMINAL_KEY.into());
+        session.record(outer);
+        let runs: Vec<_> = session.snapshot().calls.iter().map(|c| c.run).collect();
+        assert_eq!(runs, vec![Some(run); 3]);
     }
 
     #[test]

@@ -115,24 +115,37 @@ impl Engine {
     /// A new, empty AWS account. Building the engine takes a moment, on the
     /// engine's threads; calls until it is ready go to the old account, and
     /// the session starts over once the new one serves. The future says when.
-    pub fn fresh(&self) -> impl Future<Output = ()> + use<> {
-        let (emulator, session, refresher) = (
+    pub fn fresh(&self) -> impl Future<Output = Result<(), String>> + use<> {
+        let (emulator, session, refresher, busy) = (
             self.emulator.clone(),
             self.session.clone(),
             self.refresher.clone(),
+            self.rewinding.clone(),
         );
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
-                emulator.fresh();
-                session.fresh();
-            })
-            .await;
+            use std::sync::atomic::Ordering;
+            // A rewind or an opening account would go on filling the new one.
+            if busy.swap(true, Ordering::SeqCst) {
+                let _ = tx.send(Err(BUSY.to_string()));
+                return;
+            }
+            let result = match tokio::task::spawn_blocking(Emulator::build).await {
+                Ok(router) => {
+                    // The engine and the session change over together.
+                    emulator.swap(router);
+                    session.fresh();
+                    Ok(())
+                }
+                Err(_) => Err("could not start a new engine".to_string()),
+            };
+            busy.store(false, Ordering::SeqCst);
             refresher.poke();
-            let _ = tx.send(());
+            let _ = tx.send(result);
         });
         async move {
-            let _ = rx.await;
+            rx.await
+                .unwrap_or_else(|_| Err("the engine stopped".into()))
         }
     }
 
@@ -159,14 +172,13 @@ impl Engine {
 
     /// The IAM policy for every permission this session used.
     pub fn policy(&self) -> String {
-        let accesses: Vec<_> = self
-            .session
-            .snapshot()
-            .permissions
-            .iter()
-            .map(|p| p.access.clone())
-            .collect();
+        let accesses: Vec<_> = self.permissions().into_iter().map(|p| p.access).collect();
         lenslet_core::policy::compile(&accesses)
+    }
+
+    /// Every permission the session's calls needed, with those calls.
+    pub fn permissions(&self) -> Vec<crate::session::Permission> {
+        self.session.permissions()
     }
 
     /// The variables that point SDKs and the AWS CLI at Lenslet, from any
@@ -229,7 +241,7 @@ impl Engine {
         self.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
             if busy.swap(true, Ordering::SeqCst) {
-                let _ = tx.send(Err("the account is already going back".into()));
+                let _ = tx.send(Err(BUSY.to_string()));
                 return;
             }
             crate::observe::pause(true);
@@ -245,9 +257,33 @@ impl Engine {
         }
     }
 
-    /// The account as a file's text, to save it.
-    pub fn save_account(&self) -> Result<String, String> {
-        Ok(crate::account::to_json(&self.session.log()?))
+    /// The account as a file's text, to save it: made on the engine's
+    /// threads (it can be large).
+    pub fn save_account(&self) -> impl Future<Output = Result<String, String>> + use<> {
+        self.save_account_to(None)
+    }
+
+    /// Save the account to `path` (or only make its text), on the engine's
+    /// threads.
+    pub fn save_account_to(
+        &self,
+        path: Option<std::path::PathBuf>,
+    ) -> impl Future<Output = Result<String, String>> + use<> {
+        let session = self.session.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn_blocking(move || {
+            let saved = session.log().map(|log| crate::account::to_json(&log));
+            let _ = tx.send(match (saved, path) {
+                (Ok(text), Some(path)) => std::fs::write(&path, &text)
+                    .map(|()| String::new())
+                    .map_err(|e| e.to_string()),
+                (saved, _) => saved,
+            });
+        });
+        async move {
+            rx.await
+                .unwrap_or_else(|_| Err("the engine stopped".into()))
+        }
     }
 
     /// Replace the account with the one saved in `text`: a new, empty
@@ -273,18 +309,16 @@ impl Engine {
                 }
             };
             if busy.swap(true, Ordering::SeqCst) {
-                let _ = tx.send(Err("the account is already being rebuilt".into()));
+                let _ = tx.send(Err(BUSY.to_string()));
                 return;
             }
             crate::observe::pause(true);
-            let fresh = (emulator.clone(), session.clone());
-            let result = match tokio::task::spawn_blocking(move || {
-                fresh.0.fresh();
-                fresh.1.fresh();
-            })
-            .await
-            {
-                Ok(()) => {
+            let result = match tokio::task::spawn_blocking(Emulator::build).await {
+                Ok(router) => {
+                    // The engine, the session and its history change over
+                    // together: what arrives after belongs to the opened one.
+                    emulator.swap(router);
+                    session.fresh();
                     session.adopt(log.clone());
                     Ok(send_again(&emulator, &log, 200).await)
                 }
@@ -354,13 +388,19 @@ fn not_ready(status: u16, body: &[u8]) -> bool {
 }
 
 async fn replay(emulator: &Emulator, session: &Session, run: u64) -> Result<Replayed, String> {
-    let log = session.rewind_to(run)?;
-    let fresh = emulator.clone();
-    tokio::task::spawn_blocking(move || fresh.fresh())
+    session.check_rewind(run)?;
+    // Build the new engine first; then the account goes back and the new
+    // engine serves at once, so no call lands between the two.
+    let router = tokio::task::spawn_blocking(Emulator::build)
         .await
         .map_err(|_| "could not start a new engine".to_string())?;
+    let log = session.rewind_to(run)?;
+    emulator.swap(router);
     Ok(send_again(emulator, &log, 3000).await)
 }
+
+/// Why the account cannot be rebuilt now.
+const BUSY: &str = "Lenslet is rebuilding the account; try again when it is done.";
 
 /// Send `log` to the emulator again, in order, keeping the gaps between
 /// the calls up to `max_gap_ms`, then let what they set off finish.

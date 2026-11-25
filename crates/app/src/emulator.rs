@@ -49,7 +49,16 @@ impl Emulator {
 
     /// Throw every resource away: a new, empty AWS account.
     pub fn fresh(&self) {
-        let router = build();
+        self.swap(Emulator::build());
+    }
+
+    /// A new, empty engine, not yet serving (building it takes a moment).
+    pub fn build() -> MultiServiceRouter {
+        build()
+    }
+
+    /// Serve `router` from now on: the account it holds.
+    pub fn swap(&self, router: MultiServiceRouter) {
         *self.router.write().unwrap_or_else(|e| e.into_inner()) = router;
     }
 

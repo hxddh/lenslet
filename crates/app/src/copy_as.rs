@@ -73,7 +73,10 @@ pub fn boto3(call: &Call) -> Option<String> {
     let args = serde_json::to_string_pretty(&body).ok()?;
     let args = python_literals(&args);
     let method = snake(&call.operation);
-    let client = format!("boto3.client({:?})", call.service);
+    let client = format!(
+        "boto3.client({:?})",
+        cli_service(&call.service).replace("s3api", "s3")
+    );
     Some(if body.as_object().is_some_and(|o| o.is_empty()) {
         format!("{client}.{method}()")
     } else {

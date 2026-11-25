@@ -15,6 +15,7 @@ const SERVICES: &[(&str, &str)] = &[
     ("kms", "kms"),
     ("lambda", "lambda"),
     ("secretsmanager", "secretsmanager"),
+    ("secrets-manager", "secretsmanager"),
     ("ssm", "ssm"),
     ("events", "events"),
     ("eventbridge", "events"),

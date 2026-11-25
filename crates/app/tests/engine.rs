@@ -57,6 +57,14 @@ fn ddb(port: u16, op: &str, body: &str) -> (u16, String) {
     )
 }
 
+fn runtime_block<T>(f: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
 fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ok() {
@@ -139,9 +147,10 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(engine.fresh());
+        .block_on(engine.fresh())
+        .expect("a new account");
     assert_eq!(engine.snapshot().generation, 1);
-    assert!(engine.snapshot().permissions.is_empty());
+    assert!(engine.permissions().is_empty());
     let (_, body) = sqs(port, "ListQueues", "{}");
     assert!(!body.contains("orders"), "{body}");
     let snapshot = engine.snapshot();
@@ -220,13 +229,13 @@ fn a_saved_account_opens_as_it_was() {
         )
         .0 == 200
     });
-    let saved = engine.save_account().expect("save");
+    let saved = runtime_block(engine.save_account()).expect("save");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(engine.fresh());
+    runtime.block_on(engine.fresh()).expect("a new account");
     assert!(!sqs(port, "ListQueues", "{}").1.contains("kept"));
 
     let opened = runtime.block_on(engine.open_account(saved)).expect("open");
@@ -239,5 +248,9 @@ fn a_saved_account_opens_as_it_was() {
     );
     assert!(item.contains("\"1\""), "{item}");
     // What was opened is the account's history now: it saves again whole.
-    assert!(engine.save_account().unwrap().contains("PutItem"));
+    assert!(
+        runtime_block(engine.save_account())
+            .unwrap()
+            .contains("PutItem")
+    );
 }

@@ -941,11 +941,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (digit(bytes[i + 1]), digit(bytes[i + 2]))
         {
-            out.push(b);
+            out.push(hi << 4 | lo);
             i += 3;
             continue;
         }

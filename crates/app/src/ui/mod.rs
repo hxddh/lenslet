@@ -286,8 +286,10 @@ impl Ui {
                     ui.page.set(Page::Activity);
                 }
                 ui.hold(ts("Starting a new account…", "正在新建账户…"));
-                engine().fresh().await;
-                ui.say(t("A new, empty account", "已换成全新的空账户"));
+                match engine().fresh().await {
+                    Ok(()) => ui.say(t("A new, empty account", "已换成全新的空账户")),
+                    Err(e) => ui.say(engine_error(e)),
+                }
             }
         });
     }
@@ -335,7 +337,7 @@ impl Ui {
                     r.failed,
                     t("failed", "次失败")
                 )),
-                Err(e) => ui.say(e),
+                Err(e) => ui.say(engine_error(e)),
             }
         });
     }
@@ -379,10 +381,6 @@ impl Ui {
     /// Keep the account in a file, to open again later or elsewhere.
     pub fn save_account(&self) {
         let ui = *self;
-        let saved = match engine().save_account() {
-            Ok(saved) => saved,
-            Err(e) => return self.say(e),
-        };
         ui.spawn(async move {
             let dialog = nsh_core::file_dialog::SaveDialog::new()
                 .file_name("account.lenslet.json")
@@ -392,9 +390,11 @@ impl Ui {
                 ))
                 .button_label(t("Save", "保存"));
             if let Ok(Some(path)) = pick_save_path(dialog).await {
-                match std::fs::write(&path, saved) {
-                    Ok(()) => ui.say(t("Saved the account", "已保存账户")),
-                    Err(e) => ui.say(e.to_string()),
+                // Written on the engine's threads: the account can be large.
+                ui.hold(ts("Saving the account…", "正在保存账户…"));
+                match engine().save_account_to(Some(path)).await {
+                    Ok(_) => ui.say(t("Saved the account", "已保存账户")),
+                    Err(e) => ui.say(engine_error(e)),
                 }
             }
         });
@@ -440,7 +440,7 @@ impl Ui {
                     r.failed,
                     t("failed", "次失败")
                 )),
-                Err(e) => ui.say(e),
+                Err(e) => ui.say(engine_error(e)),
             }
         });
     }
@@ -487,6 +487,33 @@ pub enum CopyAs {
     Cli,
     Curl,
     Boto3,
+}
+
+/// What the engine says went wrong, in the window's language.
+fn engine_error(e: String) -> String {
+    if lang().get_untracked() == Lang::En {
+        return e;
+    }
+    let zh = match e.as_str() {
+        "Lenslet is rebuilding the account; try again when it is done." => {
+            "Lenslet 正在重建账户，完成后再试。"
+        }
+        "this command is still running" => "这条命令还在运行",
+        "what this command did is no longer in the account" => "这条命令做的改动已不在账户里",
+        "the session sent too much data to rewind; start a new account to rewind again" => {
+            "这次会话发送的数据太多，无法回到之前；新建账户后才能再回到之前"
+        }
+        "the session sent too much data to keep the account; start a new account to save one" => {
+            "这次会话发送的数据太多，无法保存账户；新建账户后才能保存"
+        }
+        "no such run" => "没有这次运行",
+        "could not start a new engine" => "无法启动新的引擎",
+        "the engine stopped" => "引擎已停止",
+        "This file is not a saved Lenslet account." => "这个文件不是保存的 Lenslet 账户。",
+        "This account was saved by a newer Lenslet." => "这个账户是用更新版本的 Lenslet 保存的。",
+        _ => return e,
+    };
+    zh.to_string()
 }
 
 fn session_json(calls: &[Arc<Call>]) -> String {
@@ -552,7 +579,10 @@ pub fn App() -> impl IntoElement {
         .id("main")
         .title("Lenslet")
         .default_size(size(px(1320.0), px(840.0)))
-        .restore_bounds(true)
+        // Linux restores the frame it saved as the content's size, so the
+        // window came back a few points smaller at each launch: there it
+        // opens at its default size.
+        .restore_bounds(os() != Os::Linux)
         .attributes(attributes)
         .content(move || match &started {
             Ok(_) => workbench(),
