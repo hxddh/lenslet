@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nsh_core::prelude::*;
 
-use super::{CopyAs, Tab, Ui, calls, sidebar::service_title, style::*, t, ts};
+use super::{CopyAs, Lang, Tab, Ui, calls, lang, sidebar::service_title, style::*, t, ts};
 use crate::{resources::clock, session::Call};
 
 pub fn inspector(ui: Ui) -> impl IntoElement {
@@ -500,6 +500,76 @@ fn failure_box(call: Held) -> impl IntoElement {
                     .text_color(secondary_text())
             },
         ))
+        .child(known_gap(call))
+}
+
+/// Whether AWS Emulator is known to get this call wrong: then the failure
+/// may be the emulator's, not your code's.
+fn known_gap(call: Held) -> impl IntoElement {
+    let known = computed(move || {
+        call.with(|c| {
+            let c = &c.as_ref()?.0;
+            crate::gaps::known(
+                &c.service,
+                &c.operation,
+                c.failure.as_ref().map(|f| f.code.as_str()),
+            )
+        })
+    });
+    when(
+        move || known.with(|k| k.is_some()),
+        move || {
+            view()
+                .gap(px(4.0))
+                .mt(px(4.0))
+                .pt(px(6.0))
+                .border_t_1()
+                .border_color(separator())
+                .child(
+                    text(move || {
+                        known.with(|k| {
+                            let Some(k) = k else { return String::new() };
+                            let op = call.with(|c| {
+                                c.as_ref()
+                                    .map(|c| c.0.operation.clone())
+                                    .unwrap_or_default()
+                            });
+                            match (k.exact, lang().get()) {
+                                (true, Lang::Zh) => {
+                                    format!("这是 AWS Emulator 的已知缺陷：{}", k.title)
+                                }
+                                (true, Lang::En) => {
+                                    format!("A known AWS Emulator gap: {}", k.title)
+                                }
+                                (false, Lang::Zh) => format!(
+                                    "AWS Emulator 在 {op} 上有 {} 个已知缺陷，例如：{}",
+                                    k.count, k.title
+                                ),
+                                (false, Lang::En) => format!(
+                                    "AWS Emulator lists {} known gaps in {op}, such as: {}",
+                                    k.count, k.title
+                                ),
+                            }
+                        })
+                    })
+                    .text_size(small())
+                    .selectable(true),
+                )
+                .child(
+                    nsh_base::button()
+                        .on_press(move || {
+                            if let Some(k) = known.get_untracked() {
+                                drop(open_url(&k.url));
+                            }
+                        })
+                        .child(
+                            text(move || ts("Open the issue", "查看这个问题"))
+                                .text_size(small())
+                                .text_color(accent()),
+                        ),
+                )
+        },
+    )
 }
 
 fn exchange(call: Held, request: bool) -> impl IntoElement {

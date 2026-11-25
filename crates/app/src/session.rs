@@ -175,7 +175,11 @@ pub const TERMINAL_KEY: &str = "lenslet-terminal";
 /// or JSON).
 fn vended_keys(body: &str) -> Vec<String> {
     let mut keys = Vec::new();
-    for (open, close) in [("<AccessKeyId>", "</AccessKeyId>"), ("\"AccessKeyId\":\"", "\""), ("\"AccessKeyId\": \"", "\"")] {
+    for (open, close) in [
+        ("<AccessKeyId>", "</AccessKeyId>"),
+        ("\"AccessKeyId\":\"", "\""),
+        ("\"AccessKeyId\": \"", "\""),
+    ] {
         let mut rest = body;
         while let Some(at) = rest.find(open) {
             rest = &rest[at + open.len()..];
@@ -288,7 +292,11 @@ impl Session {
                 .and_then(|p| inner.by_id.get(&p))
                 .and_then(|&seq| inner.find(seq))
                 .and_then(|c| c.run)
-                .or(if terminal && !call.internal { inner.current } else { None });
+                .or(if terminal && !call.internal {
+                    inner.current
+                } else {
+                    None
+                });
         }
         // Keys AWS hands the terminal's programs are the terminal's too.
         if call.key.is_some() && terminal && call.status < 400 {
