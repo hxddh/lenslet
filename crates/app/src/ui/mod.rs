@@ -563,6 +563,7 @@ pub fn App() -> impl IntoElement {
 fn cannot_start(error: String) -> AnyElement {
     view()
         .flex_1()
+        .text_color(label_text())
         .items_center()
         .justify_center()
         .gap(px(10.0))
@@ -722,6 +723,7 @@ fn workbench() -> AnyElement {
         .flex_1()
         .font_family(UI)
         .text_size(body())
+        .text_color(label_text())
         .child(
             nsh_base::h_resizable()
                 .flex_1()

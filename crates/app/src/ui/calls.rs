@@ -458,7 +458,7 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
             .hover(|s| s.bg(hover_bg()))
             .child(text(label).text_size(small()).text_color(move || {
                 if selected() {
-                    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                    label_text()
                 } else {
                     secondary_text()
                 }

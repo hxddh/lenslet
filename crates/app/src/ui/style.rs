@@ -71,6 +71,12 @@ pub fn chrome_bg() -> AdaptiveColor {
 pub fn separator() -> AdaptiveColor {
     AdaptiveColor::rgb(0xdcdcdc, 0x3a3a3a)
 }
+/// The text that is not secondary: what the window's content root sets, so
+/// every text without a color of its own follows the appearance (the
+/// default is black in dark mode too).
+pub fn label_text() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+}
 pub fn secondary_text() -> AdaptiveColor {
     AdaptiveColor::rgb(0x6e6e73, 0x98989d)
 }

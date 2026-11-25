@@ -108,13 +108,11 @@ fn selected(ui: Ui) -> impl IntoElement {
                 }
             })
             .hover(|s| s.bg(hover_bg()))
-            .child(text(label).text_size(small()).text_color(move || {
-                if on() {
-                    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
-                } else {
-                    secondary_text()
-                }
-            }))
+            .child(
+                text(label)
+                    .text_size(small())
+                    .text_color(move || if on() { label_text() } else { secondary_text() }),
+            )
     };
     let tabs = nsh_base::tabs()
         .flex_row()
