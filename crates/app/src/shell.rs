@@ -47,6 +47,17 @@ const DROPPED: &[&str] = &[
     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
 ];
 
+/// The variables of the terminal Lenslet was started from.
+const FOREIGN: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "KITTY_WINDOW_ID",
+    "ALACRITTY_WINDOW_ID",
+];
+
 pub struct Shell {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -106,6 +117,19 @@ impl Shell {
         for name in DROPPED {
             command.env_remove(name);
         }
+        // Not the terminal Lenslet was started from: its session files
+        // (macOS's /etc/zshrc_Apple_Terminal) are not this shell's.
+        for (name, _) in std::env::vars_os() {
+            if let Some(name) = name.to_str()
+                && (FOREIGN.contains(&name)
+                    || ["ITERM_", "VSCODE_", "KITTY_", "WEZTERM_"]
+                        .iter()
+                        .any(|p| name.starts_with(p)))
+            {
+                command.env_remove(name);
+            }
+        }
+        command.env("TERM_PROGRAM", "Lenslet");
         for (name, _) in std::env::vars_os() {
             if let Some(name) = name.to_str()
                 && name.starts_with("AWS_ENDPOINT_URL_")
@@ -116,10 +140,16 @@ impl Shell {
         for (name, value) in env {
             command.env(name, value);
         }
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|e| e.to_string())?;
+        let child = match pair.slave.spawn_command(command) {
+            Ok(child) => child,
+            Err(e) => {
+                // Its startup files go with it.
+                if let Some(dir) = &dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                return Err(e.to_string());
+            }
+        };
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -133,7 +163,9 @@ impl Shell {
                 gone.clone(),
                 on_mark.clone(),
             );
-            let mut marks = prefix.map(Marks::new).unwrap_or_default();
+            // Only an integrated shell's marks: in another shell, text that
+            // looks like one is the program's.
+            let mut marks = prefix.map(Marks::new);
             std::thread::Builder::new()
                 .name("lenslet-shell".into())
                 .spawn(move || {
@@ -142,7 +174,10 @@ impl Shell {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
-                                let (text, found) = marks.split(&buf[..n]);
+                                let (text, found) = match marks.as_mut() {
+                                    Some(marks) => marks.split(&buf[..n]),
+                                    None => (buf[..n].to_vec(), Vec::new()),
+                                };
                                 if !gone.load(Ordering::SeqCst) {
                                     for mark in found {
                                         on_mark(mark);
@@ -351,18 +386,25 @@ fn integrate_in(
             let rc = dir.join("bashrc");
             let script = format!(
                 r#"# Lenslet: the user's login files, then marks around each command.
+# Every variable is read with a default: a profile with `set -u` keeps the
+# marks. Prompt commands are joined by lines, not `;` (one of the user's may
+# end in `;`), and `&& :` keeps the status for the user's own without
+# tripping `set -e` or an ERR trap.
 [ -f /etc/profile ] && . /etc/profile
 if [ -f ~/.bash_profile ]; then . ~/.bash_profile
 elif [ -f ~/.bash_login ]; then . ~/.bash_login
 elif [ -f ~/.profile ]; then . ~/.profile
+elif [ -f ~/.bashrc ]; then . ~/.bashrc
 fi
 {ours}
 for __lenslet_v in ${{!AWS_ENDPOINT_URL_*}}; do unset "$__lenslet_v"; done; unset __lenslet_v
+__lenslet_nl=$'\n'
 __lenslet_end() {{ local s=$?; __lenslet_armed=; printf '{mark}E;%s\007' "$s"; return $s; }}
-__lenslet_start() {{ HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]*[* ] *//' | tr -d '\n' | {HEX}; }}
-if [ -z "$__LENSLET_DEBUG_TRAP" ] && {{ [ "${{BASH_VERSINFO[0]}}" -gt 4 ] || {{ [ "${{BASH_VERSINFO[0]}}" -eq 4 ] && [ "${{BASH_VERSINFO[1]}}" -ge 4 ]; }}; }}; then
-  PROMPT_COMMAND="__lenslet_end${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
-  PS0='\[{mark}S;$(__lenslet_start)\007\]'"$PS0"
+# The line just entered, as history keeps it (none with history off).
+__lenslet_start() {{ shopt -oq history || return 0; HISTTIMEFORMAT= builtin history 1 | sed '1s/^ *[0-9]*[* ] *//' | {HEX}; }}
+if [ -z "${{__LENSLET_DEBUG_TRAP-}}" ] && {{ [ "${{BASH_VERSINFO[0]}}" -gt 4 ] || {{ [ "${{BASH_VERSINFO[0]}}" -eq 4 ] && [ "${{BASH_VERSINFO[1]}}" -ge 4 ]; }}; }}; then
+  PROMPT_COMMAND="__lenslet_end && :${{PROMPT_COMMAND:+$__lenslet_nl$PROMPT_COMMAND}}"
+  PS0='{mark}S;$(__lenslet_start)\007'"${{PS0-}}"
 else
   # Bash before 4.4 (macOS's /bin/bash) has no PS0: mark the start from the
   # DEBUG trap, armed as the prompt shows (after the user's own prompt
@@ -370,13 +412,13 @@ else
   __lenslet_armed=
   __lenslet_arm() {{ __lenslet_armed=1; }}
   __lenslet_debug() {{
-    [ -n "$__lenslet_armed" ] || return 0
-    [ -n "$COMP_LINE" ] && return 0
-    case "$BASH_COMMAND" in __lenslet_*) return 0 ;; esac
+    [ -n "${{__lenslet_armed-}}" ] || return 0
+    [ -n "${{COMP_LINE-}}" ] && return 0
+    case "$BASH_COMMAND" in __lenslet_*|:) return 0 ;; esac
     __lenslet_armed=
     printf '{mark}S;%s\007' "$(__lenslet_start)"
   }}
-  PROMPT_COMMAND="__lenslet_end;${{PROMPT_COMMAND:+$PROMPT_COMMAND;}}__lenslet_arm"
+  PROMPT_COMMAND="__lenslet_end && :${{PROMPT_COMMAND:+$__lenslet_nl$PROMPT_COMMAND}}${{__lenslet_nl}}__lenslet_arm"
   trap '__lenslet_debug' DEBUG
 fi
 "#
@@ -417,6 +459,9 @@ unset LENSLET_USER_ZDOTDIR
             let script = format!(
                 r#"# Lenslet: the user's .zshrc, then marks around each command.
 {}
+# A history file the system's zshrc put under Lenslet's ZDOTDIR (macOS's
+# does: HISTFILE=${{ZDOTDIR:-$HOME}}/.zsh_history) is the user's.
+if [ "${{HISTFILE-}}" = "$__lenslet_zdot/.zsh_history" ]; then HISTFILE="$__lenslet_user/.zsh_history"; fi
 if [ "$__lenslet_user" != "$HOME" ]; then ZDOTDIR="$__lenslet_user"; else unset ZDOTDIR; fi
 unset __lenslet_zdot __lenslet_user
 __lenslet_env() {{
@@ -603,6 +648,88 @@ mod tests {
     #[test]
     fn bash_without_ps0_marks_each_command_too() {
         shell_marks("/bin/bash", true);
+    }
+
+    #[cfg(unix)]
+    /// bash with a strict profile: `set -u`, `set -e`, and a prompt
+    /// command that ends in `;`. The marks still come, with each command's
+    /// line and status, and a command that fails inside `&&` does not end
+    /// the shell (as it does not in bash itself).
+    #[cfg(unix)]
+    #[test]
+    fn bash_marks_with_a_strict_profile() {
+        use std::time::{Duration, Instant};
+        if !Path::new("/bin/bash").exists() {
+            return;
+        }
+        for debug_trap in [false, true] {
+            let home = std::env::temp_dir().join(format!("lenslet-home-{:x}", random()));
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(
+                home.join(".bash_profile"),
+                "set -u\nset -e\nPROMPT_COMMAND=\"history -a;\"\n",
+            )
+            .unwrap();
+            let Integration {
+                mut command,
+                prefix,
+                dir: rc,
+            } = integrate("/bin/bash", &[]).expect("bash integrates");
+            command.cwd(&home);
+            command.env("HOME", &home);
+            if debug_trap {
+                command.env("__LENSLET_DEBUG_TRAP", "1");
+            }
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut writer = pair.master.take_writer().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let heard = seen.clone();
+            std::thread::spawn(move || {
+                let mut marks = Marks::new(prefix);
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    heard.lock().unwrap().extend(marks.split(&buf[..n]).1);
+                }
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            writer.write_all(b"false && true\r").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            writer.write_all(b"echo alive\r").unwrap();
+            let want = vec![
+                Mark::Start("false && true".into()),
+                Mark::End(1),
+                Mark::Start("echo alive".into()),
+                Mark::End(0),
+            ];
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let got = loop {
+                let got: Vec<Mark> = seen.lock().unwrap().iter().cloned().collect();
+                // The first prompt's end mark (no command yet) comes first.
+                let from = got.iter().position(|m| matches!(m, Mark::Start(_)));
+                let got: Vec<Mark> = from.map(|i| got[i..].to_vec()).unwrap_or_default();
+                if got.len() >= want.len() || Instant::now() > deadline {
+                    break got;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let _ = child.kill();
+            let _ = std::fs::remove_dir_all(&rc);
+            let _ = std::fs::remove_dir_all(&home);
+            assert_eq!(got, want, "debug trap: {debug_trap}");
+        }
     }
 
     #[cfg(unix)]

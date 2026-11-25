@@ -200,6 +200,9 @@ impl Engine {
             ("AWS_DEFAULT_REGION", REGION.into()),
             ("AWS_ACCESS_KEY_ID", key.into()),
             ("AWS_SECRET_ACCESS_KEY", "lenslet".into()),
+            // A profile's `ignore_configured_endpoint_urls` would send the
+            // calls to AWS itself.
+            ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false".into()),
         ]
     }
 

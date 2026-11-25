@@ -25,6 +25,9 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     // While the history is shown again, what the view would answer (a
     // cursor position report) is not the user's typing.
     let replaying = Rc::new(std::cell::Cell::new(false));
+    // A new view waits for its size to be shown the history: what the shell
+    // prints meanwhile is in the history, and would show twice.
+    let waiting = Rc::new(std::cell::Cell::new(false));
 
     let start = {
         let (shell, size) = (shell.clone(), size.clone());
@@ -54,7 +57,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     };
     // Output, at the display's pace.
     {
-        let (shell, history) = (shell.clone(), history.clone());
+        let (shell, history, waiting) = (shell.clone(), history.clone(), waiting.clone());
         set_interval(Duration::from_millis(16), move || {
             let guard = shell.borrow();
             let Some(s) = guard.as_ref() else { return };
@@ -69,18 +72,14 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 let mut history = history.borrow_mut();
                 history.extend_from_slice(&bytes);
                 if history.len() > HISTORY {
-                    // From a line's start, so no sequence is cut in two.
-                    let from = history.len() - HISTORY * 3 / 4;
-                    let cut = history[from..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map_or(from, |n| from + n + 1);
-                    history.drain(..cut);
+                    trim(&mut history);
                 }
             }
             // The view takes the bytes as they come: a character or an
             // escape split across reads is joined there.
-            if let Some(api) = term.api::<TerminalApi>() {
+            if !waiting.get()
+                && let Some(api) = term.api::<TerminalApi>()
+            {
                 api.write_bytes(&bytes);
             }
         });
@@ -90,7 +89,10 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         let (shell, start) = (shell.clone(), start.clone());
         effect(move || {
             let Some(line) = ui.run.get() else { return };
-            if shell.borrow().is_none() {
+            // A shell that exited (`exit`) is started again for it.
+            let gone = shell.borrow().as_ref().is_none_or(|s| s.exited());
+            if gone {
+                *shell.borrow_mut() = None;
                 start();
             }
             if let Some(s) = shell.borrow().as_ref() {
@@ -247,10 +249,12 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             move || ui.terminal.get(),
             move || {
                 let (on_data, on_resize) = (on_data.clone(), on_resize.clone());
-                let (history, replaying) = (history.clone(), replaying.clone());
+                let (history, replaying, waiting) =
+                    (history.clone(), replaying.clone(), waiting.clone());
                 // A new view: once it has a real size, it shows what the shell
                 // printed before.
                 let fresh = Rc::new(std::cell::Cell::new(true));
+                waiting.set(true);
                 let on_resize = move |e: &TerminalEvent| {
                     if let TerminalEvent::Resize(cols, rows) = e
                         && *cols >= 10
@@ -258,12 +262,19 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                         && fresh.replace(false)
                         && let Some(api) = term.api::<TerminalApi>()
                     {
-                        let shown = history.borrow().clone();
+                        // Without the questions programs asked the terminal
+                        // (where is the cursor?): asked again now, their
+                        // answers would reach the shell as typing.
+                        let shown = without_queries(&history.borrow());
                         if !shown.is_empty() {
                             replaying.set(true);
                             api.write_bytes(&shown);
-                            replaying.set(false);
+                            // The view's events are handled after this:
+                            // anything it still answers is dropped too.
+                            let replaying = replaying.clone();
+                            set_timeout(Duration::from_millis(50), move || replaying.set(false));
                         }
+                        waiting.set(false);
                     }
                     on_resize(e);
                 };
@@ -283,10 +294,111 @@ pub fn panel(ui: Ui) -> impl IntoElement {
 }
 
 fn tilde(path: &std::path::Path) -> String {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    let shown = path.display().to_string();
-    match home.map(|h| std::path::PathBuf::from(h).display().to_string()) {
-        Some(h) if shown.starts_with(&h) => format!("~{}", &shown[h.len()..]),
-        _ => shown,
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// The private modes a full-screen program sets (the alternate screen,
+/// application cursor keys, bracketed paste, the cursor shown): kept when
+/// the history's start is cut, so what follows shows as it did.
+const MODES: &[&[u8]] = &[b"1049", b"47", b"1047", b"1", b"2004", b"25", b"7"];
+
+/// Drop the history's oldest quarter, from a line's start, keeping the
+/// modes set in what is dropped.
+fn trim(history: &mut Vec<u8>) {
+    let from = history.len() - HISTORY * 3 / 4;
+    let cut = history[from..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|n| from + n + 1)
+        // No line: before the next escape, never inside one.
+        .or_else(|| {
+            history[from..]
+                .iter()
+                .position(|&b| b == 0x1b)
+                .map(|n| from + n)
+        })
+        .unwrap_or(history.len());
+    let mut kept: Vec<(&'static [u8], u8)> = Vec::new();
+    let dropped = &history[..cut];
+    let mut i = 0;
+    while let Some(at) = dropped[i..].windows(3).position(|w| w == b"\x1b[?") {
+        let start = i + at + 3;
+        let end = dropped[start..]
+            .iter()
+            .position(|b| !(b.is_ascii_digit() || *b == b';'))
+            .map(|n| start + n);
+        if let Some(end) = end
+            && matches!(dropped[end], b'h' | b'l')
+        {
+            for mode in dropped[start..end].split(|&b| b == b';') {
+                if let Some(known) = MODES.iter().find(|m| **m == mode) {
+                    kept.retain(|(m, _)| m != known);
+                    kept.push((*known, dropped[end]));
+                }
+            }
+        }
+        i = start;
+    }
+    let mut prefix = Vec::new();
+    for (mode, set) in kept {
+        prefix.extend_from_slice(b"\x1b[?");
+        prefix.extend_from_slice(mode);
+        prefix.push(set);
+    }
+    history.splice(..cut, prefix);
+}
+
+/// `bytes` without the queries a program sends the terminal (device status
+/// and cursor position reports, device attributes): replayed, the view
+/// would answer them again.
+fn without_queries(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            let start = i + 2;
+            let end = bytes[start..]
+                .iter()
+                .position(|b| !(b.is_ascii_digit() || matches!(b, b';' | b'?' | b'>' | b'=')))
+                .map(|n| start + n);
+            if let Some(end) = end
+                && matches!(bytes[end], b'n' | b'c')
+            {
+                // `ESC[5n`, `ESC[6n`, `ESC[c`, `ESC[>c`…: dropped.
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replay_asks_the_terminal_nothing() {
+        let shown = without_queries(b"a\x1b[6nb\x1b[>0cc\x1b[31md\x1b[2Je");
+        assert_eq!(shown, b"abc\x1b[31md\x1b[2Je");
+    }
+
+    #[test]
+    fn a_cut_history_keeps_the_modes_set_before_the_cut() {
+        let mut history = b"\x1b[?1049h\x1b[?2004h".to_vec();
+        history.extend(std::iter::repeat_n(b'x', HISTORY));
+        history.extend(b"\nend");
+        trim(&mut history);
+        assert!(history.starts_with(b"\x1b[?1049h\x1b[?2004h"));
+        assert!(history.ends_with(b"end"));
+        assert!(history.len() < HISTORY);
     }
 }
