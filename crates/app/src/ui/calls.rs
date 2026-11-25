@@ -472,23 +472,14 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
                 }),
             )
     };
-    let scope = move |f: &dyn Fn(&Call) -> bool| {
+    let tally = move || {
         let run = ui.run();
-        ui.snap.with(|s| {
-            s.calls
-                .iter()
-                .filter(|c| (run.is_none() || c.run == run) && f(c))
-                .count()
-        })
+        ui.snap.with(|s| s.stats.of_run(run))
     };
-    let failed = move || scope(&|c: &Call| c.failed() && !c.unsupported);
-    let unsupported = move || scope(&|c: &Call| c.unsupported);
+    let failed = move || tally().failed;
+    let unsupported = move || tally().unsupported;
     let services = move || {
-        let mut names: Vec<String> = ui
-            .snap
-            .with(|s| s.calls.iter().map(|c| c.service.clone()).collect());
-        names.sort();
-        names.dedup();
+        let names: Vec<String> = ui.snap.with(|s| s.stats.services.iter().cloned().collect());
         let mut items = vec![SelectItem::new("", t("All Services", "全部服务"))];
         items.extend(
             names

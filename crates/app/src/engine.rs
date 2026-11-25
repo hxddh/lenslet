@@ -163,8 +163,8 @@ impl Engine {
             .session
             .snapshot()
             .permissions
-            .into_iter()
-            .map(|p| p.access)
+            .iter()
+            .map(|p| p.access.clone())
             .collect();
         lenslet_core::policy::compile(&accesses)
     }

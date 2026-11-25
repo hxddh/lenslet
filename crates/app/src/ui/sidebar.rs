@@ -157,20 +157,16 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             .text_color(secondary_text()),
         );
 
-    // Each run's calls and failures, counted once per change.
+    // Each run's calls and failures, as the session counts them.
     let tallies = computed(move || {
         ui.snap.with(|s| {
-            let mut t: HashMap<u64, (usize, usize)> = HashMap::new();
-            for c in &s.calls {
-                if let Some(run) = c.run {
-                    let e = t.entry(run).or_default();
-                    e.0 += 1;
-                    if c.failed() && !c.unsupported {
-                        e.1 += 1;
-                    }
-                }
-            }
-            RunTallies(t)
+            RunTallies(
+                s.stats
+                    .runs
+                    .iter()
+                    .map(|(run, t)| (*run, (t.calls, t.failed)))
+                    .collect(),
+            )
         })
     });
     let all = row(
@@ -178,12 +174,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         Icon::Calls,
         Box::new(|| ts("All Activity", "全部活动")),
         Box::new(move || {
-            let failed = ui.snap.with(|s| {
-                s.calls
-                    .iter()
-                    .filter(|c| c.failed() && !c.unsupported)
-                    .count()
-            });
+            let failed = ui.snap.with(|s| s.stats.all.failed);
             if failed > 0 {
                 failed.to_string()
             } else {
@@ -191,10 +182,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             }
         }),
         Box::new(move || {
-            if ui
-                .snap
-                .with(|s| s.calls.iter().any(|c| c.failed() && !c.unsupported))
-            {
+            if ui.snap.with(|s| s.stats.all.failed > 0) {
                 red()
             } else {
                 secondary_text()

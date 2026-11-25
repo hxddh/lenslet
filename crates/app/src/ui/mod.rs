@@ -604,9 +604,18 @@ fn workbench() -> AnyElement {
     // Take the session when it changed: a pointer copy, not the bodies.
     {
         let version = std::cell::Cell::new(None::<u64>);
+        let taken = std::cell::Cell::new(std::time::Instant::now());
         set_interval(Duration::from_millis(80), move || {
+            // A large session is redrawn less often while calls stream in,
+            // so the window keeps up with the hand rather than the calls.
+            let calls = ui.snap.with_untracked(|s| s.calls.len());
+            let pace = Duration::from_millis(80 + (calls as u64 / 40).min(420));
+            if taken.get().elapsed() < pace {
+                return;
+            }
             if let Some(next) = engine().snapshot_since(version.get()) {
                 version.set(Some(next.version));
+                taken.set(std::time::Instant::now());
                 ui.snap.set(Rc::new(next));
             }
         });
@@ -652,12 +661,7 @@ fn workbench() -> AnyElement {
     }
     // The Dock's badge counts the failed calls.
     effect(move || {
-        let failed = ui.snap.with(|s| {
-            s.calls
-                .iter()
-                .filter(|c| c.failed() && !c.unsupported)
-                .count()
-        });
+        let failed = ui.snap.with(|s| s.stats.all.failed);
         set_badge(failed as u32);
     });
     let rewindable = computed(move || match ui.page.get() {
