@@ -13,10 +13,14 @@ pub fn to_json(log: &[Sent]) -> String {
     let calls: Vec<serde_json::Value> = log
         .iter()
         .map(|s| {
-            let headers: Vec<[String; 2]> = s
+            // A value that is not text (bytes past ASCII) goes as hex.
+            let headers: Vec<serde_json::Value> = s
                 .headers
                 .iter()
-                .filter_map(|(n, v)| Some([n.as_str().to_string(), v.to_str().ok()?.to_string()]))
+                .map(|(n, v)| match v.to_str() {
+                    Ok(text) => serde_json::json!([n.as_str(), text]),
+                    Err(_) => serde_json::json!([n.as_str(), "", hex(v.as_bytes())]),
+                })
                 .collect();
             let mut call = serde_json::json!({
                 "at": s.at_ms,
@@ -63,13 +67,20 @@ pub fn from_json(text: &str) -> Result<Vec<Sent>, String> {
                 .ok_or_else(not_one)?;
             let mut headers = http::HeaderMap::new();
             for pair in c["headers"].as_array().into_iter().flatten() {
-                if let (Some(n), Some(v)) = (pair[0].as_str(), pair[1].as_str())
-                    && let (Ok(n), Ok(v)) = (
-                        http::HeaderName::from_bytes(n.as_bytes()),
-                        http::HeaderValue::from_str(v),
-                    )
-                {
-                    headers.append(n, v);
+                let Some(name) = pair[0]
+                    .as_str()
+                    .and_then(|n| http::HeaderName::from_bytes(n.as_bytes()).ok())
+                else {
+                    continue;
+                };
+                let value = match pair.get(2).and_then(|h| h.as_str()) {
+                    Some(h) => unhex(h).and_then(|b| http::HeaderValue::from_bytes(&b).ok()),
+                    None => pair[1]
+                        .as_str()
+                        .and_then(|v| http::HeaderValue::from_str(v).ok()),
+                };
+                if let Some(value) = value {
+                    headers.append(name, value);
                 }
             }
             let body = match (c["body"].as_str(), c["bodyHex"].as_str()) {
@@ -115,6 +126,10 @@ mod tests {
             "x-amz-target",
             "DynamoDB_20120810.CreateTable".parse().unwrap(),
         );
+        headers.insert(
+            "x-amz-meta-name",
+            http::HeaderValue::from_bytes("café".as_bytes()).unwrap(),
+        );
         let log = vec![
             Sent {
                 at_ms: 1,
@@ -138,6 +153,10 @@ mod tests {
             "DynamoDB_20120810.CreateTable"
         );
         assert_eq!(back[0].body, log[0].body);
+        assert_eq!(
+            back[0].headers.get("x-amz-meta-name").unwrap().as_bytes(),
+            "café".as_bytes()
+        );
         assert_eq!(back[1].body, log[1].body);
         assert_eq!(back[1].uri.path(), "/shop/logo.png");
         assert!(from_json("{\"kind\":\"something else\"}").is_err());

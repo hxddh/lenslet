@@ -71,11 +71,18 @@ pub fn chrome_bg() -> AdaptiveColor {
 pub fn separator() -> AdaptiveColor {
     AdaptiveColor::rgb(0xdcdcdc, 0x3a3a3a)
 }
+/// The text that is not secondary: what the window's content root sets, so
+/// every text without a color of its own follows the appearance (the
+/// default is black in dark mode too).
+pub fn label_text() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+}
 pub fn secondary_text() -> AdaptiveColor {
     AdaptiveColor::rgb(0x6e6e73, 0x98989d)
 }
+/// Faint, but readable on every background (the sidebar's included).
 pub fn tertiary_text() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xa1a1a6, 0x6e6e73)
+    AdaptiveColor::rgb(0x8a8a8e, 0x8e8e93)
 }
 pub fn hover_bg() -> AdaptiveColor {
     AdaptiveColor::rgb(0x000000, 0xffffff).opacity(0.06)
@@ -266,7 +273,16 @@ pub fn tool_button(
 ) -> impl IntoElement {
     let active = std::rc::Rc::new(active);
     let a2 = active.clone();
-    let tip = text(tip).text_size(small());
+    // nsh shows a tooltip as it is: it needs a box of its own to read on
+    // anything.
+    let tip = view()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(AdaptiveColor::rgb(0xffffff, 0x2c2c2e))
+        .border_1()
+        .border_color(AdaptiveColor::rgb(0xd1d1d6, 0x48484a))
+        .child(text(tip).text_size(small()).text_color(label_text()));
     let button = nsh_base::button()
         .on_press(on_press)
         .w(px(30.0))

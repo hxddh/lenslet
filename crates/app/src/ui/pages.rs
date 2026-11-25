@@ -174,7 +174,8 @@ pub fn resource(ui: Ui) -> AnyElement {
         let fetch = engine().contents(service, resource);
         ui.spawn(async move {
             let contents_of = fetch.await;
-            if which.get_untracked() == asked {
+            // The page may have closed meanwhile (its memo gone with it).
+            if untracked(|| which.try_get()) == Some(asked) {
                 contents.set(Some(contents_of));
             }
         });
@@ -188,6 +189,13 @@ pub fn resource(ui: Ui) -> AnyElement {
     effect(move || {
         let _ = (which.get(), inventory.get());
         fetch();
+    });
+    // Deleted while open: what it held is gone with it.
+    effect(move || {
+        if which.get().is_some() && holder.with(|h| h.is_none()) {
+            contents.set(None);
+            preview.set(None);
+        }
     });
     let touched = computed(move || {
         let Some((service, name)) = which.get() else {
@@ -240,7 +248,7 @@ pub fn resource(ui: Ui) -> AnyElement {
                                     format!("{} · {}", service_title(s), r.id)
                                 }
                             })
-                            .unwrap_or_default()
+                            .unwrap_or_else(|| ts("No longer exists", "已不存在"))
                     })
                     .text_size(small())
                     .text_color(secondary_text())
@@ -389,11 +397,15 @@ pub fn resource(ui: Ui) -> AnyElement {
                             return;
                         };
                         let fetch = engine().object_text(r.id.clone(), key.clone());
+                        let asked = which.get_untracked();
                         spawn(async move {
                             let text = fetch
                                 .await
                                 .unwrap_or_else(|| ts("(not text)", "（不是文本）"));
-                            preview.set(Some((key, text)));
+                            // Another bucket opened meanwhile: not its object.
+                            if untracked(|| which.try_get()) == Some(asked) {
+                                preview.set(Some((key, text)));
+                            }
                         });
                     },
                     n,

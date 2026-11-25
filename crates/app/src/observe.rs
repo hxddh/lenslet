@@ -168,6 +168,9 @@ impl CallObserver for Observer {
             }
             on_task.or(on_chain)
         };
+        if let Some(parent) = parent {
+            self.session.link(id, parent);
+        }
         self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(
             id,
             Open {

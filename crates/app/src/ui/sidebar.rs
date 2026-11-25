@@ -271,7 +271,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             if run.get().undone {
                                 tertiary_text()
                             } else {
-                                AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                                label_text()
                             }
                         }),
                 )

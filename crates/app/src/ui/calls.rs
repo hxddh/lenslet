@@ -356,7 +356,8 @@ pub fn calls(ui: Ui) -> AnyElement {
 
 fn selected_row_class() -> &'static str {
     match os() {
-        nsh_core::platform::Os::MacOs => "bg-[#0064e1] dark:bg-[#0059d1] text-white",
+        // A tint, not the solid accent: a failed call's red stays readable.
+        nsh_core::platform::Os::MacOs => "bg-[#d3e4fb] dark:bg-[#24426b]",
         nsh_core::platform::Os::Windows => "bg-[#e6f0fa] dark:bg-[#2d3d4f]",
         _ => "bg-[#dbe7f7] dark:bg-[#2a3f5a]",
     }
@@ -412,7 +413,7 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
             ui.show_calls();
         }),
     );
-    if let Some(page) = resource_page(call) {
+    if let Some(page) = resource_page(call, &super::engine().snapshot().resources) {
         items.push(
             MenuItem::new(t("Show Resource", "查看资源"))
                 .on_select(move || ui.page.set(page.clone())),
@@ -422,10 +423,8 @@ pub fn call_menu(ui: Ui, call: &Call) -> Vec<MenuItem> {
 }
 
 /// The resource page a call acted on, when Lenslet lists that resource.
-pub fn resource_page(call: &Call) -> Option<Page> {
-    let snapshot = super::engine().snapshot();
-    snapshot
-        .resources
+pub fn resource_page(call: &Call, resources: &[crate::session::Group]) -> Option<Page> {
+    resources
         .iter()
         .find(|g| g.service == call.service)
         .and_then(|g| {
@@ -458,7 +457,7 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
             .hover(|s| s.bg(hover_bg()))
             .child(text(label).text_size(small()).text_color(move || {
                 if selected() {
-                    AdaptiveColor::rgb(0x1d1d1f, 0xf5f5f7)
+                    label_text()
                 } else {
                     secondary_text()
                 }
@@ -532,8 +531,28 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
         )
 }
 
-/// What the list says with nothing to show.
+/// What the list says with nothing to show: no calls at all, a command
+/// that made none, or filters that leave none.
 fn empty(ui: Ui) -> impl IntoElement {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Why {
+        Nothing,
+        RunMadeNone,
+        Filtered,
+    }
+    let why = move || {
+        let filtering = !ui.query.with(|q| q.is_empty())
+            || ui.filter.get() != Filter::All
+            || ui.service.with(|s| s.is_some());
+        let run = ui.run();
+        let made = ui.snap.with(|s| s.stats.of_run(run).calls);
+        match (filtering, made, run) {
+            (true, n, _) if n > 0 => Why::Filtered,
+            (_, 0, Some(_)) => Why::RunMadeNone,
+            (_, 0, None) => Why::Nothing,
+            _ => Why::Filtered,
+        }
+    };
     view()
         .flex_1()
         .items_center()
@@ -541,34 +560,30 @@ fn empty(ui: Ui) -> impl IntoElement {
         .gap(px(6.0))
         .p(px(24.0))
         .child(
-            text(move || {
-                if ui.snap.with(|s| s.calls.is_empty()) {
-                    ts("No calls yet", "还没有调用")
-                } else {
-                    ts("No calls match", "没有符合条件的调用")
-                }
+            text(move || match why() {
+                Why::Nothing => ts("No calls yet", "还没有调用"),
+                Why::RunMadeNone => ts("No calls", "没有调用"),
+                Why::Filtered => ts("No calls match", "没有符合条件的调用"),
             })
             .text_size(px(15.0))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(secondary_text()),
         )
         .child(
-            text(move || {
-                if ui.snap.with(|s| s.calls.is_empty()) {
-                    format!(
-                        "{} {}",
-                        t(
-                            "Run your code in the terminal below, or point any SDK at",
-                            "在下方终端运行你的代码，或把任何 SDK 指向"
-                        ),
-                        engine().endpoint()
-                    )
-                } else {
-                    ts(
-                        "Change the search or the filters above.",
-                        "修改搜索或上方的筛选。",
-                    )
-                }
+            text(move || match why() {
+                Why::Nothing => format!(
+                    "{} {}",
+                    t(
+                        "Run your code in the terminal below, or point any SDK at",
+                        "在下方终端运行你的代码，或把任何 SDK 指向"
+                    ),
+                    engine().endpoint()
+                ),
+                Why::RunMadeNone => ts("This command made no AWS calls.", "这条命令没有调用 AWS。"),
+                Why::Filtered => ts(
+                    "Change the search or the filters above.",
+                    "修改搜索或上方的筛选。",
+                ),
             })
             .text_size(body())
             .text_color(tertiary_text()),
