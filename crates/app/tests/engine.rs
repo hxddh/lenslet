@@ -200,3 +200,44 @@ fn opens_a_resource_and_counts_what_it_holds() {
     assert_eq!(call.operation, "SendMessage");
     assert!(call.touches("sqs", "jobs"));
 }
+
+#[test]
+fn a_saved_account_opens_as_it_was() {
+    let engine = Engine::start(0).expect("start the engine");
+    let port = engine.port;
+    assert_eq!(sqs(port, "CreateQueue", r#"{"QueueName":"kept"}"#).0, 200);
+    let (status, _) = ddb(
+        port,
+        "CreateTable",
+        r#"{"TableName":"kept","AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],"KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}"#,
+    );
+    assert_eq!(status, 200);
+    wait_for("the table to take items", || {
+        ddb(
+            port,
+            "PutItem",
+            r#"{"TableName":"kept","Item":{"id":{"S":"1"}}}"#,
+        )
+        .0 == 200
+    });
+    let saved = engine.save_account().expect("save");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(engine.fresh());
+    assert!(!sqs(port, "ListQueues", "{}").1.contains("kept"));
+
+    let opened = runtime.block_on(engine.open_account(saved)).expect("open");
+    assert_eq!(opened.failed, 0, "{opened:?}");
+    assert!(sqs(port, "ListQueues", "{}").1.contains("kept"));
+    let (_, item) = ddb(
+        port,
+        "GetItem",
+        r#"{"TableName":"kept","Key":{"id":{"S":"1"}}}"#,
+    );
+    assert!(item.contains("\"1\""), "{item}");
+    // What was opened is the account's history now: it saves again whole.
+    assert!(engine.save_account().unwrap().contains("PutItem"));
+}

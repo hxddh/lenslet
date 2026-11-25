@@ -412,6 +412,24 @@ impl Session {
         inner.log.push(sent);
     }
 
+    /// What changed the account since it was empty, to save it.
+    pub fn log(&self) -> Result<Vec<Sent>, String> {
+        let inner = self.lock();
+        if inner.log_broken {
+            return Err("the session sent too much data to keep the account; start a new account to save one".into());
+        }
+        Ok(inner.log.clone())
+    }
+
+    /// The account, newly empty, is being built from `log`: it is what
+    /// made it.
+    pub fn adopt(&self, log: Vec<Sent>) {
+        let mut inner = self.lock();
+        inner.log_bytes = log.iter().map(|s| s.body.len()).sum();
+        inner.log = log;
+        inner.version += 1;
+    }
+
     /// Whether the account can go back to before the run `id`.
     pub fn can_rewind(&self, id: u64) -> bool {
         let inner = self.lock();

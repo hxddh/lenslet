@@ -376,6 +376,75 @@ impl Ui {
         });
     }
 
+    /// Keep the account in a file, to open again later or elsewhere.
+    pub fn save_account(&self) {
+        let ui = *self;
+        let saved = match engine().save_account() {
+            Ok(saved) => saved,
+            Err(e) => return self.say(e),
+        };
+        ui.spawn(async move {
+            let dialog = nsh_core::file_dialog::SaveDialog::new()
+                .file_name("account.lenslet.json")
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    t("Lenslet account", "Lenslet 账户"),
+                    ["json"],
+                ))
+                .button_label(t("Save", "保存"));
+            if let Ok(Some(path)) = pick_save_path(dialog).await {
+                match std::fs::write(&path, saved) {
+                    Ok(()) => ui.say(t("Saved the account", "已保存账户")),
+                    Err(e) => ui.say(e.to_string()),
+                }
+            }
+        });
+    }
+
+    /// Replace the account with one saved before: its resources are built
+    /// again, in a new engine.
+    pub fn open_account(&self) {
+        let ui = *self;
+        ui.spawn(async move {
+            let dialog = nsh_core::file_dialog::OpenDialog::files()
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    t("Lenslet account", "Lenslet 账户"),
+                    ["json"],
+                ))
+                .button_label(t("Open", "打开"));
+            let Ok(Some(paths)) = pick_paths(dialog).await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => return ui.say(e.to_string()),
+            };
+            if let Page::Resource(..) = ui.page.get_untracked() {
+                ui.page.set(Page::Activity);
+            }
+            ui.hold(ts("Opening the account…", "正在打开账户…"));
+            match engine().open_account(text).await {
+                Ok(r) if r.failed == 0 => ui.say(format!(
+                    "{} {} {}",
+                    t("Opened the account: replayed", "已打开账户：重放了"),
+                    r.sent,
+                    t("calls", "次调用")
+                )),
+                Ok(r) => ui.say(format!(
+                    "{} {} {}, {} {}",
+                    t("Opened the account: replayed", "已打开账户：重放了"),
+                    r.sent,
+                    t("calls", "次调用"),
+                    r.failed,
+                    t("failed", "次失败")
+                )),
+                Err(e) => ui.say(e),
+            }
+        });
+    }
+
     pub fn export_session(&self) {
         let ui = *self;
         let calls = self.snap.with_untracked(|s| s.calls.clone());
@@ -917,14 +986,30 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
     }
     let mut file = vec![
         key(
+            MenuItem::new(t("Open Account…", "打开账户…")),
+            "cmd+o",
+            Some("ctrl+shift+o"),
+        )
+        .on_select(move || ui.open_account()),
+        key(
+            MenuItem::new(t("Save Account…", "保存账户…")),
+            "cmd+s",
+            Some("ctrl+shift+s"),
+        )
+        .on_select(move || ui.save_account()),
+        MenuItem::separator(),
+        key(
             MenuItem::new(t("Export Session…", "导出会话…")),
             "cmd+e",
             Some("ctrl+shift+e"),
         )
         .on_select(move || ui.export_session()),
-        MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…"))
-            .shortcut("mod+shift+s")
-            .on_select(move || ui.save_policy()),
+        key(
+            MenuItem::new(t("Save IAM Policy…", "保存 IAM 策略…")),
+            "cmd+shift+s",
+            None,
+        )
+        .on_select(move || ui.save_policy()),
         MenuItem::separator(),
         key(
             MenuItem::new(t("Copy Environment", "复制环境变量")),
