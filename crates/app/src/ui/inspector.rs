@@ -11,7 +11,9 @@ use super::{CopyAs, Lang, Tab, Ui, calls, lang, sidebar::service_title, style::*
 use crate::{resources::clock, session::Call};
 
 pub fn inspector(ui: Ui) -> impl IntoElement {
-    let has_call = move || ui.selected.get().is_some();
+    // A call that left the list (the oldest go past 20,000) is no longer
+    // selected.
+    let has_call = move || ui.call().is_some();
     view()
         .flex_1()
         .bg(content_bg())
@@ -314,18 +316,25 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
         );
     let show_resource = when(
         move || {
+            // As the resources change: a bucket shows up a moment after
+            // the call that made it.
             call.with(|c| {
-                c.as_ref()
-                    .is_some_and(|c| calls::resource_page(&c.0).is_some())
+                c.as_ref().is_some_and(|c| {
+                    ui.snap
+                        .with(|s| calls::resource_page(&c.0, &s.resources).is_some())
+                })
             })
         },
         move || {
             view().flex_row().child(push_button(
                 || ts("Show Resource", "查看资源"),
                 move || {
-                    if let Some(page) =
-                        call.with_untracked(|c| c.as_ref().and_then(|c| calls::resource_page(&c.0)))
-                    {
+                    if let Some(page) = call.with_untracked(|c| {
+                        c.as_ref().and_then(|c| {
+                            ui.snap
+                                .with_untracked(|s| calls::resource_page(&c.0, &s.resources))
+                        })
+                    }) {
                         ui.page.set(page);
                     }
                 },
@@ -360,7 +369,7 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                     .flex_row()
                     .items_center()
                     .gap(px(8.0))
-                    .child(text(move || ts("Caused by", "由此引起")).w(px(96.0)).text_size(small()).text_color(secondary_text()))
+                    .child(text(move || ts("Caused by", "起因")).w(px(96.0)).text_size(small()).text_color(secondary_text()))
                     .child(
                         nsh_base::button()
                             .on_press(move || {
@@ -466,7 +475,7 @@ fn failure_box(call: Held) -> impl IntoElement {
                 .child(
                     text(move || {
                         if unsupported() {
-                            ts("Not emulated", "模拟器不支持")
+                            ts("Not emulated", "未模拟")
                         } else {
                             call.with(|c| c.as_ref().and_then(|c| c.0.failure.as_ref().map(|f| f.code.clone())).unwrap_or_default())
                         }
@@ -634,7 +643,13 @@ fn exchange(call: Held, request: bool) -> impl IntoElement {
         .child(super::style::section(|| ts("Body", "正文")))
         .child(code(Box::new(body)))
         .child(view().h(px(8.0)))
-        .child(super::style::section(|| ts("Headers", "请求头 / 响应头")))
+        .child(super::style::section(move || {
+            if request {
+                ts("Headers", "请求头")
+            } else {
+                ts("Headers", "响应头")
+            }
+        }))
         .child(code(Box::new(headers)))
 }
 

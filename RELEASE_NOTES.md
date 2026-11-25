@@ -1,64 +1,91 @@
-# Lenslet 17.0.0
+# Lenslet 17.0.1
 
-Lenslet 17 makes what it shows trustworthy and the account worth keeping.
+A bug-fix release, from a deep review of 17.0.
 
-## Runs hold only your command's calls
+## Dark mode
+- **Text shows in dark mode.** Text without a color of its own stayed
+  black on the dark backgrounds, so most of the window was unreadable:
+  the sidebar, the calls, buttons and the terminal's prompt.
+- Faint text (counts, hints, the terminal's endpoint) is now readable on
+  every background.
+- Toolbar tooltips have a box of their own, in both modes.
+- On macOS, a selected failed call is tinted rather than solid blue, so
+  its red status stays readable.
 
-The terminal now signs its calls with an access key of its own. A run
-holds only the terminal's calls, plus the keys AWS hands the terminal's
-programs (an assumed role's). Your IDE, a second terminal or a test
-runner elsewhere no longer lands in the run that happens to be going.
-Their calls stay under All Activity.
+## Runs
+- **The calls AWS makes inside a command's call are in its run.** For
+  example, a function's own calls during `aws lambda invoke`: they were
+  recorded before the call that caused them, and so were left out of the
+  run, its summary and its IAM policy.
+- A run with no calls says so ("This command made no AWS calls") instead
+  of blaming the filters.
 
-## Your code or the emulator?
+## The account
+- **New Account is refused while a rewind or an opened account is being
+  rebuilt.** It used to let the replay go on filling the new account.
+- The new engine is built before the account changes over, so no call
+  lands between the account's history and the engine.
+- The history counts headers and calls, not only bodies, so a long
+  polling loop no longer grows it without bound.
+- Save Account writes on the engine's threads, and the window no longer
+  freezes on a large account.
+- Header values that are not plain text survive a save.
 
-When a call fails, its details say whether AWS Emulator is known to differ
-from AWS there, with a link to the issue. Lenslet reads this from the
-emulator's own list of what it does not do yet, indexed for Lenslet's
-services when it is built. An operation the emulator has not implemented
-says so plainly. Otherwise Lenslet names the known difference for that
-operation and error, for you to weigh.
+## Security
+- The endpoint answers only requests addressed to this machine
+  (127.0.0.1, ::1, localhost). A web page whose name was made to point at
+  127.0.0.1 (DNS rebinding) can no longer read or change the account.
 
-## Keep the account
+## The terminal
+- **Showing the terminal again no longer types into the shell.** Programs
+  had asked the terminal where the cursor is, and those questions were
+  answered again into the prompt.
+- After a long full-screen program (vim, htop), showing the terminal again
+  keeps its screen.
+- Output that arrived while the terminal was reappearing was shown twice;
+  it now shows once.
+- **bash**
+  - A profile with `set -u` or `set -e`, or a prompt command ending in
+    `;`, keeps its runs, and a failing command inside `&&` no longer ends
+    the shell.
+  - A profile with only `~/.bashrc` is read.
+  - A multi-line command keeps its lines.
+- **zsh on macOS keeps your history.** macOS's `/etc/zshrc` put the
+  history file in Lenslet's temporary folder.
+- The variables of the terminal Lenslet was started from (`TERM_PROGRAM`
+  and the like) are dropped.
+- A profile's `ignore_configured_endpoint_urls` can no longer send the
+  terminal's calls to AWS.
+- Run Again and the welcome examples start a new shell if the old one
+  exited.
 
-**File → Save Account** writes the calls that made the account to a file.
-**Open Account** builds it again in a new engine, the way a rewind does:
-- on your machine tomorrow;
-- on a teammate's, to reproduce what you see;
-- as a starting point you return to.
+## The window
+- **Window size**
+  - On Linux the window no longer shrinks a little at every launch.
+  - The smallest window is now 960×600, so the calls keep room beside the
+    inspector.
+- **A deleted resource's page** says the resource no longer exists, and
+  its old contents go away.
+- **The inspector**
+  - It no longer shows an empty shell for a call that left the list.
+  - Show Resource appears as soon as the resource exists.
+  - A call selected on another run's page is no longer kept.
+- **Shortcuts**
+  - The menu's own items (Undo, Copy, Quit) follow the in-app language
+    switch.
+  - Off macOS, Sidebar and Inspector use Ctrl+Shift+B and Ctrl+Shift+I.
+    On Windows, Ctrl+Alt is AltGr and typed letters.
+- **Faster with many calls**
+  - The calls list is rebuilt only when the calls or the filters change,
+    and not while a resource page is on show.
+  - Show Resource no longer copies the whole session.
+- Clear Calls also clears the service filter.
+- Wording fixes in Chinese.
 
-An opened account saves and rewinds like any other.
-
-## One window, everywhere
-
-Lenslet is built on Native Shell 0.7. Its window model keeps the system's
-host window hidden and shows only the window Lenslet declares, so there is
-exactly one window, on macOS too. Closing it quits Lenslet: the account
-lives in memory, unless you save it.
-
-Also from Native Shell 0.7:
-- **Toolbar.** It keeps clear of the window's controls only where it meets
-  them.
-- **Calls table.** The Resource or Error column fills the room that is
-  left.
-- **Terminal.** It takes the shell's bytes as they come, and draws at once
-  on Linux, with no delay at launch.
-- **Copy.** It says so only when the system took it.
-
-## Faster with many calls
-
-- The session keeps its counts as calls arrive: failures per run,
-  services, the permissions shown. The window no longer recounts every call
-  on each change.
-- A large session redraws at a calmer pace.
-- A run that changed thousands of objects summarizes them in linear time;
-  before, it took quadratic time.
-- The resource inventory rests between looks while calls stream in.
-
-With 20,000 calls the window answers at once, and a debug build serves
-about half as many more calls a second.
-
-## Shortcuts
-
-Open Account is ⌘O (Ctrl+Shift+O) and Save Account is ⌘S (Ctrl+Shift+S).
-Save IAM Policy keeps ⇧⌘S on macOS and has no shortcut elsewhere.
+## Known limits
+- **Ids made up by the emulator.** Rewinding or opening an account cannot
+  rebuild resources whose ids the emulator makes up anew, such as KMS keys
+  and Lambda event source mappings. Later calls that name them fail, and
+  Lenslet reports them as failed.
+- **SQS messages.** Messages a program received and deleted come back
+  after a rewind.

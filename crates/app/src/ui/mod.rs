@@ -60,6 +60,16 @@ pub fn ts(en: &'static str, zh: &'static str) -> String {
     t(en, zh).to_string()
 }
 
+/// Show the window in `lang`, the system's own menu items (Undo, Copy,
+/// Quit) too.
+fn set_lang(to: Lang) {
+    lang().set(to);
+    nsh_core::i18n::set_locale(nsh_core::platform::Locale::parse(match to {
+        Lang::En => "en-US",
+        Lang::Zh => "zh-CN",
+    }));
+}
+
 fn system_lang() -> Lang {
     let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
@@ -258,6 +268,8 @@ impl Ui {
     pub fn clear(&self) {
         engine().clear();
         self.selected.set(None);
+        // The services listed start over too.
+        self.service.set(None);
         // Only the run still going stays.
         if let Page::Run(id) = self.page.get_untracked()
             && !engine().snapshot().runs.iter().any(|r| r.id == id)
@@ -567,7 +579,9 @@ pub fn App() -> impl IntoElement {
     bar.height = Some(bar_height());
     let mut attributes = WindowAttributes::default();
     attributes.title_bar = Some(bar);
-    attributes.min_size = Some(Some(size(px(760.0), px(480.0))));
+    // Room for the sidebar, the calls with their filters, the inspector and
+    // the terminal: smaller, the calls had no room left.
+    attributes.min_size = Some(Some(size(px(960.0), px(600.0))));
     if matches!(os(), Os::MacOs | Os::Windows) {
         attributes.backdrop = Some(Backdrop::Sidebar);
     }
@@ -653,12 +667,34 @@ fn workbench() -> AnyElement {
     }
     // The list: the calls of the run on show that pass the filters, as a
     // tree of what caused what, or flat in the chosen order.
+    // Only while the calls are on show, and only when they or the filters
+    // changed (a resource count changing is a new snapshot too).
+    let listed = std::rc::Rc::new(std::cell::RefCell::new(None));
     effect(move || {
+        if matches!(ui.page.get(), Page::Resource(..)) {
+            return;
+        }
         let query = ui.query.get().to_lowercase();
         let filter = ui.filter.get();
         let service = ui.service.get();
         let sort = ui.sort.get();
         let run = ui.run();
+        let key = ui.snap.with(|s| {
+            (
+                s.calls.len(),
+                s.calls.first().map(|c| c.seq),
+                s.calls.last().map(|c| c.seq),
+                query.clone(),
+                filter,
+                service.clone(),
+                sort.clone(),
+                run,
+            )
+        });
+        if listed.borrow().as_ref() == Some(&key) {
+            return;
+        }
+        *listed.borrow_mut() = Some(key);
         let rows = ui.snap.with(|s| {
             calls::rows(
                 &s.calls,
@@ -670,6 +706,15 @@ fn workbench() -> AnyElement {
             )
         });
         ui.visible.set(Rc::new(rows));
+    });
+    // A call selected on another run's page is not this page's.
+    effect(move || {
+        let Page::Run(id) = ui.page.get() else { return };
+        if let Some(call) = untracked(|| ui.call())
+            && call.run != Some(id)
+        {
+            ui.selected.set(None);
+        }
     });
     // A command that starts shows its run, when the latest run or everything was on show.
     {
@@ -730,8 +775,8 @@ fn workbench() -> AnyElement {
                             .child(nsh_base::resizable_panel().child(page(ui)))
                             .child(
                                 nsh_base::resizable_panel()
-                                    .size(px(400.0))
-                                    .size_range(px(300.0)..px(720.0))
+                                    .size(px(360.0))
+                                    .size_range(px(280.0)..px(720.0))
                                     .visible(move || {
                                         ui.inspector.get()
                                             && !matches!(ui.page.get(), Page::Resource(..))
@@ -890,7 +935,13 @@ fn toolbar(ui: Ui) -> impl IntoElement {
             move || {
                 tool_button(
                     Icon::Inspector,
-                    move || format!("{} ({})", t("Inspector", "检查器"), key_label("mod+alt+i")),
+                    move || {
+                        format!(
+                            "{} ({})",
+                            t("Inspector", "检查器"),
+                            key_label(inspector_key())
+                        )
+                    },
                     move || ui.inspector.get(),
                     move || ui.inspector.update(|v| *v = !*v),
                 )
@@ -983,7 +1034,16 @@ fn sidebar_key() -> String {
     if os() == Os::MacOs {
         "ctrl+cmd+s".into()
     } else {
-        "mod+alt+s".into()
+        // Not Ctrl+Alt: on Windows it is AltGr, which types letters.
+        "ctrl+shift+b".into()
+    }
+}
+
+fn inspector_key() -> &'static str {
+    if os() == Os::MacOs {
+        "cmd+alt+i"
+    } else {
+        "ctrl+shift+i"
     }
 }
 
@@ -1135,7 +1195,7 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 .shortcut(&sidebar_key())
                 .on_select(move || ui.sidebar.update(|v| *v = !*v)),
             check("Inspector", "检查器", ui.inspector.get_untracked())
-                .shortcut("mod+alt+i")
+                .shortcut(inspector_key())
                 .on_select(move || ui.inspector.update(|v| *v = !*v)),
             check("Terminal", "终端", ui.terminal.get_untracked())
                 .shortcut("ctrl+`")
@@ -1146,10 +1206,10 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 [
                     MenuItem::new("English")
                         .checked(lang().get_untracked() == Lang::En)
-                        .on_select(|| lang().set(Lang::En)),
+                        .on_select(|| set_lang(Lang::En)),
                     MenuItem::new("中文")
                         .checked(lang().get_untracked() == Lang::Zh)
-                        .on_select(|| lang().set(Lang::Zh)),
+                        .on_select(|| set_lang(Lang::Zh)),
                 ],
             ),
         ],
