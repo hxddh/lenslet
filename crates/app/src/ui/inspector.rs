@@ -534,19 +534,32 @@ fn known_gap(call: Held) -> impl IntoElement {
                                     .map(|c| c.0.operation.clone())
                                     .unwrap_or_default()
                             });
-                            match (k.exact, lang().get()) {
-                                (true, Lang::Zh) => {
-                                    format!("这是 AWS Emulator 的已知缺陷：{}", k.title)
-                                }
-                                (true, Lang::En) => {
-                                    format!("A known AWS Emulator gap: {}", k.title)
-                                }
-                                (false, Lang::Zh) => format!(
-                                    "AWS Emulator 在 {op} 上有 {} 个已知缺陷，例如：{}",
+                            let code = call.with(|c| {
+                                c.as_ref()
+                                    .and_then(|c| c.0.failure.as_ref().map(|f| f.code.clone()))
+                                    .unwrap_or_default()
+                            });
+                            // Only an operation the emulator does not do yet is
+                            // surely its fault; otherwise this is what it is known
+                            // to get wrong there, for you to weigh.
+                            let missing = k.exact && code == "NotImplemented";
+                            match (missing, k.exact, lang().get()) {
+                                (true, _, Lang::Zh) => format!("AWS Emulator 还没有实现这个操作：{}", k.title),
+                                (true, _, Lang::En) => format!("AWS Emulator does not do this yet: {}", k.title),
+                                (false, true, Lang::Zh) => format!(
+                                    "AWS Emulator 列出了 {op} 返回 {code} 时的已知差异：{}",
+                                    k.title
+                                ),
+                                (false, true, Lang::En) => format!(
+                                    "AWS Emulator lists a known difference from AWS for {op} answering {code}: {}",
+                                    k.title
+                                ),
+                                (false, false, Lang::Zh) => format!(
+                                    "AWS Emulator 列出了 {op} 的 {} 个已知差异，例如：{}",
                                     k.count, k.title
                                 ),
-                                (false, Lang::En) => format!(
-                                    "AWS Emulator lists {} known gaps in {op}, such as: {}",
+                                (false, false, Lang::En) => format!(
+                                    "AWS Emulator lists {} known differences from AWS in {op}, such as: {}",
                                     k.count, k.title
                                 ),
                             }
