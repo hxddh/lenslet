@@ -22,8 +22,10 @@ use std::{
 
 use nsh_base::DataTableSort;
 use nsh_core::{
-    desktop::{Backdrop, MenuRole, TitleBarOptions, TitleBarStyle, WindowAttributes},
-    element::desktop::{MenuItem, main_window, popup_menu, set_application_menu, title_bar},
+    desktop::{Backdrop, MenuRole, QuitMode, TitleBarOptions, TitleBarStyle, WindowAttributes},
+    element::desktop::{
+        MenuItem, popup_menu, set_application_menu, set_quit_mode, title_bar, window as app_window,
+    },
     platform::Os,
     prelude::*,
 };
@@ -195,8 +197,17 @@ impl Ui {
     }
 
     pub fn copy(&self, what: String, said: &'static str, said_zh: &'static str) {
-        set_clipboard(what);
-        self.say(t(said, said_zh));
+        // The system says whether the copy reached it.
+        let copied = set_clipboard(what);
+        let ui = *self;
+        self.spawn(async move {
+            match copied.await {
+                nsh_core::element::ClipboardWrite::Failed => {
+                    ui.say(t("Could not copy", "无法复制"))
+                }
+                _ => ui.say(t(said, said_zh)),
+            }
+        });
     }
 
     /// Show a call in the list and the inspector.
@@ -464,13 +475,20 @@ pub fn App() -> impl IntoElement {
     if matches!(os(), Os::MacOs | Os::Windows) {
         attributes.backdrop = Some(Backdrop::Sidebar);
     }
-    // The root renders in the platform's main window, which the platform
-    // opens and keeps the place of; a `window()` here would open a second.
-    main_window().set(attributes);
-    match &started {
-        Ok(_) => workbench(),
-        Err(error) => cannot_start(error.clone()),
-    }
+    // One window, the app: closing it quits Lenslet on every platform (the
+    // account lives in memory, there is nothing to come back to). The
+    // platform's own host window stays hidden.
+    set_quit_mode(QuitMode::LastWindowClosed);
+    app_window()
+        .id("main")
+        .title("Lenslet")
+        .default_size(size(px(1320.0), px(840.0)))
+        .restore_bounds(true)
+        .attributes(attributes)
+        .content(move || match &started {
+            Ok(_) => workbench(),
+            Err(error) => cannot_start(error.clone()),
+        })
 }
 
 fn cannot_start(error: String) -> AnyElement {
