@@ -757,7 +757,12 @@ mod tests {
                 "debug trap: {debug_trap}"
             );
             // Only the first `echo one` is in history.
-            assert!(out.contains("\r1\r\n"), "debug trap: {debug_trap}: {out:?}");
+            // (Its count stands alone on a line, whatever escapes the
+            // prompt has around it.)
+            assert!(
+                out.split(['\r', '\n']).any(|line| line == "1"),
+                "debug trap: {debug_trap}: {out:?}"
+            );
         }
     }
 
