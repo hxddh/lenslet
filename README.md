@@ -99,10 +99,9 @@ for macOS, a tar.gz for Linux (GTK 4.14 or newer).
 ```bash
 git clone --recurse-submodules --shallow-submodules https://github.com/hxddh/lenslet
 cd lenslet
-cargo run --release
 ```
 
-Then apply Lenslet's patches to the emulator:
+Apply Lenslet's patches to the emulator before the first build:
 
 ```bash
 git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
@@ -110,8 +109,23 @@ git -C third_party/aws-emulator apply ../../patches/aws-emulator-observer.patch
 git -C third_party/aws-emulator apply ../../patches/aws-emulator-macos.patch
 ```
 
+Then build and run it:
+
+```bash
+cargo run --release
+```
+
 The observer patch lets Lenslet see the calls AWS makes inside the emulator
-(a notification invoking a function, the function's own calls).
+(a notification invoking a function, the function's own calls). On macOS a
+function's memory is not measured, so its memory size is not enforced; its
+timeout is.
+
+The tests that drive a whole app with boto3 (`chain`, `rewind`) need a
+Python with boto3:
+
+```bash
+LENSLET_PYTHON=python3 cargo test -p lenslet --test chain --test rewind -- --ignored
+```
 
 The window uses [Native Shell](https://github.com/longbridge/nsh): AppKit on
 macOS, GTK 4 on Linux. On Linux, install `libgtk-4-dev` first. The first

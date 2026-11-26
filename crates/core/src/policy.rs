@@ -44,6 +44,42 @@ pub fn compile_value(access: &[Access]) -> Value {
     json!({ "Version": "2012-10-17", "Statement": statements })
 }
 
+/// What a policy document allows: each action of an `Allow` statement on
+/// each of its resources. A document that is not one allows nothing.
+pub fn allowed(document: &str) -> Vec<Access> {
+    let Ok(value) = serde_json::from_str::<Value>(document) else {
+        return Vec::new();
+    };
+    let list = |v: &Value| -> Vec<String> {
+        match v {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|i| i.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let statements = match &value["Statement"] {
+        Value::Array(items) => items.clone(),
+        one @ Value::Object(_) => vec![one.clone()],
+        _ => Vec::new(),
+    };
+    statements
+        .iter()
+        .filter(|s| s["Effect"] == "Allow")
+        .flat_map(|s| {
+            let resources = list(&s["Resource"]);
+            list(&s["Action"]).into_iter().flat_map(move |action| {
+                resources
+                    .clone()
+                    .into_iter()
+                    .map(move |resource| Access::new(action.clone(), resource))
+            })
+        })
+        .collect()
+}
+
 /// Which fields of a service's ARNs are empty in AWS (region, account).
 fn empty_fields(service: &str, resource: &str) -> (bool, bool) {
     match service {
@@ -120,6 +156,28 @@ mod tests {
 
     fn access(action: &str, resource: &str) -> Access {
         Access::new(action, resource)
+    }
+
+    #[test]
+    fn reads_back_what_a_compiled_policy_allows() {
+        let first = vec![access(
+            "dynamodb:PutItem",
+            "arn:aws:dynamodb:*:*:table/orders",
+        )];
+        let mut both = allowed(&compile(&first));
+        assert_eq!(both, first);
+        both.push(access(
+            "dynamodb:PutItem",
+            "arn:aws:dynamodb:*:*:table/carts",
+        ));
+        let mut again = allowed(&compile(&both));
+        again.sort();
+        both.sort();
+        assert_eq!(again, both);
+        assert!(
+            allowed(r#"{"Statement":{"Effect":"Deny","Action":"*","Resource":"*"}}"#).is_empty()
+        );
+        assert!(allowed("not json").is_empty());
     }
 
     fn golden_access() -> Vec<Access> {

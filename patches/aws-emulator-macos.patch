@@ -10,11 +10,15 @@ index 9b6d42bde..14fac343a 100644
  pub(super) fn faulted_bytes() -> u64 {
      match ::nix::sys::resource::getrusage(::nix::sys::resource::UsageWho::RUSAGE_THREAD) {
          Ok(usage) => {
-@@ -37,6 +38,12 @@ pub(super) fn faulted_bytes() -> u64 {
+@@ -37,6 +38,16 @@ pub(super) fn faulted_bytes() -> u64 {
      }
  }
  
-+/// Hosts other than Linux report no per-thread usage, so a run's memory is not measured there.
++/// Hosts other than Linux report no memory per thread, and a figure for the whole process
++/// would charge one run with every other thread's memory (another function's, the host's)
++/// and stop runs that hold little. So a run's memory is not measured there: its
++/// `MemorySize` is not enforced and its "Max Memory Used" reads 0, while its `Timeout`
++/// still bounds it, as on Linux.
 +#[cfg(not(target_os = "linux"))]
 +pub(super) fn faulted_bytes() -> u64 {
 +    0

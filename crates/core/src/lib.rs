@@ -4,6 +4,7 @@
 //! name for its target, and the IAM policy for a set of permissions.
 
 pub mod access;
+pub mod body;
 pub mod cbor;
 pub mod policy;
 pub mod problem;

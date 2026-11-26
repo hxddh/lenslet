@@ -63,6 +63,16 @@ pub fn bind(port: u16) -> std::io::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
+/// The same port on IPv6's loopback (`[::1]`, and `localhost` where it names
+/// that first), when the machine has one.
+pub fn bind_v6(port: u16) -> Option<std::net::TcpListener> {
+    let listener =
+        std::net::TcpListener::bind(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))
+            .ok()?;
+    listener.set_nonblocking(true).ok()?;
+    Some(listener)
+}
+
 async fn handle(
     request: Request<hyper::body::Incoming>,
     emulator: Emulator,
@@ -126,12 +136,14 @@ async fn handle(
     crate::observe::chain_started(&sent.headers, id);
     let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
     let key = lenslet_core::wire::wire_info(&parts.headers, path).access_key_id;
-    session.arrive(id, key.as_deref());
+    let client = header(&parts.headers, "user-agent").and_then(|ua| crate::session::client_of(&ua));
+    session.arrive(id, key.as_deref(), client.as_deref());
     let request = http::Request::from_parts(sent, body.clone());
-    // The account this call goes to; a new account started meanwhile does not
-    // get it in its log.
-    let generation = session.generation();
-    let response = emulator.handle_traced(request, id).await;
+    // The account this call goes to, told as it takes the engine: an account
+    // that takes its place meanwhile does not get it in its log.
+    let (response, generation) = emulator
+        .handle_traced(request, id, || session.generation())
+        .await;
     let (rparts, rbody) = response.into_parts();
     let mut call = record(
         Sent {
@@ -149,19 +161,29 @@ async fn handle(
         started.elapsed().as_millis() as u64,
     );
     call.id = id;
-    if changes_resources(&call) {
+    let issued = crate::engine::issued_ids(&call.operation, &rbody);
+    // A receive that took messages changed the queue, and the handles it got
+    // are what the deletes after it name.
+    let received = call.operation == "ReceiveMessage" && !issued.is_empty();
+    if changes_resources(&call) || received {
         refresher.poke();
         if !call.unsupported && call.status < 400 {
-            session.keep(
-                crate::session::Sent {
-                    at_ms,
-                    method: parts.method.clone(),
-                    uri: parts.uri.clone(),
-                    headers: parts.headers.clone(),
-                    body: body.clone(),
-                },
-                generation,
-            );
+            let sent = crate::session::Sent {
+                at_ms,
+                method: parts.method.clone(),
+                uri: parts.uri.clone(),
+                headers: parts.headers.clone(),
+                body: body.clone(),
+                issued,
+                grant: None,
+            };
+            // A role created again gets what Lenslet allowed it before.
+            if let Some(role) = sent.created_role() {
+                for grant in session.grants_for(&role) {
+                    emulator.handle(grant.request()).await;
+                }
+            }
+            session.keep(sent, generation);
         }
     }
     session.record(call);
@@ -216,25 +238,13 @@ pub fn record(
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
-    let info = wire::wire_info(&request.headers, &path);
-    let content_type = header(&request.headers, "content-type");
-    // Query-protocol services (SNS, IAM, STS) name the action in the body.
-    let operation = info
-        .operation
-        .clone()
-        .or_else(|| wire::form_action(body))
-        .unwrap_or_else(|| {
-            wire::fallback_operation(
-                &info.service,
-                request.method.as_str(),
-                &path,
-                &request.headers,
-            )
-        });
+    let info = wire::wire_info(request.headers, &path);
+    let content_type = header(request.headers, "content-type");
+    let (_, operation) = self::operation(request.method, request.uri, request.headers, body);
     let status = response.status.as_u16();
-    let request_text = text_of(body, content_type.as_deref());
+    let request_text = text_of(request.headers, body, content_type.as_deref());
     let response_type = header(&response.headers, "content-type");
-    let response_text = text_of(rbody, response_type.as_deref());
+    let response_text = text_of(response.headers, rbody, response_type.as_deref());
 
     let mut trace = Trace {
         method: request.method.to_string(),
@@ -257,7 +267,8 @@ pub fn record(
         ..Default::default()
     };
     let (own, implied) = access::derive(&trace);
-    trace.problem = problem::from_response(status, &trace.response.headers, Some(&response_text));
+    trace.problem =
+        problem::from_response(status, &trace.response.headers, Some(&response_text.shown));
     let target = lenslet_core::target::summary(&trace);
     let failure = trace.problem.as_ref().map(|p| Failure {
         code: p.code.clone(),
@@ -295,19 +306,28 @@ pub fn record(
             .iter()
             .find_map(|name| header(&response.headers, name)),
         access: own.into_iter().chain(implied).collect(),
-        request: exchange(
-            &trace.request.headers,
-            content_type,
-            request_text,
-            body.len(),
-        ),
-        response: exchange(
-            &trace.response.headers,
-            response_type,
-            response_text,
-            rbody.len(),
-        ),
+        request: exchange(&trace.request.headers, content_type, request_text, body),
+        response: exchange(&trace.response.headers, response_type, response_text, rbody),
     }
+}
+
+/// The service and operation a request is for.
+pub fn operation(
+    method: &http::Method,
+    uri: &http::Uri,
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> (String, String) {
+    let path = uri.path_and_query().map_or("/", |p| p.as_str());
+    let info = wire::wire_info(headers, path);
+    // Query-protocol services (SNS, IAM, STS) name the action in the body,
+    // which may be framed or compressed.
+    let operation = info
+        .operation
+        .clone()
+        .or_else(|| wire::form_action(&lenslet_core::body::decode(headers, body).bytes))
+        .unwrap_or_else(|| wire::fallback_operation(&info.service, method.as_str(), path, headers));
+    (info.service, operation)
 }
 
 fn header(headers: &http::HeaderMap, name: &str) -> Option<String> {
@@ -317,53 +337,80 @@ fn header(headers: &http::HeaderMap, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The body as text: CBOR decoded to JSON, UTF-8 as is, binary as a note.
-fn text_of(body: &Bytes, content_type: Option<&str>) -> String {
+/// A body as the window and lenslet-core read it.
+struct Text {
+    /// What the window shows: the text, or a note for data.
+    shown: String,
+    /// `shown` is what the body says (not a note about it).
+    readable: bool,
+    /// The encodings undone to read it (`aws-chunked`, `gzip`, `cbor`).
+    encoding: Vec<&'static str>,
+}
+
+/// The body as text: its wire encodings undone (`aws-chunked` framing,
+/// gzip), CBOR decoded to JSON, UTF-8 as is, binary as a note.
+fn text_of(headers: &http::HeaderMap, body: &Bytes, content_type: Option<&str>) -> Text {
+    let note = |shown: String| Text {
+        shown,
+        readable: false,
+        encoding: Vec::new(),
+    };
     if body.is_empty() {
-        return String::new();
+        return Text {
+            shown: String::new(),
+            readable: true,
+            encoding: Vec::new(),
+        };
     }
     // An object's data, not a request to read: never copied whole.
     if body.len() > MAX_TEXT {
-        return format!("({} bytes)", body.len());
+        return note(format!("({} bytes)", body.len()));
     }
+    let decoded = lenslet_core::body::decode(headers, body);
+    let mut encoding = decoded.encoding;
     if content_type.is_some_and(|t| t.contains("cbor"))
-        && let Some(json) = cbor::decode_cbor_json(body)
+        && let Some(json) = cbor::decode_cbor_json(&decoded.bytes)
     {
-        return json;
+        encoding.push("cbor");
+        return Text {
+            shown: json,
+            readable: true,
+            encoding,
+        };
     }
-    match std::str::from_utf8(body) {
-        Ok(text) => text.to_string(),
-        Err(_) => format!("({} bytes of binary data)", body.len()),
+    match std::str::from_utf8(&decoded.bytes) {
+        Ok(text) => Text {
+            shown: text.to_string(),
+            readable: true,
+            encoding,
+        },
+        Err(_) => note(format!("({} bytes of binary data)", body.len())),
     }
 }
 
-fn body_trace(body: &Bytes, text: &str) -> Option<BodyTrace> {
-    if body.len() > MAX_TEXT {
-        return Some(BodyTrace {
-            bytes: body.len() as u64,
-            ..Default::default()
-        });
-    }
+fn body_trace(body: &Bytes, text: &Text) -> Option<BodyTrace> {
     (!body.is_empty()).then(|| BodyTrace {
-        text: std::str::from_utf8(body)
-            .is_ok()
-            .then(|| text.to_string())
-            .or_else(|| {
-                // CBOR decoded to JSON still names the resources.
-                text.starts_with('{').then(|| text.to_string())
-            }),
+        // What lenslet-core reads: the payload, never the frames or a note.
+        text: text.readable.then(|| text.shown.clone()),
+        encoding: (!text.encoding.is_empty()).then(|| text.encoding.join(", ")),
         bytes: body.len() as u64,
-        binary: std::str::from_utf8(body).is_err(),
+        binary: !text.readable,
         ..Default::default()
     })
 }
 
+/// The most of a body that is not its own text (binary, CBOR, framed,
+/// compressed) a call keeps, to copy it as curl.
+const MAX_RAW: usize = 64 * 1024;
+
 fn exchange(
     headers: &[HeaderTrace],
     content_type: Option<String>,
-    mut body: String,
-    bytes: usize,
+    text: Text,
+    raw: &Bytes,
 ) -> Exchange {
+    let mut body = text.shown;
+    let mut verbatim = text.readable && text.encoding.is_empty();
     if body.len() > MAX_BODY {
         let mut end = MAX_BODY;
         while !body.is_char_boundary(end) {
@@ -371,6 +418,7 @@ fn exchange(
         }
         body.truncate(end);
         body.push_str("\n…");
+        verbatim = false;
     }
     Exchange {
         headers: headers
@@ -379,7 +427,9 @@ fn exchange(
             .collect(),
         content_type,
         body,
-        bytes,
+        bytes: raw.len(),
+        verbatim,
+        raw: (!verbatim && !raw.is_empty() && raw.len() <= MAX_RAW).then(|| raw.clone()),
     }
 }
 
@@ -432,6 +482,119 @@ pub fn changes_resources(call: &Call) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recorded(headers: &[(&str, &str)], method: &str, path: &str, body: &[u8]) -> Call {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in headers {
+            map.append(
+                http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        let uri: http::Uri = path.parse().unwrap();
+        let method: http::Method = method.parse().unwrap();
+        record(
+            Sent {
+                method: &method,
+                uri: &uri,
+                headers: &map,
+            },
+            &Bytes::copy_from_slice(body),
+            Answered {
+                status: http::StatusCode::OK,
+                headers: &http::HeaderMap::new(),
+            },
+            &Bytes::new(),
+            0,
+            1,
+        )
+    }
+
+    fn scope(service: &str) -> String {
+        format!(
+            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
+        )
+    }
+
+    #[test]
+    fn reads_what_calls_say_under_their_wire_encodings() {
+        // An SDK's streaming upload: the object, not its frames.
+        let call = recorded(
+            &[
+                ("authorization", &scope("s3")),
+                ("host", "127.0.0.1:4510"),
+                ("content-encoding", "aws-chunked"),
+                ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+                ("x-amz-trailer", "x-amz-checksum-crc32"),
+            ],
+            "PUT",
+            "/shop/notes.txt?x-id=PutObject",
+            b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n",
+        );
+        assert_eq!(call.request.body, "hello");
+        assert!(!call.request.verbatim && call.request.raw.is_some());
+        assert_eq!(call.target.as_deref(), Some("s3://shop/notes.txt"));
+
+        // A compressed Query form: its action and what it names.
+        let form = b"Action=Publish&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Anews&Message=hi";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, form).unwrap();
+        let call = recorded(
+            &[
+                ("authorization", &scope("sns")),
+                (
+                    "content-type",
+                    "application/x-www-form-urlencoded; charset=utf-8",
+                ),
+                ("content-encoding", "gzip"),
+            ],
+            "POST",
+            "/",
+            &gz.finish().unwrap(),
+        );
+        assert_eq!(call.operation, "Publish");
+        assert_eq!(call.target.as_deref(), Some("topic/news"));
+        assert_eq!(
+            call.access.first().map(|a| a.resource.as_str()),
+            Some("arn:aws:sns:*:*:news")
+        );
+
+        // Smithy RPCv2 CBOR: `{"QueueUrl": ".../jobs", "MessageBody": "x"}`,
+        // whose bytes are not text, reads as its JSON.
+        let mut cbor = vec![0xa2, 0x68];
+        cbor.extend_from_slice(b"QueueUrl");
+        let url = b"http://127.0.0.1:4510/000000000000/jobs";
+        cbor.extend_from_slice(&[0x78, url.len() as u8]);
+        cbor.extend_from_slice(url);
+        cbor.push(0x6b);
+        cbor.extend_from_slice(b"MessageBody");
+        cbor.extend_from_slice(&[0x61, b'x', 0xff]);
+        let call = recorded(
+            &[
+                ("authorization", &scope("sqs")),
+                ("smithy-protocol", "rpc-v2-cbor"),
+                ("content-type", "application/cbor"),
+            ],
+            "POST",
+            "/service/AmazonSQS/operation/SendMessage",
+            &cbor[..cbor.len() - 1],
+        );
+        assert_eq!(call.operation, "SendMessage");
+        assert!(
+            call.request.body.contains("\"QueueUrl\""),
+            "{}",
+            call.request.body
+        );
+        assert_eq!(
+            call.access
+                .iter()
+                .map(|a| a.resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["arn:aws:sqs:*:*:jobs"],
+            "no `*` for a body that was read"
+        );
+        assert_eq!(call.target.as_deref(), Some("queue/jobs"));
+    }
 
     #[test]
     fn only_this_machines_names_are_served() {

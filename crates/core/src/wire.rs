@@ -302,11 +302,7 @@ fn s3_operation(method: &str, path: &str, headers: &HeaderMap) -> Option<String>
         .get("host")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let host = strip_port(host);
-    let bucket_in_host = host.ends_with(".localhost")
-        || host.contains(".s3.")
-        || host.contains(".s3-")
-        || host.ends_with(".s3");
+    let bucket_in_host = s3_host_bucket(host).is_some();
     let (has_bucket, object) = if bucket_in_host {
         (true, !bare.strip_prefix('/').unwrap_or(bare).is_empty())
     } else {
@@ -387,8 +383,15 @@ fn s3_operation(method: &str, path: &str, headers: &HeaderMap) -> Option<String>
         ("attributes", "ObjectAttributes"),
     ];
     let table = if object { OBJECT } else { BUCKET };
-    if let Some((_, noun)) = table.iter().find(|(key, _)| has(key)) {
+    if let Some((key, noun)) = table.iter().find(|(key, _)| has(key)) {
+        // A lifecycle is deleted whole: `DeleteBucketLifecycle`.
+        if *key == "lifecycle" && method == "DELETE" {
+            return name("DeleteBucketLifecycle", "");
+        }
         return (!verb.is_empty()).then(|| format!("{verb}{noun}"));
+    }
+    if object && method == "POST" && has("restore") {
+        return name("RestoreObject", "");
     }
     match (method, object) {
         ("PUT", false) => name("CreateBucket", ""),
@@ -404,6 +407,31 @@ fn s3_operation(method: &str, path: &str, headers: &HeaderMap) -> Option<String>
         ("DELETE", true) => name("DeleteObject", ""),
         _ => None,
     }
+}
+
+/// The bucket a virtual-hosted S3 request names in its `Host`: `shop` from
+/// `shop.localhost`, `shop.s3.localhost` or `shop.s3.us-east-1.amazonaws.com`.
+/// `s3.localhost`, `localhost` and addresses are path style: the bucket is in
+/// the path.
+pub fn s3_host_bucket(host: &str) -> Option<&str> {
+    let host = strip_port(host).trim_end_matches('.');
+    let name = if let Some(at) = host.find(".s3.").or_else(|| host.find(".s3-")) {
+        &host[..at]
+    } else if let Some(name) = host.strip_suffix(".s3") {
+        name
+    } else {
+        host.strip_suffix(".localhost")?
+    };
+    (!name.is_empty() && name != "s3" && !name.starts_with('[')).then_some(name)
+}
+
+/// One field of an `application/x-www-form-urlencoded` body, decoded; empty
+/// segments (`a=1&&b=2`) and fields without a value are passed over.
+pub fn form_field(body: &str, name: &str) -> Option<String> {
+    body.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (percent_decode_query(key.trim()) == name).then(|| percent_decode_query(value))
+    })
 }
 
 /// The `Action` of an AWS Query protocol form body, if present.
@@ -556,6 +584,8 @@ mod tests {
         copy.insert("x-amz-copy-source", HeaderValue::from_static("/a/b"));
         let mut virtual_host = HeaderMap::new();
         virtual_host.insert("host", HeaderValue::from_static("demo.localhost:9297"));
+        let mut path_style = HeaderMap::new();
+        path_style.insert("host", HeaderValue::from_static("s3.localhost:4510"));
         for (method, path, headers, expected) in [
             ("GET", "/", &none, "ListBuckets"),
             ("PUT", "/b", &none, "CreateBucket"),
@@ -578,6 +608,16 @@ mod tests {
             ("GET", "/b?uploads", &none, "ListMultipartUploads"),
             ("GET", "/k", &virtual_host, "GetObject"),
             ("GET", "/", &virtual_host, "ListObjects"),
+            ("DELETE", "/b?lifecycle", &none, "DeleteBucketLifecycle"),
+            (
+                "PUT",
+                "/b?lifecycle",
+                &none,
+                "PutBucketLifecycleConfiguration",
+            ),
+            ("POST", "/b/k?restore", &none, "RestoreObject"),
+            ("PUT", "/b", &path_style, "CreateBucket"),
+            ("PUT", "/b/k", &path_style, "PutObject"),
         ] {
             assert_eq!(
                 fallback_operation("s3", method, path, headers),
@@ -724,6 +764,33 @@ mod tests {
             ),
             "GetLatestConfiguration"
         );
+    }
+
+    #[test]
+    fn tells_virtual_hosted_buckets_from_path_style_hosts() {
+        assert_eq!(s3_host_bucket("shop.localhost:4510"), Some("shop"));
+        assert_eq!(s3_host_bucket("shop.s3.localhost:4510"), Some("shop"));
+        assert_eq!(
+            s3_host_bucket("my.shop.s3.us-east-1.amazonaws.com"),
+            Some("my.shop")
+        );
+        for path_style in [
+            "s3.localhost:4510",
+            "localhost:4510",
+            "127.0.0.1:4510",
+            "[::1]:4510",
+            "s3.us-east-1.amazonaws.com",
+        ] {
+            assert_eq!(s3_host_bucket(path_style), None, "{path_style}");
+        }
+    }
+
+    #[test]
+    fn reads_form_fields_past_empty_segments() {
+        let body = "Action=GetRole&&Version=2010-05-08&flag&RoleName=app%2Frole+x";
+        assert_eq!(form_field(body, "RoleName").as_deref(), Some("app/role x"));
+        assert_eq!(form_field(body, "flag"), None);
+        assert_eq!(form_field("", "RoleName"), None);
     }
 
     #[test]

@@ -210,13 +210,15 @@ fn is_apigateway_management(trace: &Trace) -> bool {
         && trace.path.starts_with('/')
 }
 
-/// The request body was captured but cannot be read in full.
+/// The request body was captured but cannot be read in full. A body decoded
+/// to text (CBOR as JSON, unframed, inflated) reads as its text, whatever
+/// its bytes were.
 fn body_unreadable(trace: &Trace) -> bool {
     trace
         .request
         .body
         .as_ref()
-        .is_some_and(|body| body.truncated || body.binary || body.text.is_none())
+        .is_some_and(|body| body.truncated || body.text.is_none())
 }
 
 /// Whether this call's resource (or a role it passes) is named in its body.
@@ -761,7 +763,11 @@ impl Body {
                 Err(_) => Body::None,
             };
         }
-        if trace.request.content_type.as_deref() == Some("application/x-www-form-urlencoded")
+        if trace
+            .request
+            .content_type
+            .as_deref()
+            .is_some_and(|t| t.starts_with("application/x-www-form-urlencoded"))
             || trimmed.starts_with("Action=")
         {
             let fields = text
@@ -2003,12 +2009,7 @@ fn is_foundation_model_id(id: &str) -> bool {
 fn s3_resources(mode: Mode, operation: &str, trace: &Trace) -> Vec<String> {
     let bare = trace.path.split('?').next().unwrap_or(&trace.path);
     let host = wire::strip_port(&trace.host);
-    let host_bucket = (host.ends_with(".localhost")
-        || host.contains(".s3.")
-        || host.contains(".s3-")
-        || host.ends_with(".s3"))
-    .then(|| host.split('.').next().unwrap_or(""))
-    .filter(|bucket| !bucket.is_empty());
+    let host_bucket = wire::s3_host_bucket(host);
     let (raw_bucket, raw_key): (Option<String>, &str) = match host_bucket {
         Some(bucket) => (
             Some(bucket.to_string()),
@@ -3466,6 +3467,25 @@ mod tests {
             derived
                 .unverified
                 .contains(&Access::new("iam:PassRole", "*"))
+        );
+
+        // CBOR decoded to JSON reads as its JSON, though its bytes are not text.
+        let mut decoded = call("sqs", "SendMessage", "POST", "/", None);
+        decoded.request.body = Some(BodyTrace {
+            text: Some(
+                r#"{"QueueUrl":"http://127.0.0.1:4510/000000000000/jobs","MessageBody":"x"}"#
+                    .into(),
+            ),
+            encoding: Some("cbor".into()),
+            bytes: 60,
+            binary: true,
+            ..Default::default()
+        });
+        let derived = derive_call(&decoded);
+        assert!(derived.unverified.is_empty(), "{derived:?}");
+        assert_eq!(
+            derived.own,
+            vec![Access::new("sqs:SendMessage", "arn:aws:sqs:*:*:jobs")]
         );
 
         // A binary S3 upload names its resource in the path: nothing is unknown.

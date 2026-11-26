@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use crate::{
     emulator::Emulator,
-    session::{Group, Resource, Session},
+    session::{Group, Resource, Sent, Session},
 };
 
 /// Calls in a burst share one refresh.
@@ -659,14 +659,44 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
                 )
                 .await
             {
-                out.columns = vec!["Attached policy".into(), "ARN".into()];
                 for member in blocks(&xml, "member") {
                     out.rows.push(vec![
                         first_tag(&member, "PolicyName"),
+                        "Managed".into(),
                         first_tag(&member, "PolicyArn"),
                     ]);
                 }
             }
+            // Its own policies too: what Lenslet allowed it among them.
+            if let Some(xml) = ask
+                .query(
+                    "iam",
+                    &format!(
+                        "Action=ListRolePolicies&Version=2010-05-08&RoleName={}",
+                        encode(id)
+                    ),
+                )
+                .await
+            {
+                for name in tags(&first_tag_raw(&xml, "PolicyNames"), "member") {
+                    let document = ask
+                        .query(
+                            "iam",
+                            &format!(
+                                "Action=GetRolePolicy&Version=2010-05-08&RoleName={}&PolicyName={}",
+                                encode(id),
+                                encode(&name)
+                            ),
+                        )
+                        .await
+                        .map(|xml| {
+                            compact_json(&percent_decode(&first_tag(&xml, "PolicyDocument")))
+                        })
+                        .unwrap_or_default();
+                    out.rows.push(vec![name, "Inline".into(), document]);
+                }
+            }
+            out.columns = vec!["Policy".into(), "Type".into(), "ARN or document".into()];
         }
         _ => {}
     }
@@ -674,24 +704,52 @@ pub async fn contents(emulator: &Emulator, service: &str, resource: &Resource) -
     out
 }
 
-/// Attach an inline policy to the role `role`: what a denied call needed.
+/// Allow the role `role` what `accesses` need: its inline policy for their
+/// action, with what it allowed before. Answers the call that did it, to keep
+/// in the account's history.
 pub async fn grant(
     emulator: &Emulator,
     role: &str,
-    name: &str,
-    policy: &str,
-) -> Result<(), String> {
+    accesses: &[lenslet_core::access::Access],
+) -> Result<Sent, String> {
     let ask = Ask { emulator };
+    // One inline policy per action, so different grants add up.
+    let name = accesses
+        .first()
+        .map(|a| format!("lenslet-{}", a.action.replace([':', '*'], "-")))
+        .unwrap_or_else(|| "lenslet-granted".into());
+    // The same action allowed on another resource before: both stay.
+    let mut allowed = accesses.to_vec();
+    if let Some(xml) = ask
+        .query(
+            "iam",
+            &format!(
+                "Action=GetRolePolicy&Version=2010-05-08&RoleName={}&PolicyName={}",
+                encode(role),
+                encode(&name)
+            ),
+        )
+        .await
+    {
+        let document = percent_decode(&first_tag(&xml, "PolicyDocument"));
+        allowed.extend(lenslet_core::policy::allowed(&document));
+    }
+    let policy = lenslet_core::policy::compile(&allowed);
     let form = format!(
         "Action=PutRolePolicy&Version=2010-05-08&RoleName={}&PolicyName={}&PolicyDocument={}",
         encode(role),
-        encode(name),
-        encode(policy)
+        encode(&name),
+        encode(&policy)
     );
-    ask.query("iam", &form)
-        .await
-        .map(|_| ())
-        .ok_or_else(|| format!("could not change the role {role}"))
+    let request = Ask::request("iam", query_request(), form)
+        .ok_or_else(|| format!("could not change the role {role}"))?;
+    let mut sent = Sent::of(&request, crate::session::now_ms());
+    sent.grant = Some(role.to_string());
+    if emulator.handle(request).await.status().is_success() {
+        Ok(sent)
+    } else {
+        Err(format!("could not change the role {role}"))
+    }
 }
 
 /// The role a call denied to an assumed role ran as: `assumed-role/<role>/...`.
@@ -713,22 +771,37 @@ struct Ask<'a> {
     emulator: &'a Emulator,
 }
 
+fn query_request() -> http::request::Builder {
+    http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("content-type", "application/x-www-form-urlencoded")
+}
+
 impl Ask<'_> {
+    fn request(
+        service: &str,
+        request: http::request::Builder,
+        body: String,
+    ) -> Option<http::Request<Bytes>> {
+        // Auth is off; the credential scope only tells the router the service.
+        let scope = format!(
+            "AWS4-HMAC-SHA256 Credential=lenslet/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
+        );
+        request
+            .header("authorization", scope)
+            .header("host", "localhost")
+            .body(Bytes::from(body))
+            .ok()
+    }
+
     async fn send(
         &self,
         service: &str,
         request: http::request::Builder,
         body: String,
     ) -> Option<String> {
-        // Auth is off; the credential scope only tells the router the service.
-        let scope = format!(
-            "AWS4-HMAC-SHA256 Credential=lenslet/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
-        );
-        let request = request
-            .header("authorization", scope)
-            .header("host", "localhost")
-            .body(Bytes::from(body))
-            .ok()?;
+        let request = Self::request(service, request, body)?;
         let response = self.emulator.handle(request).await;
         if !response.status().is_success() {
             return None;
@@ -759,11 +832,7 @@ impl Ask<'_> {
     }
 
     async fn query(&self, service: &str, form: &str) -> Option<String> {
-        let request = http::Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("content-type", "application/x-www-form-urlencoded");
-        self.send(service, request, form.to_string()).await
+        self.send(service, query_request(), form.to_string()).await
     }
 }
 
@@ -894,6 +963,19 @@ fn tags(xml: &str, tag: &str) -> Vec<String> {
 
 fn first_tag(xml: &str, tag: &str) -> String {
     tags(xml, tag).into_iter().next().unwrap_or_default()
+}
+
+/// The raw XML inside the first `<tag>…</tag>` block.
+fn first_tag_raw(xml: &str, tag: &str) -> String {
+    blocks(xml, tag).into_iter().next().unwrap_or_default()
+}
+
+/// JSON on one line; other text as it is.
+fn compact_json(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| serde_json::to_string(&v).ok())
+        .unwrap_or_else(|| text.to_string())
 }
 
 /// The raw XML of each `<tag>…</tag>` block.

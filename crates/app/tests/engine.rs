@@ -106,6 +106,25 @@ fn records_calls_finds_resources_explains_failures_and_starts_fresh() {
         body.contains(&format!("\"http://127.0.0.1:{port}/")),
         "{body}"
     );
+    // `[::1]` is served too, where the machine has IPv6, and the URL it is
+    // handed names it.
+    if let Ok(mut stream) = TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)) {
+        let body = r#"{"QueueName":"orders"}"#;
+        let request = format!(
+            "POST / HTTP/1.1\r\nhost: [::1]:{port}\r\ncontent-type: application/x-amz-json-1.0\r\n\
+             x-amz-target: AmazonSQS.GetQueueUrl\r\n\
+             authorization: AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=0\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.contains(&format!("\"http://[::1]:{port}/")),
+            "{response}"
+        );
+    }
 
     // A failure comes with its code; a conditional write is really checked.
     ddb(

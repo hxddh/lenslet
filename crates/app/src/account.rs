@@ -32,6 +32,12 @@ pub fn to_json(log: &[Sent]) -> String {
                 Ok(text) => call["body"] = text.into(),
                 Err(_) => call["bodyHex"] = hex(&s.body).into(),
             }
+            if !s.issued.is_empty() {
+                call["issued"] = s.issued.clone().into();
+            }
+            if let Some(role) = &s.grant {
+                call["grant"] = role.as_str().into();
+            }
             call
         })
         .collect();
@@ -88,12 +94,20 @@ pub fn from_json(text: &str) -> Result<Vec<Sent>, String> {
                 (None, Some(h)) => bytes::Bytes::from(unhex(h).ok_or_else(not_one)?),
                 (None, None) => bytes::Bytes::new(),
             };
+            let text = |name: &str| c[name].as_str().map(str::to_string);
             Ok(Sent {
                 at_ms: c["at"].as_u64().unwrap_or_default(),
                 method,
                 uri,
                 headers,
                 body,
+                issued: c["issued"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect(),
+                grant: text("grant"),
             })
         })
         .collect()
@@ -137,6 +151,8 @@ mod tests {
                 uri: "/".parse().unwrap(),
                 headers,
                 body: bytes::Bytes::from_static(b"{\"TableName\":\"orders\"}"),
+                issued: Vec::new(),
+                grant: Some("fn-role".into()),
             },
             Sent {
                 at_ms: 2,
@@ -144,6 +160,8 @@ mod tests {
                 uri: "/shop/logo.png".parse().unwrap(),
                 headers: http::HeaderMap::new(),
                 body: bytes::Bytes::from_static(&[0x89, 0x50, 0xff, 0x00]),
+                issued: vec!["upload-1234".into()],
+                grant: None,
             },
         ];
         let back = from_json(&to_json(&log)).expect("reads back");
@@ -159,6 +177,10 @@ mod tests {
         );
         assert_eq!(back[1].body, log[1].body);
         assert_eq!(back[1].uri.path(), "/shop/logo.png");
+        // What Lenslet allowed, and the ids the account made up, are kept.
+        assert_eq!(back[0].grant.as_deref(), Some("fn-role"));
+        assert_eq!(back[1].issued, vec!["upload-1234".to_string()]);
+        assert!(back[0].issued.is_empty() && back[1].grant.is_none());
         assert!(from_json("{\"kind\":\"something else\"}").is_err());
     }
 }

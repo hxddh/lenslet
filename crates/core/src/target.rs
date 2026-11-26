@@ -228,29 +228,36 @@ fn kms_target_summary(trace: &Trace, json: Option<&Value>) -> Option<String> {
     (trace.operation == "CreateKey").then(|| "SYMMETRIC_DEFAULT".to_string())
 }
 
-/// The role, user or policy an IAM or STS call names.
+/// The role, user, group or policy an IAM or STS call names: an ARN's
+/// resource (its path kept), or `{kind}/{name}`.
 fn identity_target(json: Option<&Value>, body_text: &str) -> Option<String> {
-    let value = ["RoleName", "RoleArn", "UserName", "PolicyName", "PolicyArn"]
-        .iter()
-        .find_map(|key| {
-            json.and_then(|j| j.get(*key))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| form_param(body_text, key))
-        })?;
-    Some(match value.split(':').nth(5) {
-        Some(rest) => rest.to_string(),
-        None => format!("role/{value}"),
+    [
+        ("RoleArn", ""),
+        ("RoleName", "role"),
+        ("UserName", "user"),
+        ("GroupName", "group"),
+        ("InstanceProfileName", "instance-profile"),
+        ("PolicyArn", ""),
+        ("PolicyName", "policy"),
+    ]
+    .iter()
+    .find_map(|(key, kind)| {
+        let value = json
+            .and_then(|j| j.get(*key))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| form_param(body_text, key))?;
+        Some(match value.splitn(6, ':').nth(5) {
+            Some(resource) if value.starts_with("arn:") => resource.to_string(),
+            _ if kind.is_empty() => value,
+            _ => format!("{kind}/{value}"),
+        })
     })
 }
 
 fn s3_target_summary(trace: &Trace) -> String {
     let (bare, _query) = trace.path.split_once('?').unwrap_or((&trace.path, ""));
-    let host = trace.host.split(':').next().unwrap_or(&trace.host);
-    let vhost_bucket = host
-        .strip_suffix(".localhost")
-        .or_else(|| host.split(".s3.").next().filter(|_| host.contains(".s3.")))
-        .or_else(|| host.split(".s3-").next().filter(|_| host.contains(".s3-")));
+    let vhost_bucket = wire::s3_host_bucket(&trace.host);
 
     let (bucket, key) = if let Some(b) = vhost_bucket {
         (
@@ -329,16 +336,7 @@ fn ddb_scalar_preview(attr: &Value) -> Option<String> {
 }
 
 fn form_param(body: &str, key: &str) -> Option<String> {
-    if !body.contains('=') {
-        return None;
-    }
-    for pair in body.split('&') {
-        let (k, v) = pair.split_once('=')?;
-        if k.trim() == key {
-            return wire::query_param(&format!("?v={v}"), "v").filter(|s| !s.is_empty());
-        }
-    }
-    None
+    wire::form_field(body, key).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -399,6 +397,35 @@ mod tests {
             ..Trace::default()
         };
         assert_eq!(summary(&kms).as_deref(), Some("alias/app"));
+        let iam = |form: &str| Trace {
+            service: "iam".into(),
+            operation: "Op".into(),
+            request: Message {
+                content_type: Some("application/x-www-form-urlencoded; charset=utf-8".into()),
+                body: Some(BodyTrace {
+                    text: Some(form.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Trace::default()
+        };
+        for (form, expected) in [
+            ("Action=CreateUser&&UserName=bob", "user/bob"),
+            ("Action=CreateGroup&GroupName=ops", "group/ops"),
+            ("Action=CreatePolicy&PolicyName=read", "policy/read"),
+            ("Action=PutRolePolicy&RoleName=fn&PolicyName=p", "role/fn"),
+            (
+                "Action=AssumeRole&RoleArn=arn%3Aaws%3Aiam%3A%3A0%3Arole%2Fsvc%2Fa%3Ab",
+                "role/svc/a:b",
+            ),
+            (
+                "Action=AttachUserPolicy&UserName=bob&PolicyArn=arn%3Aaws%3Aiam%3A%3A0%3Apolicy%2Fp",
+                "user/bob",
+            ),
+        ] {
+            assert_eq!(summary(&iam(form)).as_deref(), Some(expected), "{form}");
+        }
         let bare = Trace {
             method: "GET".into(),
             path: "/".into(),
