@@ -11,10 +11,19 @@ index 43f7aafbb..43e37c174 100644
  pub mod pre_dispatch;
  pub mod router;
 diff --git a/vendor/smithy-server-runtime/src/multi_service_router.rs b/vendor/smithy-server-runtime/src/multi_service_router.rs
-index 32f266d97..d6460d4ec 100644
+index 32f266d97..8739cdd74 100644
 --- a/vendor/smithy-server-runtime/src/multi_service_router.rs
 +++ b/vendor/smithy-server-runtime/src/multi_service_router.rs
-@@ -138,6 +138,42 @@ impl MultiServiceRouter {
+@@ -135,9 +135,51 @@ impl MultiServiceRouter {
+     /// STEPS 3–11 — the operation's `run` drives the full deserialize → handle →
+     /// telemetry → serialize sequence, converting the request to the runtime-API
+     /// shape the protocol speaks and back.
++    /// Which emulator this router is: the same for every clone of it, and so for every call
++    /// its services make to each other, and different for every router built.
++    pub fn identity(&self) -> u64 {
++        std::sync::Arc::as_ptr(&self.services) as *const () as usize as u64
++    }
++
      pub async fn dispatch(
          &self,
          request: http::Request<bytes::Bytes>,
@@ -32,7 +41,7 @@ index 32f266d97..d6460d4ec 100644
 +            request.headers().clone(),
 +            request.body().clone(),
 +        );
-+        let token = observer.begin(depth, &headers);
++        let token = observer.begin(depth, self.identity(), &headers);
 +        // A call that panics or is dropped midway still ends for the observer.
 +        let mut guard = crate::observer::Guard::new(observer.clone(), token, depth);
 +        let response = self.dispatch_unobserved(request).await;
@@ -59,10 +68,10 @@ index 32f266d97..d6460d4ec 100644
              let (parts, body) = request.into_parts();
 diff --git a/vendor/smithy-server-runtime/src/observer.rs b/vendor/smithy-server-runtime/src/observer.rs
 new file mode 100644
-index 000000000..828f923f3
+index 000000000..c29ad7e2c
 --- /dev/null
 +++ b/vendor/smithy-server-runtime/src/observer.rs
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,70 @@
 +//! A host's view of every call the router serves, including the calls one
 +//! service makes to another in-process (an S3 notification invoking a
 +//! function, a function's own SDK calls, a topic delivering to a queue).
@@ -85,9 +94,12 @@ index 000000000..828f923f3
 +}
 +
 +pub trait CallObserver: Send + Sync {
-+    /// A call begins at `depth` (0 from outside, 1 and more for a callback),
-+    /// with these headers (its tracing header names the chain it is on).
-+    fn begin(&self, depth: u8, headers: &http::HeaderMap) -> u64;
++    /// A call begins at `depth` (0 from outside, 1 and more for a callback) in
++    /// the emulator `router` names ([`MultiServiceRouter::identity`]), with
++    /// these headers (its tracing header names the chain it is on).
++    ///
++    /// [`MultiServiceRouter::identity`]: crate::MultiServiceRouter::identity
++    fn begin(&self, depth: u8, router: u64, headers: &http::HeaderMap) -> u64;
 +    /// The call `token` ended.
 +    fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>);
 +    /// The call `token` ended without a response (it panicked or was dropped).

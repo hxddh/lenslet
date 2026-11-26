@@ -4607,7 +4607,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lenslet"
-version = "17.1.0"
+version = "17.1.1"
 dependencies = [
  "aws-emulator-engine",
  "aws-emulator-server",
@@ -4645,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "lenslet-core"
-version = "17.1.0"
+version = "17.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",

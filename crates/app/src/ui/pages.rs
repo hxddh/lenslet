@@ -469,11 +469,25 @@ pub fn resource(ui: Ui) -> AnyElement {
                 .gap(px(18.0))
                 .child(header)
                 .child(when(
-                    move || contents.with(|c| c.is_none()),
                     move || {
-                        text(move || ts("Loading…", "加载中…"))
-                            .text_size(body())
-                            .text_color(tertiary_text())
+                        let exists = holder.with(|h| h.is_some());
+                        contents.with(|c| state(exists, c.as_ref())) != State::Shown
+                    },
+                    move || {
+                        text(move || {
+                            let exists = holder.with(|h| h.is_some());
+                            match contents.with(|c| state(exists, c.as_ref())) {
+                                State::Loading => ts("Loading…", "加载中…"),
+                                State::Gone => {
+                                    ts("This resource no longer exists.", "此资源已不存在。")
+                                }
+                                State::Empty | State::Shown => {
+                                    ts("Nothing in it.", "里面没有内容。")
+                                }
+                            }
+                        })
+                        .text_size(body())
+                        .text_color(tertiary_text())
                     },
                 ))
                 .child(view().gap(px(2.0)).child(fields))
@@ -496,6 +510,49 @@ pub fn resource(ui: Ui) -> AnyElement {
                 ),
         )
         .into_element()
+}
+
+/// What a resource's page says of its contents.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum State {
+    /// Asked for, not answered yet.
+    Loading,
+    /// The resource is no longer there (deleted, or a new account).
+    Gone,
+    /// Answered, with nothing in it.
+    Empty,
+    Shown,
+}
+
+/// The page's state: whether the resource `exists`, and its `contents` when
+/// they came.
+fn state(exists: bool, contents: Option<&Contents>) -> State {
+    match contents {
+        _ if !exists => State::Gone,
+        None => State::Loading,
+        Some(c) if c.fields.is_empty() && c.rows.is_empty() && c.text.is_none() => State::Empty,
+        Some(_) => State::Shown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_or_empty_resource_is_said_to_be_so() {
+        let empty = Contents::default();
+        let full = Contents {
+            text: Some("{}".into()),
+            ..Default::default()
+        };
+        assert_eq!(state(true, None), State::Loading);
+        assert_eq!(state(true, Some(&empty)), State::Empty);
+        assert_eq!(state(true, Some(&full)), State::Shown);
+        // Deleted while its contents were asked for, or after they came.
+        assert_eq!(state(false, None), State::Gone);
+        assert_eq!(state(false, Some(&full)), State::Gone);
+    }
 }
 
 #[allow(dead_code)]

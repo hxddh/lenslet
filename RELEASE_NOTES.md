@@ -1,82 +1,58 @@
-# Lenslet 17.1.0
+# Lenslet 17.1.1
 
-Fixes to what Lenslet reads from a call, to rebuilding the account, and to
-the terminal; and the end-to-end tests now run in CI.
-
-## Allow for role
-- **An allowed role stays allowed.** What Allow for role adds is part of
-  the account: it is saved with it, and it stands through Rewind to
-  Before. When the role is created again (Run Again after rewinding past
-  the run that created it), Lenslet allows it again, so the command
-  passes.
-- Allowing the same action on another resource adds to the role's policy
-  instead of replacing it.
-- A role's page lists its inline policies, with their documents, beside
-  its managed ones.
-
-## What a call says
-- **Bodies are read under their wire encodings.** A streaming upload's
-  `aws-chunked` frames (and its trailing checksum) and a `gzip` body are
-  undone before Lenslet reads the call: the inspector, the target and the
-  IAM resources show the payload, not frames or `*`.
-- A Smithy RPCv2 CBOR body that was decoded no longer counts as
-  unreadable: its IAM resource is the one it names, not `*`.
-- An IAM user, group or policy is named as one (`user/bob`), not as a
-  role, and an ARN keeps its whole path.
-- A form with an empty field (`a=1&&b=2`) is read past it.
-- `s3.localhost` is path style: its bucket is in the path.
-  `DeleteBucketLifecycle` and `RestoreObject` are named.
-- The hint for unknown credentials no longer mentions `lenslet run`.
+Fixes where 17.1.0's parts meet: ids followed through every encoding,
+copying a call that was framed or compressed, and the account in use while
+another is rebuilt.
 
 ## Rewind and Open Account
-- **The account is built on an engine of its own** and serves once it is
-  done, with the session changing over at the same moment. Until then,
-  calls go to the account as it was; none sees it half built.
-- What the account in use does meanwhile is still recorded: only the
-  rebuild's own calls are left out.
-- **Ids the emulator makes up are followed.** A multipart upload's id, a
-  KMS key's and the receipt handles of received messages are new in the
-  rebuilt account; the calls that name them are sent with the new ones.
-  Uploaded objects, keys' aliases and deleted messages come back as they
-  were.
-- A call whose handle cannot exist any more fails at once instead of
-  being retried for ten seconds; a missing resource is waited for only
-  while it may still appear.
+- **New ids are written as the call's encoding writes them.** A receipt
+  handle, upload id or key id is swapped in a CBOR body (with its new
+  length), in a Query form (`%2B`, `%2F`, `%3D` and all), in the address,
+  and in a gzip'd or `aws-chunked` body, which is then sent plain, with
+  its headers to match. An S3 body is an object's data and is never
+  changed.
+- **The account in use is recorded while another is rebuilt.** Each call
+  is told by the engine that made it, so a queue's poller invoking a
+  function in the account in use stays in the list, and never holds up
+  the rebuild.
+- Each grant is sent once its role exists, not once at its place and
+  again with the role, and is not counted among the calls sent again.
 
-## The terminal
-- **bash with `HISTCONTROL=ignorespace` or `ignoreboth`** (Ubuntu's
-  default): a command typed with a space first is its own run, not the
-  one before it. History still keeps out what your settings keep out.
-- Only keys AWS hands out (STS, a new access key) are the terminal's: an
-  `AccessKeyId` in an object or an item is data. A new empty account
-  forgets them.
-- An unsigned call joins the running command only when a program that
-  says what it is sent it (curl, an SDK), not a browser.
+## Allow for role
+- Allowing a role again keeps one grant for its policy, the latest, not
+  every one before it.
+- A policy Lenslet added and your code then deleted stays deleted when
+  the role is created again.
+- A `CreateRole` sent gzip'd gets the role's grants too.
 
 ## Copy as
-- **Copy as AWS CLI and boto3** work for S3, Lambda, the Query services
-  (IAM, STS, SNS) and RPCv2 CBOR, as well as the JSON services.
-- **Copy as curl** sends a binary, CBOR, framed or compressed body as its
-  bytes, never as the text the window shows for it.
+- **A framed or compressed call copies as AWS CLI and boto3.** An SDK's
+  streaming `PutObject` (`aws-chunked`) and a gzip'd Query or Lambda call
+  copy from what they say; curl still sends their bytes.
 
 ## The endpoint
-- Only the addresses the emulator made up (queue URLs, `Location`,
-  function URLs, presigned downloads) are rewritten to name Lenslet,
-  including `[::1]` and a bucket's `.localhost` host. A function's
-  answer, objects, items, parameters, secrets and messages come back as
-  they were stored.
-- Lenslet also listens on `[::1]`, where the machine has IPv6, as its
-  `localhost` promises.
-- On macOS a function's memory is not measured, so its memory size is not
-  enforced; its timeout is. This is now said where it is decided.
+- **A port another program holds on `[::1]` is passed over.** If
+  `127.0.0.1:4510` is free but `[::1]:4510` is not, Lenslet takes a port
+  free on both, so `localhost` never reaches the other program. On a
+  machine without IPv6 it serves `127.0.0.1` alone. A port set with
+  `LENSLET_PORT` is not changed: Lenslet says it is taken.
+- A body that inflates past 4 MB is read only that far, and said to be
+  cut short.
+- A call's permissions are worked out once, not once more for a policy
+  evaluation the window does not make.
 
-## Building
-- README: apply the patches before the first build.
-- CI runs the end-to-end tests (`chain`, `rewind`) with boto3 on Linux
-  and macOS.
+## The window
+- A deleted resource's page says so ("This resource no longer exists.")
+  instead of "Loading…", and an empty one says it is empty.
+
+## The terminal
+- **bash:** clearing `HISTCONTROL` after starting with `ignoreboth` now
+  puts lines typed with a space first back into history. While Lenslet
+  applies the rules, `HISTCONTROL` holds the word `lenslet`, which bash
+  passes over.
 
 ## Known limits
 - **Other ids made up by the emulator.** Rewinding or opening an account
-  follows the ids above; calls that name others it makes anew (a Lambda
-  event source mapping's, for one) can fail, and Lenslet reports them as
-  failed.
+  follows multipart upload ids, KMS key ids and SQS receipt handles;
+  calls that name others it makes anew (a Lambda event source mapping's,
+  for one) can fail, and Lenslet reports them as failed.

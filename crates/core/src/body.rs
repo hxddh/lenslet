@@ -14,11 +14,40 @@ pub struct Decoded<'a> {
     pub bytes: Cow<'a, [u8]>,
     /// The encodings undone, outermost first (`aws-chunked`, `gzip`).
     pub encoding: Vec<&'static str>,
+    /// `bytes` is only the first part of the payload (see [`decode_within`]).
+    pub truncated: bool,
 }
 
-/// `body` without the encodings `headers` say it has. An encoding that does
-/// not undo cleanly is left in place.
+/// `body` without the encodings `headers` say it has: the whole payload. An
+/// encoding that does not undo cleanly, or inflates past [`MAX_INFLATED`],
+/// is left in place.
 pub fn decode<'a>(headers: &HeaderMap, body: &'a [u8]) -> Decoded<'a> {
+    let mut decoded = undo(headers, body, MAX_INFLATED);
+    if decoded.truncated {
+        decoded = Decoded {
+            bytes: Cow::Borrowed(body),
+            encoding: Vec::new(),
+            truncated: false,
+        };
+    }
+    decoded
+}
+
+/// `body` without its encodings, as [`decode`], but never more than `max`
+/// bytes of payload: what is read of a call stays bounded, however far a
+/// small compressed body inflates. A payload cut short is `truncated`.
+pub fn decode_within<'a>(headers: &HeaderMap, body: &'a [u8], max: usize) -> Decoded<'a> {
+    let mut decoded = undo(headers, body, (max as u64).min(MAX_INFLATED));
+    if decoded.bytes.len() > max {
+        decoded.bytes = Cow::Owned(decoded.bytes[..max].to_vec());
+        decoded.truncated = true;
+    }
+    decoded
+}
+
+/// Undo the encodings, inflating to at most `limit` bytes (a payload past
+/// it is cut there, and `truncated`).
+fn undo<'a>(headers: &HeaderMap, body: &'a [u8], limit: u64) -> Decoded<'a> {
     let encodings: Vec<String> = headers
         .get_all(http::header::CONTENT_ENCODING)
         .iter()
@@ -33,6 +62,7 @@ pub fn decode<'a>(headers: &HeaderMap, body: &'a [u8]) -> Decoded<'a> {
     let mut decoded = Decoded {
         bytes: Cow::Borrowed(body),
         encoding: Vec::new(),
+        truncated: false,
     };
     if (streaming || encodings.iter().any(|e| e == "aws-chunked"))
         && let Some(payload) = unchunk(&decoded.bytes)
@@ -41,10 +71,11 @@ pub fn decode<'a>(headers: &HeaderMap, body: &'a [u8]) -> Decoded<'a> {
         decoded.encoding.push("aws-chunked");
     }
     if encodings.iter().any(|e| e == "gzip" || e == "x-gzip")
-        && let Some(payload) = gunzip(&decoded.bytes)
+        && let Some((payload, whole)) = inflate(&decoded.bytes, limit)
     {
         decoded.bytes = Cow::Owned(payload);
         decoded.encoding.push("gzip");
+        decoded.truncated = !whole;
     }
     decoded
 }
@@ -71,12 +102,23 @@ pub fn unchunk(body: &[u8]) -> Option<Vec<u8>> {
 
 /// A gzip body inflated (every member of it), if it is one.
 pub fn gunzip(body: &[u8]) -> Option<Vec<u8>> {
+    inflate(body, MAX_INFLATED).and_then(|(payload, whole)| whole.then_some(payload))
+}
+
+/// A gzip body inflated to at most `limit` bytes, and whether that is all
+/// of it. A body cut short stops inflating there.
+fn inflate(body: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
     let mut out = Vec::new();
-    flate2::read::MultiGzDecoder::new(body)
-        .take(MAX_INFLATED + 1)
-        .read_to_end(&mut out)
-        .ok()?;
-    (out.len() as u64 <= MAX_INFLATED).then_some(out)
+    let mut reader = flate2::read::MultiGzDecoder::new(body).take(limit + 1);
+    match reader.read_to_end(&mut out) {
+        Ok(_) => {}
+        // Cut off inside a member: as much as it holds.
+        Err(_) if out.len() as u64 > limit => {}
+        Err(_) => return None,
+    }
+    let whole = out.len() as u64 <= limit;
+    out.truncate(limit as usize);
+    Some((out, whole))
 }
 
 #[cfg(test)]
@@ -136,5 +178,26 @@ mod tests {
 
         // Said to be gzip, but is not.
         assert_eq!(&*decode(&map, b"plain").bytes, b"plain");
+    }
+
+    #[test]
+    fn reads_no_more_of_a_body_than_it_may() {
+        let big = vec![b'a'; 1_000_000];
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&big).unwrap();
+        let gz = gz.finish().unwrap();
+        let map = headers(&[("content-encoding", "gzip")]);
+        let decoded = decode_within(&map, &gz, 1000);
+        assert_eq!(decoded.bytes.len(), 1000);
+        assert!(decoded.truncated);
+        assert_eq!(decoded.encoding, vec!["gzip"]);
+        // All of it fits: whole, as `decode` reads it.
+        let whole = decode_within(&map, &gz, 2_000_000);
+        assert!(!whole.truncated);
+        assert_eq!(whole.bytes.len(), big.len());
+        assert_eq!(decode(&map, &gz).bytes.len(), big.len());
+        // A plain body past the bound is cut too.
+        let plain = decode_within(&HeaderMap::new(), &big, 10);
+        assert!(plain.truncated && plain.bytes.len() == 10);
     }
 }

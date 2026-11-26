@@ -160,10 +160,20 @@ impl Derived {
     }
 }
 
-/// The normalized footprint access one call needs (for `lenslet.lock` and reports).
+/// The normalized footprint access one call needs (for `lenslet.lock` and
+/// reports): [`derive_call`]'s `own` and `implied`, without the concrete
+/// ARNs only a policy evaluation needs.
 pub fn derive(trace: &Trace) -> (Vec<Access>, Vec<Access>) {
-    let derived = derive_call(trace);
-    (derived.own, derived.implied)
+    if !derivable(trace) {
+        return Default::default();
+    }
+    let (own, implied, _) = derive_inner(trace, Mode::Footprint, &Body::parse(trace));
+    (own, implied)
+}
+
+/// Whether Lenslet can say what the call needs at all.
+fn derivable(trace: &Trace) -> bool {
+    mapped_operation(trace) || is_apigateway_management(trace)
 }
 
 /// Footprint and concrete access for one call, parsing its body once.
@@ -174,7 +184,7 @@ pub fn derive(trace: &Trace) -> (Vec<Access>, Vec<Access>) {
 /// runs, so it can be accepted into the lock; a policy grants it only with
 /// `Resource: "*"`, while any `Deny` on the action applies to it.
 pub fn derive_call(trace: &Trace) -> Derived {
-    if !mapped_operation(trace) && !is_apigateway_management(trace) {
+    if !derivable(trace) {
         return Derived::default();
     }
     let body = Body::parse(trace);

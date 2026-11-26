@@ -69,7 +69,7 @@ impl Input {
 
 /// The input of a call made over the Query, S3 or Lambda REST protocols.
 fn input(call: &Call) -> Option<Input> {
-    if !call.request.verbatim && !call.request.body.is_empty() {
+    if !call.request.complete {
         // Its body is data, or only part of it is kept.
         return None;
     }
@@ -397,6 +397,9 @@ pub fn aws_cli(call: &Call) -> Option<String> {
         kebab(&call.operation)
     );
     if json_protocol(call) {
+        if !call.request.complete {
+            return None;
+        }
         let body = compact(&call.request.body)?;
         if body != "{}" {
             command.push_str(&format!(" --cli-input-json {}", quote(&body)));
@@ -436,6 +439,9 @@ pub fn aws_cli(call: &Call) -> Option<String> {
 /// The call as boto3.
 pub fn boto3(call: &Call) -> Option<String> {
     let mut params = if json_protocol(call) {
+        if !call.request.complete {
+            return None;
+        }
         match serde_json::from_str(&call.request.body).ok()? {
             Value::Object(params) => params,
             _ => return None,
@@ -788,6 +794,7 @@ mod tests {
             "(25 bytes of binary data)",
         );
         binary.request.verbatim = false;
+        binary.request.complete = false;
         binary.request.bytes = 25;
         binary.request.raw = None;
         let sent = curl(&binary, "http://127.0.0.1:4510");
@@ -832,6 +839,7 @@ mod tests {
                 content_type: Some("application/x-amz-json-1.0".into()),
                 body: body.into(),
                 bytes: body.len(),
+                complete: true,
                 verbatim: true,
                 raw: None,
             },

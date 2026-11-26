@@ -71,6 +71,13 @@ fn every_recorded_call_derives_exactly_the_expected_access() {
             services.insert(case.call.service.clone());
             let call = case.call;
             let derived = access::derive_call(&call);
+            // The footprint alone is the same footprint.
+            assert_eq!(
+                access::derive(&call),
+                (derived.own.clone(), derived.implied.clone()),
+                "{}",
+                case.name
+            );
             let mut check =
                 |what: &str, want: Vec<(String, String)>, got: Vec<(String, String)>| {
                     let want = sorted(want);
