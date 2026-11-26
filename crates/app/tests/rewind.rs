@@ -3,6 +3,7 @@
 //! rewind -- --ignored --nocapture`).
 
 use lenslet::{engine::Engine, shell::Mark};
+use lenslet_core::access::Access;
 
 fn py(engine: &Engine, phase: &str) -> String {
     let python = std::env::var("LENSLET_PYTHON").expect("LENSLET_PYTHON");
@@ -64,4 +65,82 @@ fn rewinding_a_run_puts_the_account_back() {
     }
     println!("settled {:?} after the rewind returned", started.elapsed());
     assert_eq!(before, rewound, "the account is as it was before run two");
+
+    // A function denied by its role; Lenslet allows the role what the
+    // denied call needed, twice on the same action: the grants add up.
+    mark(Mark::Start("deny".into()));
+    assert_eq!(py(&engine, "deny"), "denied");
+    mark(Mark::End(1));
+    let run_deny = engine.snapshot().runs.last().unwrap().id;
+    let denied = engine
+        .snapshot()
+        .calls
+        .iter()
+        .rfind(|c| {
+            c.internal
+                && c.failure
+                    .as_ref()
+                    .is_some_and(|f| f.code.contains("AccessDenied"))
+        })
+        .cloned()
+        .expect("the function's call was denied");
+    let role = lenslet::resources::denied_role(
+        denied.failure.as_ref().unwrap().message.as_deref().unwrap(),
+    )
+    .expect("the role it ran as");
+    assert_eq!(role, "writer-role");
+    runtime
+        .block_on(engine.grant(role.clone(), denied.access.clone()))
+        .expect("grant");
+    let carts = Access::new("dynamodb:PutItem", "arn:aws:dynamodb:*:*:table/carts");
+    runtime
+        .block_on(engine.grant(role.clone(), vec![carts]))
+        .expect("grant again");
+    let policy = py(&engine, "policy");
+    assert!(
+        policy.contains("table/orders") && policy.contains("table/carts"),
+        "both grants stand: {policy}"
+    );
+    // The role's page shows the policy Lenslet added.
+    let page = runtime.block_on(engine.contents(
+        "iam",
+        lenslet::session::Resource {
+            name: role.clone(),
+            id: role.clone(),
+            count: None,
+        },
+    ));
+    assert!(
+        page.rows
+            .iter()
+            .any(|r| r[1] == "Inline" && r[2].contains("table/carts")),
+        "{page:?}"
+    );
+
+    // Back to before the denied run, and run it again: it passes, the role
+    // created again with what Lenslet allowed it.
+    let replayed = runtime.block_on(engine.rewind(run_deny)).expect("rewind");
+    assert_eq!(replayed.failed, 0, "a grant waits for its role");
+    mark(Mark::Start("deny".into()));
+    assert_eq!(py(&engine, "deny"), "ok", "Run Again passes");
+    mark(Mark::End(0));
+
+    // Saved and opened again: the same account, the grants with it.
+    let saved = py(&engine, "dump");
+    let text = runtime.block_on(engine.save_account()).expect("save");
+    let started = std::time::Instant::now();
+    let opened = runtime
+        .block_on(engine.open_account(text))
+        .expect("open the account");
+    println!("opened {opened:?} in {:?}", started.elapsed());
+    assert_eq!(opened.failed, 0, "every call sent again succeeded");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut reopened = py(&engine, "dump");
+    while reopened != saved && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        reopened = py(&engine, "dump");
+    }
+    assert_eq!(saved, reopened, "the opened account is the saved one");
+    assert_eq!(py(&engine, "invoke"), "ok");
+    assert!(py(&engine, "policy").contains("table/carts"));
 }

@@ -36,8 +36,17 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The end-to-end tests drive whole apps with boto3.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3
       - run: cargo fmt -p lenslet -p lenslet-core -- --check
       - run: cargo test --workspace --locked
+      - name: End to end (the call tree; rewind, grants, saved accounts)
+        env:
+          LENSLET_PYTHON: python
+        run: cargo test --locked -p lenslet --test chain --test rewind -- --ignored --nocapture
       - run: cargo build --release --locked -p lenslet
       - name: The window starts and serves AWS
         run: |
@@ -60,7 +69,15 @@ jobs:
         with:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install boto3
       - run: cargo test --workspace --locked
+      - name: End to end (the call tree; rewind, grants, saved accounts)
+        env:
+          LENSLET_PYTHON: python
+        run: cargo test --locked -p lenslet --test chain --test rewind -- --ignored --nocapture
       # CI builds the native (Apple silicon) app only; the release adds x86_64.
       - run: cargo build --release --locked --target aarch64-apple-darwin -p lenslet
       - run: bash scripts/package-macos.sh 0.0.0-ci dist

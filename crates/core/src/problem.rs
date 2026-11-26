@@ -142,7 +142,7 @@ pub fn hint(code: &str, status: u16) -> Option<&'static str> {
         "MissingAuthenticationTokenException",
     ]) {
         return Some(
-            "The emulator does not know these credentials. Use the emulator's credentials file (`lenslet run` sets it), not real AWS keys.",
+            "The emulator does not know these credentials. Use the variables Lenslet's terminal has (File → Copy Environment), not real AWS keys.",
         );
     }
     if is(&[

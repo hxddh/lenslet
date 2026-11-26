@@ -1,91 +1,82 @@
-# Lenslet 17.0.1
+# Lenslet 17.1.0
 
-A bug-fix release, from a deep review of 17.0.
+Fixes to what Lenslet reads from a call, to rebuilding the account, and to
+the terminal; and the end-to-end tests now run in CI.
 
-## Dark mode
-- **Text shows in dark mode.** Text without a color of its own stayed
-  black on the dark backgrounds, so most of the window was unreadable:
-  the sidebar, the calls, buttons and the terminal's prompt.
-- Faint text (counts, hints, the terminal's endpoint) is now readable on
-  every background.
-- Toolbar tooltips have a box of their own, in both modes.
-- On macOS, a selected failed call is tinted rather than solid blue, so
-  its red status stays readable.
+## Allow for role
+- **An allowed role stays allowed.** What Allow for role adds is part of
+  the account: it is saved with it, and it stands through Rewind to
+  Before. When the role is created again (Run Again after rewinding past
+  the run that created it), Lenslet allows it again, so the command
+  passes.
+- Allowing the same action on another resource adds to the role's policy
+  instead of replacing it.
+- A role's page lists its inline policies, with their documents, beside
+  its managed ones.
 
-## Runs
-- **The calls AWS makes inside a command's call are in its run.** For
-  example, a function's own calls during `aws lambda invoke`: they were
-  recorded before the call that caused them, and so were left out of the
-  run, its summary and its IAM policy.
-- A run with no calls says so ("This command made no AWS calls") instead
-  of blaming the filters.
+## What a call says
+- **Bodies are read under their wire encodings.** A streaming upload's
+  `aws-chunked` frames (and its trailing checksum) and a `gzip` body are
+  undone before Lenslet reads the call: the inspector, the target and the
+  IAM resources show the payload, not frames or `*`.
+- A Smithy RPCv2 CBOR body that was decoded no longer counts as
+  unreadable: its IAM resource is the one it names, not `*`.
+- An IAM user, group or policy is named as one (`user/bob`), not as a
+  role, and an ARN keeps its whole path.
+- A form with an empty field (`a=1&&b=2`) is read past it.
+- `s3.localhost` is path style: its bucket is in the path.
+  `DeleteBucketLifecycle` and `RestoreObject` are named.
+- The hint for unknown credentials no longer mentions `lenslet run`.
 
-## The account
-- **New Account is refused while a rewind or an opened account is being
-  rebuilt.** It used to let the replay go on filling the new account.
-- The new engine is built before the account changes over, so no call
-  lands between the account's history and the engine.
-- The history counts headers and calls, not only bodies, so a long
-  polling loop no longer grows it without bound.
-- Save Account writes on the engine's threads, and the window no longer
-  freezes on a large account.
-- Header values that are not plain text survive a save.
-
-## Security
-- The endpoint answers only requests addressed to this machine
-  (127.0.0.1, ::1, localhost). A web page whose name was made to point at
-  127.0.0.1 (DNS rebinding) can no longer read or change the account.
+## Rewind and Open Account
+- **The account is built on an engine of its own** and serves once it is
+  done, with the session changing over at the same moment. Until then,
+  calls go to the account as it was; none sees it half built.
+- What the account in use does meanwhile is still recorded: only the
+  rebuild's own calls are left out.
+- **Ids the emulator makes up are followed.** A multipart upload's id, a
+  KMS key's and the receipt handles of received messages are new in the
+  rebuilt account; the calls that name them are sent with the new ones.
+  Uploaded objects, keys' aliases and deleted messages come back as they
+  were.
+- A call whose handle cannot exist any more fails at once instead of
+  being retried for ten seconds; a missing resource is waited for only
+  while it may still appear.
 
 ## The terminal
-- **Showing the terminal again no longer types into the shell.** Programs
-  had asked the terminal where the cursor is, and those questions were
-  answered again into the prompt.
-- After a long full-screen program (vim, htop), showing the terminal again
-  keeps its screen.
-- Output that arrived while the terminal was reappearing was shown twice;
-  it now shows once.
-- **bash**
-  - A profile with `set -u` or `set -e`, or a prompt command ending in
-    `;`, keeps its runs, and a failing command inside `&&` no longer ends
-    the shell.
-  - A profile with only `~/.bashrc` is read.
-  - A multi-line command keeps its lines.
-- **zsh on macOS keeps your history.** macOS's `/etc/zshrc` put the
-  history file in Lenslet's temporary folder.
-- The variables of the terminal Lenslet was started from (`TERM_PROGRAM`
-  and the like) are dropped.
-- A profile's `ignore_configured_endpoint_urls` can no longer send the
-  terminal's calls to AWS.
-- Run Again and the welcome examples start a new shell if the old one
-  exited.
+- **bash with `HISTCONTROL=ignorespace` or `ignoreboth`** (Ubuntu's
+  default): a command typed with a space first is its own run, not the
+  one before it. History still keeps out what your settings keep out.
+- Only keys AWS hands out (STS, a new access key) are the terminal's: an
+  `AccessKeyId` in an object or an item is data. A new empty account
+  forgets them.
+- An unsigned call joins the running command only when a program that
+  says what it is sent it (curl, an SDK), not a browser.
 
-## The window
-- **Window size**
-  - On Linux the window no longer shrinks a little at every launch.
-  - The smallest window is now 960×600, so the calls keep room beside the
-    inspector.
-- **A deleted resource's page** says the resource no longer exists, and
-  its old contents go away.
-- **The inspector**
-  - It no longer shows an empty shell for a call that left the list.
-  - Show Resource appears as soon as the resource exists.
-  - A call selected on another run's page is no longer kept.
-- **Shortcuts**
-  - The menu's own items (Undo, Copy, Quit) follow the in-app language
-    switch.
-  - Off macOS, Sidebar and Inspector use Ctrl+Shift+B and Ctrl+Shift+I.
-    On Windows, Ctrl+Alt is AltGr and typed letters.
-- **Faster with many calls**
-  - The calls list is rebuilt only when the calls or the filters change,
-    and not while a resource page is on show.
-  - Show Resource no longer copies the whole session.
-- Clear Calls also clears the service filter.
-- Wording fixes in Chinese.
+## Copy as
+- **Copy as AWS CLI and boto3** work for S3, Lambda, the Query services
+  (IAM, STS, SNS) and RPCv2 CBOR, as well as the JSON services.
+- **Copy as curl** sends a binary, CBOR, framed or compressed body as its
+  bytes, never as the text the window shows for it.
+
+## The endpoint
+- Only the addresses the emulator made up (queue URLs, `Location`,
+  function URLs, presigned downloads) are rewritten to name Lenslet,
+  including `[::1]` and a bucket's `.localhost` host. A function's
+  answer, objects, items, parameters, secrets and messages come back as
+  they were stored.
+- Lenslet also listens on `[::1]`, where the machine has IPv6, as its
+  `localhost` promises.
+- On macOS a function's memory is not measured, so its memory size is not
+  enforced; its timeout is. This is now said where it is decided.
+
+## Building
+- README: apply the patches before the first build.
+- CI runs the end-to-end tests (`chain`, `rewind`) with boto3 on Linux
+  and macOS.
 
 ## Known limits
-- **Ids made up by the emulator.** Rewinding or opening an account cannot
-  rebuild resources whose ids the emulator makes up anew, such as KMS keys
-  and Lambda event source mappings. Later calls that name them fail, and
-  Lenslet reports them as failed.
-- **SQS messages.** Messages a program received and deleted come back
-  after a rewind.
+- **Other ids made up by the emulator.** Rewinding or opening an account
+  follows the ids above; calls that name others it makes anew (a Lambda
+  event source mapping's, for one) can fail, and Lenslet reports them as
+  failed.

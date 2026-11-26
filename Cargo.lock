@@ -4607,12 +4607,13 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lenslet"
-version = "17.0.1"
+version = "17.1.0"
 dependencies = [
  "aws-emulator-engine",
  "aws-emulator-server",
  "aws-emulator-smithy-server-runtime",
  "bytes",
+ "flate2",
  "http",
  "http-body-util",
  "hyper",
@@ -4644,10 +4645,11 @@ dependencies = [
 
 [[package]]
 name = "lenslet-core"
-version = "17.0.1"
+version = "17.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "flate2",
  "http",
  "serde",
  "serde_json",

@@ -108,8 +108,14 @@ pub struct Failure {
 pub struct Exchange {
     pub headers: Vec<(String, String)>,
     pub content_type: Option<String>,
+    /// What the window shows: the body's text (decoded from CBOR, unframed,
+    /// inflated), or a note for data.
     pub body: String,
     pub bytes: usize,
+    /// `body` is exactly the bytes sent.
+    pub verbatim: bool,
+    /// The bytes sent, when `body` is not them and they are small.
+    pub raw: Option<bytes::Bytes>,
 }
 
 /// One resource the local AWS holds.
@@ -165,9 +171,44 @@ pub struct Sent {
     pub uri: http::Uri,
     pub headers: http::HeaderMap,
     pub body: bytes::Bytes,
+    /// The ids the emulator made up in its answer (an S3 multipart upload's,
+    /// the receipt handles of the messages a receive took): sent again, the
+    /// call gets new ones, and the later calls that name these are sent with
+    /// the new ones.
+    pub issued: Vec<String>,
+    /// Lenslet allowed this role what a denied call needed: the change stands
+    /// through rewinds, and comes back when the role is created again.
+    pub grant: Option<String>,
 }
 
 impl Sent {
+    /// `request`, as it arrived at `at_ms`.
+    pub fn of(request: &http::Request<bytes::Bytes>, at_ms: u64) -> Sent {
+        Sent {
+            at_ms,
+            method: request.method().clone(),
+            uri: request.uri().clone(),
+            headers: request.headers().clone(),
+            body: request.body().clone(),
+            issued: Vec::new(),
+            grant: None,
+        }
+    }
+
+    /// The request, to send again.
+    pub fn request(&self) -> http::Request<bytes::Bytes> {
+        let mut request = http::Request::new(self.body.clone());
+        *request.method_mut() = self.method.clone();
+        *request.uri_mut() = self.uri.clone();
+        *request.headers_mut() = self.headers.clone();
+        request
+    }
+
+    /// The role this call created, if it is IAM's `CreateRole`.
+    pub fn created_role(&self) -> Option<String> {
+        created_role(&self.body)
+    }
+
     /// About how much memory it takes: its body and headers.
     fn size(&self) -> usize {
         self.body.len()
@@ -186,6 +227,35 @@ const MAX_LOG_CALLS: usize = 200_000;
 /// The access key the built-in terminal's programs sign with: their calls,
 /// and only theirs, make up a run.
 pub const TERMINAL_KEY: &str = "lenslet-terminal";
+
+/// The role an IAM `CreateRole` request body creates.
+pub fn created_role(body: &[u8]) -> Option<String> {
+    let form = std::str::from_utf8(body).ok()?;
+    if lenslet_core::wire::form_action(body).as_deref() != Some("CreateRole") {
+        return None;
+    }
+    lenslet_core::wire::form_field(form, "RoleName").filter(|r| !r.is_empty())
+}
+
+/// Whether a call's answer hands out credentials: STS's (`AssumeRole`,
+/// `GetSessionToken`, …) and a new IAM user's access key. Only these name
+/// keys the terminal's programs then sign with; an `AccessKeyId` anywhere
+/// else (an object, an item, a function's answer) is data.
+fn vends_keys(call: &Call) -> bool {
+    match call.service.as_str() {
+        "sts" => matches!(
+            call.operation.as_str(),
+            "AssumeRole"
+                | "AssumeRoleWithWebIdentity"
+                | "AssumeRoleWithSAML"
+                | "AssumeRoot"
+                | "GetSessionToken"
+                | "GetFederationToken"
+        ),
+        "iam" => call.operation == "CreateAccessKey",
+        _ => false,
+    }
+}
 
 /// The access key ids in a response (STS's AssumeRole and the like, in XML
 /// or JSON).
@@ -253,6 +323,18 @@ impl Inner {
             .binary_search_by_key(&seq, |c| c.seq)
             .ok()
             .map(|i| &self.calls[i])
+    }
+
+    /// Whether a call signed with `key`, sent by `client` (named from its
+    /// `User-Agent`), came from the terminal: signed with one of its keys.
+    /// An unsigned call could be anyone's: the terminal's only when a program
+    /// that says what it is sent it (`curl`, an SDK), never a browser or a
+    /// client that does not say.
+    fn terminal(&self, key: Option<&str>, client: Option<&str>) -> bool {
+        match key {
+            Some(key) => key == TERMINAL_KEY || self.terminal_keys.contains(key),
+            None => client.is_some_and(|client| !client.starts_with("Mozilla")),
+        }
     }
 
     /// When the run `id` started, if the account can go back to then.
@@ -384,16 +466,16 @@ impl Session {
         self.lock().version
     }
 
-    /// A call from outside arrives, signed with `key`: its run is the
-    /// command running now when the terminal sent it (one of the
-    /// terminal's keys, or no key at all, which could be anyone's, as a curl).
-    pub fn arrive(&self, id: u64, key: Option<&str>) {
+    /// A call from outside arrives, signed with `key` and sent by `client`
+    /// (named from its `User-Agent`): its run is the command running now
+    /// when the terminal sent it.
+    pub fn arrive(&self, id: u64, key: Option<&str>, client: Option<&str>) {
         let mut inner = self.lock();
-        let terminal = match key {
-            Some(key) => key == TERMINAL_KEY || inner.terminal_keys.contains(key),
-            None => true,
+        let run = if inner.terminal(key, client) {
+            inner.current
+        } else {
+            None
         };
-        let run = if terminal { inner.current } else { None };
         if inner.arriving.len() > 100_000 {
             inner.arriving.clear();
         }
@@ -415,13 +497,8 @@ impl Session {
         inner.next_seq += 1;
         call.generation = inner.generation;
         // A call belongs to the run of the call it happened inside, else to
-        // the command running now when the terminal sent it: signed with one
-        // of the terminal's keys (a call with no key could be anyone's, as
-        // a curl: the command's, while it runs).
-        let terminal = match &call.key {
-            Some(key) => key == TERMINAL_KEY || inner.terminal_keys.contains(key),
-            None => true,
-        };
+        // the command running now when the terminal sent it.
+        let terminal = inner.terminal(call.key.as_deref(), call.client.as_deref());
         if call.run.is_none() {
             call.run = match (call.internal, call.parent) {
                 // Inside another call: that call's run, recorded or not yet.
@@ -438,7 +515,7 @@ impl Session {
         inner.arriving.remove(&call.id);
         inner.callers.remove(&call.id);
         // Keys AWS hands the terminal's programs are the terminal's too.
-        if call.key.is_some() && terminal && call.status < 400 {
+        if call.key.is_some() && terminal && call.status < 400 && vends_keys(&call) {
             for key in vended_keys(&call.response.body) {
                 if inner.terminal_keys.len() < 10_000 {
                     inner.terminal_keys.insert(key);
@@ -524,6 +601,8 @@ impl Session {
     /// resources and the permissions start over.
     pub fn fresh(&self) {
         let mut inner = self.lock();
+        // The keys the old account handed out name nothing in the new one.
+        inner.terminal_keys.clear();
         inner.log.clear();
         inner.log_bytes = 0;
         inner.log_broken = false;
@@ -586,19 +665,27 @@ impl Session {
                 .any(|r| r.id == id && !r.undone && r.ended_ms.is_some())
     }
 
-    /// The account goes back to before the run `id`: what changed it before
-    /// then, to send again. The run and the ones after it are undone.
-    /// Whether the account can go back to before the run `id`, and if not,
-    /// why.
-    pub fn check_rewind(&self, id: u64) -> Result<(), String> {
-        self.lock().rewind_start(id).map(|_| ())
+    /// What made the account as it was before the run `id` started, to
+    /// build it again: the calls before then, and every role Lenslet allowed
+    /// something since (a fix stands through the rewind).
+    pub fn rewind_log(&self, id: u64) -> Result<Vec<Sent>, String> {
+        let inner = self.lock();
+        let at_ms = inner.rewind_start(id)?;
+        Ok(inner
+            .log
+            .iter()
+            .filter(|s| s.at_ms < at_ms || s.grant.is_some())
+            .cloned()
+            .collect())
     }
 
-    pub fn rewind_to(&self, id: u64) -> Result<Vec<Sent>, String> {
+    /// The account went back to before the run `id`, built from `log` (what
+    /// [`Self::rewind_log`] gave): the run and the ones after it are undone.
+    pub fn rewind_to(&self, id: u64, log: Vec<Sent>) -> Result<(), String> {
         let mut inner = self.lock();
         let at_ms = inner.rewind_start(id)?;
-        inner.log.retain(|s| s.at_ms < at_ms);
-        inner.log_bytes = inner.log.iter().map(Sent::size).sum();
+        inner.log_bytes = log.iter().map(Sent::size).sum();
+        inner.log = log;
         for run in &mut inner.runs {
             if run.started_ms >= at_ms {
                 run.undone = true;
@@ -607,7 +694,18 @@ impl Session {
         inner.generation += 1;
         inner.resources = Arc::default();
         inner.version += 1;
-        Ok(inner.log.clone())
+        Ok(())
+    }
+
+    /// What Lenslet allowed the role `role`, in order: sent again when the
+    /// role is created again.
+    pub fn grants_for(&self, role: &str) -> Vec<Sent> {
+        self.lock()
+            .log
+            .iter()
+            .filter(|s| s.grant.as_deref() == Some(role))
+            .cloned()
+            .collect()
     }
 
     pub fn run(&self, id: u64) -> Option<Run> {
@@ -795,6 +893,12 @@ mod tests {
             uri: http::Uri::from_static("/"),
             headers: http::HeaderMap::new(),
             body: bytes::Bytes::from_static(b"x"),
+            issued: Vec::new(),
+            grant: None,
+        };
+        let rewind = |id| {
+            let log = session.rewind_log(id)?;
+            session.rewind_to(id, log.clone()).map(|()| log)
         };
         let one = session.start_run("one".into());
         session.keep(sent(now_ms()), session.generation());
@@ -802,17 +906,27 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         let two = session.start_run("two".into());
         // Still running: not yet.
-        assert!(session.rewind_to(two).is_err());
+        assert!(rewind(two).is_err());
         session.keep(sent(now_ms()), session.generation());
-        session.end_run(0);
+        session.end_run(1);
+        // Lenslet allows a role what run two was denied: it stands.
+        let mut grant = sent(now_ms());
+        grant.grant = Some("fn-role".into());
+        session.keep(grant, session.generation());
         assert!(session.can_rewind(two));
-        let log = session.rewind_to(two).expect("rewind");
-        assert_eq!(log.len(), 1, "only what came before run two");
+        let log = rewind(two).expect("rewind");
+        assert_eq!(log.len(), 2, "what came before run two, and the grant");
+        assert_eq!(log[1].grant.as_deref(), Some("fn-role"));
+        assert_eq!(session.grants_for("fn-role").len(), 1);
         assert!(!session.can_rewind(two), "run two is undone");
         assert!(session.can_rewind(one));
         // A call sent to the account before the rewind is not kept for the new one.
         session.keep(sent(now_ms()), session.generation() - 1);
-        assert_eq!(session.rewind_to(one).expect("rewind").len(), 0);
+        let log = rewind(one).expect("rewind");
+        assert_eq!(log.len(), 1, "only the grant");
+        // A new account has none.
+        session.fresh();
+        assert!(session.grants_for("fn-role").is_empty());
     }
 
     #[test]
@@ -829,14 +943,47 @@ mod tests {
         session.record(signed("lenslet"));
         // The terminal assumes a role: its keys are the terminal's too.
         let mut assumed = signed(TERMINAL_KEY);
+        assumed.service = "sts".into();
+        assumed.operation = "AssumeRole".into();
         assumed.response.body =
             "<Credentials><AccessKeyId>ASIAROLE</AccessKeyId></Credentials>".into();
         session.record(assumed);
         session.record(signed("ASIAROLE"));
-        // No key at all (a curl): the command's while it runs.
+        // A key named in an object's or a table's data is only data.
+        let mut object = signed(TERMINAL_KEY);
+        object.service = "s3".into();
+        object.operation = "GetObject".into();
+        object.response.body = r#"{"AccessKeyId":"AKIADATA"}"#.into();
+        session.record(object);
+        session.record(signed("AKIADATA"));
+        // No key at all: the command's while it runs when a program sent it
+        // (a curl), never a browser or a client that does not say.
+        let mut curl = call("s3", None);
+        curl.client = Some("curl 8.5.0".into());
+        session.record(curl);
+        let mut browser = call("s3", None);
+        browser.client = Some("Mozilla 5.0".into());
+        session.record(browser);
         session.record(call("s3", None));
         let runs: Vec<_> = session.snapshot().calls.iter().map(|c| c.run).collect();
-        assert_eq!(runs, vec![Some(run), None, Some(run), Some(run), Some(run)]);
+        assert_eq!(
+            runs,
+            vec![
+                Some(run),
+                None,
+                Some(run),
+                Some(run),
+                Some(run),
+                None,
+                Some(run),
+                None,
+                None
+            ]
+        );
+        // A new account forgets the keys the old one handed out.
+        session.fresh();
+        session.record(signed("ASIAROLE"));
+        assert_eq!(session.snapshot().calls.last().unwrap().run, None);
     }
 
     #[test]
@@ -845,7 +992,7 @@ mod tests {
         let run = session.start_run("aws lambda invoke".into());
         // The Invoke arrives; inside it the function's call, inside that a
         // delivery: both end, and are recorded, before the Invoke.
-        session.arrive(10, Some(TERMINAL_KEY));
+        session.arrive(10, Some(TERMINAL_KEY), Some("AWS CLI 2.17.0"));
         session.link(11, 10);
         session.link(12, 11);
         let inner = |id, parent| {

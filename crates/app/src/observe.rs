@@ -4,6 +4,10 @@
 //! it serves; the ones made in-process (callback depth 1 and more) are
 //! recorded as internal calls, under the call they happened inside.
 //!
+//! While an account is rebuilt (a rewind, an opened account), its calls go
+//! to an engine of its own, and what AWS does inside them is not recorded;
+//! the account in use goes on being recorded as ever.
+//!
 //! The parent is found two ways. On the same task: a call from outside is
 //! served inside [`within`], which holds a stack of the calls in progress on
 //! that task. Across tasks: every call from outside carries an X-Ray tracing
@@ -33,37 +37,65 @@ use crate::{
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// While the account is rebuilt, what it does is not news: nothing is recorded.
-/// A count, so overlapping pauses do not end each other.
-static PAUSED: AtomicU64 = AtomicU64::new(0);
+/// The calls of an account being rebuilt, on an engine of its own until it
+/// is done: never news, whatever the account in use does meanwhile.
+#[derive(Default)]
+struct Offline {
+    /// A rebuild is under way.
+    active: bool,
+    /// The calls sent to the engine being built, and every call AWS made
+    /// inside them.
+    ids: std::collections::HashSet<u64>,
+    /// The ones AWS has in progress.
+    open: usize,
+    /// When it last began or ended one, in ms since the epoch.
+    last_ms: u64,
+}
 
-pub fn pause(paused: bool) {
-    if paused {
-        PAUSED.fetch_add(1, Ordering::SeqCst);
-    } else {
-        let mut n = PAUSED.load(Ordering::SeqCst);
-        while n > 0 {
-            match PAUSED.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => break,
-                Err(now) => n = now,
-            }
-        }
+static OFFLINE: std::sync::LazyLock<Mutex<Offline>> = std::sync::LazyLock::new(Default::default);
+
+fn offline() -> std::sync::MutexGuard<'static, Offline> {
+    OFFLINE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An account being rebuilt on an engine of its own, while this lives.
+pub struct Rebuild(());
+
+impl Rebuild {
+    pub fn start() -> Rebuild {
+        let mut offline = offline();
+        offline.active = true;
+        offline.ids.clear();
+        offline.open = 0;
+        offline.last_ms = now_ms();
+        Rebuild(())
+    }
+
+    /// An id for a call sent to the engine being built: what it causes is
+    /// not recorded.
+    pub fn call(&self) -> u64 {
+        let id = next_id();
+        let mut offline = offline();
+        offline.ids.insert(id);
+        offline.last_ms = now_ms();
+        id
+    }
+
+    /// The engine being built has nothing in progress, and has done nothing
+    /// for `quiet_ms`.
+    pub fn settled(&self, quiet_ms: u64) -> bool {
+        let offline = offline();
+        offline.open == 0 && now_ms().saturating_sub(offline.last_ms) >= quiet_ms
     }
 }
 
-fn paused() -> bool {
-    PAUSED.load(Ordering::SeqCst) > 0
-}
-
-/// When AWS last began or ended a call of its own, in ms since the epoch.
-static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
-
-/// AWS has nothing in progress and has done nothing for `quiet_ms`.
-pub fn settled(quiet_ms: u64) -> bool {
-    let open = OBSERVER
-        .get()
-        .is_some_and(|o| !o.open.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
-    !open && now_ms().saturating_sub(LAST_ACTIVITY.load(Ordering::SeqCst)) >= quiet_ms
+impl Drop for Rebuild {
+    fn drop(&mut self) {
+        let mut offline = offline();
+        offline.active = false;
+        offline.ids.clear();
+        offline.open = 0;
+    }
 }
 
 /// A fresh call id.
@@ -84,6 +116,8 @@ struct Open {
     parent: Option<u64>,
     started: Instant,
     at_ms: u64,
+    /// Made by the engine being rebuilt.
+    offline: bool,
 }
 
 struct Observer {
@@ -140,7 +174,6 @@ impl CallObserver for Observer {
             // Calls from outside are recorded where they arrive.
             return 0;
         }
-        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
         let id = next_id();
         let on_task = STACK
             .try_with(|stack| {
@@ -168,7 +201,22 @@ impl CallObserver for Observer {
             }
             on_task.or(on_chain)
         };
-        if let Some(parent) = parent {
+        // Inside a call to the engine being rebuilt; or, while one is,
+        // inside nothing at all (a poller's), which cannot be told apart.
+        let offline = {
+            let mut offline = self::offline();
+            let inside = match parent {
+                Some(parent) => offline.ids.contains(&parent),
+                None => offline.active,
+            };
+            if inside {
+                offline.ids.insert(id);
+                offline.open += 1;
+                offline.last_ms = now_ms();
+            }
+            inside
+        };
+        if let Some(parent) = parent.filter(|_| !offline) {
             self.session.link(id, parent);
         }
         self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(
@@ -177,6 +225,7 @@ impl CallObserver for Observer {
                 parent,
                 started: Instant::now(),
                 at_ms: now_ms(),
+                offline,
             },
         );
         id
@@ -186,37 +235,16 @@ impl CallObserver for Observer {
         if depth == 0 || token == 0 {
             return;
         }
-        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
         self.forget(token, false);
-        self.open
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&token);
+        self.close(token);
     }
 
     fn end(&self, token: u64, depth: u8, call: &ObservedCall<'_>) {
         if depth == 0 || token == 0 {
             return;
         }
-        LAST_ACTIVITY.store(now_ms(), Ordering::SeqCst);
         self.forget(token, call.uri.path().ends_with("/invocations"));
-        if paused() {
-            self.open
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&token);
-            // Not recorded, but what exists may have changed.
-            if !call.method.is_safe() {
-                self.refresher.poke();
-            }
-            return;
-        }
-        let Some(open) = self
-            .open
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&token)
-        else {
+        let Some(open) = self.close(token) else {
             return;
         };
         let body = Bytes::copy_from_slice(call.body);
@@ -253,6 +281,22 @@ impl CallObserver for Observer {
 }
 
 impl Observer {
+    /// The call `token` ended: the one still to record, if it is.
+    fn close(&self, token: u64) -> Option<Open> {
+        let open = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&token)?;
+        if !open.offline {
+            return Some(open);
+        }
+        let mut offline = offline();
+        offline.open = offline.open.saturating_sub(1);
+        offline.last_ms = now_ms();
+        None
+    }
+
     /// The call `token` is over: off its task's stack and its chain. A call
     /// to a function's invocations is where the function's own calls hang.
     fn forget(&self, token: u64, invocation: bool) {

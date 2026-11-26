@@ -399,9 +399,48 @@ fi
 {ours}
 for __lenslet_v in ${{!AWS_ENDPOINT_URL_*}}; do unset "$__lenslet_v"; done; unset __lenslet_v
 __lenslet_nl=$'\n'
-__lenslet_end() {{ local s=$?; __lenslet_armed=; printf '{mark}E;%s\007' "$s"; return $s; }}
+# HISTCONTROL's ignorespace and ignoredups, and HISTIGNORE, keep a line out
+# of history, where the start mark reads it (a line typed with a space first
+# would be read as the one before it). Lenslet takes them over: every line
+# goes into history, and the ones they would keep out are taken out again
+# as the prompt comes back.
+__lenslet_hc=; __lenslet_hi=
+__lenslet_take() {{
+  local w c=
+  if [ -n "${{HISTIGNORE-}}" ]; then __lenslet_hi=$HISTIGNORE; HISTIGNORE=; fi
+  case ":${{HISTCONTROL-}}:" in *:ignore*) ;; *) return 0 ;; esac
+  __lenslet_hc=
+  for w in ${{HISTCONTROL//:/ }}; do
+    case $w in ignorespace|ignoredups|ignoreboth) __lenslet_hc="$__lenslet_hc:$w" ;; *) c="$c:$w" ;; esac
+  done
+  HISTCONTROL=${{c#:}}
+  return 0
+}}
+__lenslet_last() {{ local h; h=$(HISTTIMEFORMAT= builtin history 1); h=${{h#"${{h%%[![:space:]]*}}"}}; printf '%s' "${{h%%[!0-9]*}}"; }}
+__lenslet_forget() {{
+  shopt -oq history || return 0
+  local n line prev= p out=; local -a pats=()
+  n=$(__lenslet_last)
+  if [ -z "$n" ] || [ "$n" = "${{__lenslet_seen-}}" ]; then return 0; fi
+  line=$(HISTTIMEFORMAT= builtin history 1 | sed '1s/^ *[0-9]*[* ] //')
+  prev=$(HISTTIMEFORMAT= builtin history 2 | sed -e "/^ *$n[* ] /,\$d" -e '1s/^ *[0-9]*[* ] //')
+  case ":$__lenslet_hc:" in *:ignorespace:*|*:ignoreboth:*) case $line in [[:space:]]*) out=1 ;; esac ;; esac
+  case ":$__lenslet_hc:" in *:ignoredups:*|*:ignoreboth:*) if [ "$line" = "$prev" ]; then out=1; fi ;; esac
+  if [ -n "$__lenslet_hi" ]; then
+    IFS=: read -r -a pats <<< "$__lenslet_hi"
+    for p in "${{pats[@]}}"; do
+      if [ "$p" = "&" ]; then [ "$line" = "$prev" ] && out=1; elif [[ $line == $p ]]; then out=1; fi
+    done
+  fi
+  if [ -n "$out" ]; then builtin history -d "$n"; fi
+  __lenslet_seen=$(__lenslet_last)
+  return 0
+}}
+__lenslet_take
+__lenslet_seen=$(__lenslet_last)
+__lenslet_end() {{ local s=$?; __lenslet_armed=; __lenslet_take || :; __lenslet_forget || :; printf '{mark}E;%s\007' "$s"; return $s; }}
 # The line just entered, as history keeps it (none with history off).
-__lenslet_start() {{ shopt -oq history || return 0; HISTTIMEFORMAT= builtin history 1 | sed '1s/^ *[0-9]*[* ] *//' | {HEX}; }}
+__lenslet_start() {{ shopt -oq history || return 0; HISTTIMEFORMAT= builtin history 1 | sed '1s/^ *[0-9]*[* ] //' | {HEX}; }}
 if [ -z "${{__LENSLET_DEBUG_TRAP-}}" ] && {{ [ "${{BASH_VERSINFO[0]}}" -gt 4 ] || {{ [ "${{BASH_VERSINFO[0]}}" -eq 4 ] && [ "${{BASH_VERSINFO[1]}}" -ge 4 ]; }}; }}; then
   PROMPT_COMMAND="__lenslet_end && :${{PROMPT_COMMAND:+$__lenslet_nl$PROMPT_COMMAND}}"
   PS0='{mark}S;$(__lenslet_start)\007'"${{PS0-}}"
@@ -650,7 +689,6 @@ mod tests {
         shell_marks("/bin/bash", true);
     }
 
-    #[cfg(unix)]
     /// bash with a strict profile: `set -u`, `set -e`, and a prompt
     /// command that ends in `;`. The marks still come, with each command's
     /// line and status, and a command that fails inside `&&` does not end
@@ -658,78 +696,153 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bash_marks_with_a_strict_profile() {
+        for debug_trap in [false, true] {
+            let Some((marks, _)) = bash_session(
+                "set -u\nset -e\nPROMPT_COMMAND=\"history -a;\"\n",
+                &["false && true", "echo alive"],
+                debug_trap,
+            ) else {
+                return;
+            };
+            assert_eq!(
+                marks,
+                vec![
+                    Mark::Start("false && true".into()),
+                    Mark::End(1),
+                    Mark::Start("echo alive".into()),
+                    Mark::End(0),
+                ],
+                "debug trap: {debug_trap}"
+            );
+        }
+    }
+
+    /// With `HISTCONTROL=ignoreboth` (Ubuntu's default) a line typed with a
+    /// space first, or typed twice, is still the line that runs, never the
+    /// one before it; and history keeps out what the user's settings keep
+    /// out.
+    #[cfg(unix)]
+    #[test]
+    fn bash_marks_lines_history_keeps_out() {
+        for debug_trap in [false, true] {
+            let Some((marks, out)) = bash_session(
+                "set -u\nHISTCONTROL=ignoreboth\nHISTIGNORE='ls*'\n",
+                &[
+                    "echo one",
+                    " echo secret",
+                    "echo one",
+                    "ls -d /",
+                    "history | grep -c 'sec[r]et\\|ls -[d]\\|echo [o]ne'",
+                ],
+                debug_trap,
+            ) else {
+                return;
+            };
+            let starts: Vec<&Mark> = marks
+                .iter()
+                .filter(|m| matches!(m, Mark::Start(_)))
+                .collect();
+            assert_eq!(
+                starts,
+                [
+                    "echo one",
+                    "echo secret",
+                    "echo one",
+                    "ls -d /",
+                    "history | grep -c 'sec[r]et\\|ls -[d]\\|echo [o]ne'"
+                ]
+                .map(|l| Mark::Start(l.into()))
+                .iter()
+                .collect::<Vec<_>>(),
+                "debug trap: {debug_trap}"
+            );
+            // Only the first `echo one` is in history.
+            // (Its count stands alone on a line, whatever escapes the
+            // prompt has around it.)
+            assert!(
+                out.split(['\r', '\n']).any(|line| line == "1"),
+                "debug trap: {debug_trap}: {out:?}"
+            );
+        }
+    }
+
+    /// Run `lines` in an integrated bash whose profile is `profile`: the
+    /// marks from the first command on, and what it printed. `None` without
+    /// bash.
+    #[cfg(unix)]
+    fn bash_session(
+        profile: &str,
+        lines: &[&str],
+        debug_trap: bool,
+    ) -> Option<(Vec<Mark>, String)> {
         use std::time::{Duration, Instant};
         if !Path::new("/bin/bash").exists() {
-            return;
+            return None;
         }
-        for debug_trap in [false, true] {
-            let home = std::env::temp_dir().join(format!("lenslet-home-{:x}", random()));
-            std::fs::create_dir_all(&home).unwrap();
-            std::fs::write(
-                home.join(".bash_profile"),
-                "set -u\nset -e\nPROMPT_COMMAND=\"history -a;\"\n",
-            )
+        let home = std::env::temp_dir().join(format!("lenslet-home-{:x}", random()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".bash_profile"), profile).unwrap();
+        let Integration {
+            mut command,
+            prefix,
+            dir: rc,
+        } = integrate("/bin/bash", &[]).expect("bash integrates");
+        command.cwd(&home);
+        command.env("HOME", &home);
+        command.env("HISTFILE", home.join(".bash_history"));
+        if debug_trap {
+            command.env("__LENSLET_DEBUG_TRAP", "1");
+        }
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 200,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .unwrap();
-            let Integration {
-                mut command,
-                prefix,
-                dir: rc,
-            } = integrate("/bin/bash", &[]).expect("bash integrates");
-            command.cwd(&home);
-            command.env("HOME", &home);
-            if debug_trap {
-                command.env("__LENSLET_DEBUG_TRAP", "1");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let printed = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let (heard, shown) = (seen.clone(), printed.clone());
+        std::thread::spawn(move || {
+            let mut marks = Marks::new(prefix);
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let (text, found) = marks.split(&buf[..n]);
+                shown.lock().unwrap().extend(text);
+                heard.lock().unwrap().extend(found);
             }
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .unwrap();
-            let mut child = pair.slave.spawn_command(command).unwrap();
-            drop(pair.slave);
-            let mut reader = pair.master.try_clone_reader().unwrap();
-            let mut writer = pair.master.take_writer().unwrap();
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let heard = seen.clone();
-            std::thread::spawn(move || {
-                let mut marks = Marks::new(prefix);
-                let mut buf = [0u8; 4096];
-                while let Ok(n) = reader.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    heard.lock().unwrap().extend(marks.split(&buf[..n]).1);
-                }
-            });
-            std::thread::sleep(Duration::from_millis(500));
-            writer.write_all(b"false && true\r").unwrap();
-            std::thread::sleep(Duration::from_millis(300));
-            writer.write_all(b"echo alive\r").unwrap();
-            let want = vec![
-                Mark::Start("false && true".into()),
-                Mark::End(1),
-                Mark::Start("echo alive".into()),
-                Mark::End(0),
-            ];
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let got = loop {
-                let got: Vec<Mark> = seen.lock().unwrap().iter().cloned().collect();
-                // The first prompt's end mark (no command yet) comes first.
-                let from = got.iter().position(|m| matches!(m, Mark::Start(_)));
-                let got: Vec<Mark> = from.map(|i| got[i..].to_vec()).unwrap_or_default();
-                if got.len() >= want.len() || Instant::now() > deadline {
-                    break got;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            };
-            let _ = child.kill();
-            let _ = std::fs::remove_dir_all(&rc);
-            let _ = std::fs::remove_dir_all(&home);
-            assert_eq!(got, want, "debug trap: {debug_trap}");
+        });
+        let ends = |marks: &[Mark]| marks.iter().filter(|m| matches!(m, Mark::End(_))).count();
+        // The first prompt's end mark (no command yet) comes first.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ends(&seen.lock().unwrap()) < 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
+        for (i, line) in lines.iter().enumerate() {
+            writer.write_all(format!("{line}\r").as_bytes()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while ends(&seen.lock().unwrap()) < i + 2 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let _ = child.kill();
+        let _ = std::fs::remove_dir_all(&rc);
+        let _ = std::fs::remove_dir_all(&home);
+        let marks = seen.lock().unwrap().clone();
+        let from = marks
+            .iter()
+            .position(|m| matches!(m, Mark::Start(_)))
+            .unwrap_or(marks.len());
+        let out = String::from_utf8_lossy(&printed.lock().unwrap()).into_owned();
+        Some((marks[from..].to_vec(), out))
     }
 
     #[cfg(unix)]
