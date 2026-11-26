@@ -273,3 +273,63 @@ fn a_saved_account_opens_as_it_was() {
             .contains("PutItem")
     );
 }
+
+/// What Lenslet allows a role stands once in the account, however often it
+/// was added to, and a rebuild counts only the calls that made the account.
+#[test]
+fn grants_stand_once_and_are_not_counted_as_calls_sent_again() {
+    use lenslet::shell::Mark;
+    use lenslet_core::access::Access;
+    let engine = Engine::start(0).expect("start");
+    let port = engine.port;
+    let mark = engine.on_mark();
+    let iam = |form: &str| send(port, "iam", None, "application/x-www-form-urlencoded", form);
+    let trust = "%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22lambda.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D";
+    let run = |command: &str, work: &dyn Fn()| {
+        mark(Mark::Start(command.into()));
+        work();
+        mark(Mark::End(0));
+        std::thread::sleep(Duration::from_millis(5));
+        engine.snapshot().runs.last().unwrap().id
+    };
+    let setup = run("setup", &|| {
+        let (status, body) = iam(&format!(
+            "Action=CreateRole&Version=2010-05-08&RoleName=fn-role&AssumeRolePolicyDocument={trust}"
+        ));
+        assert_eq!(status, 200, "{body}");
+    });
+    let two = run("two", &|| {
+        assert_eq!(sqs(port, "CreateQueue", r#"{"QueueName":"two"}"#).0, 200);
+    });
+    let table = |t: &str| {
+        Access::new(
+            "dynamodb:PutItem",
+            format!("arn:aws:dynamodb:*:*:table/{t}"),
+        )
+    };
+    for t in ["orders", "carts"] {
+        runtime_block(engine.grant("fn-role".into(), vec![table(t)])).expect("grant");
+    }
+    let policy = || {
+        iam("Action=GetRolePolicy&Version=2010-05-08&RoleName=fn-role&PolicyName=lenslet-dynamodb-PutItem").1
+    };
+    assert!(policy().contains("orders") && policy().contains("carts"));
+
+    // Back before run two: the role, and the grant once, not counted.
+    let replayed = runtime_block(engine.rewind(two)).expect("rewind");
+    assert_eq!((replayed.sent, replayed.failed), (1, 0));
+    assert!(policy().contains("orders") && policy().contains("carts"));
+    let saved = runtime_block(engine.save_account()).expect("save");
+    let log = lenslet::account::from_json(&saved).expect("read back");
+    assert_eq!(log.iter().filter(|s| s.grant.is_some()).count(), 1);
+    assert_eq!(log.len(), 2);
+
+    // Back before the role: nothing sent, the grant waits for its role.
+    let replayed = runtime_block(engine.rewind(setup)).expect("rewind");
+    assert_eq!((replayed.sent, replayed.failed), (0, 0));
+    // The role created again gets it.
+    iam(&format!(
+        "Action=CreateRole&Version=2010-05-08&RoleName=fn-role&AssumeRolePolicyDocument={trust}"
+    ));
+    assert!(policy().contains("carts"));
+}

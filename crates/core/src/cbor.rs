@@ -294,6 +294,192 @@ fn f16_to_f64(bits: u16) -> f64 {
     }
 }
 
+/// `input` with each text string `change` answers for replaced, and every
+/// other byte as it was: a request sent again with the ids its first sending
+/// named swapped for new ones stays the same CBOR, each changed string with
+/// the length its new text has. `None` when `input` is not one well-formed
+/// CBOR item.
+pub fn map_text(input: &[u8], change: &dyn Fn(&str) -> Option<String>) -> Option<Vec<u8>> {
+    let mut rewrite = Rewrite {
+        input,
+        pos: 0,
+        out: Vec::with_capacity(input.len()),
+        items: 0,
+        change,
+    };
+    rewrite.item(0)?;
+    (rewrite.pos == input.len()).then_some(rewrite.out)
+}
+
+struct Rewrite<'a, 'f> {
+    input: &'a [u8],
+    pos: usize,
+    out: Vec<u8>,
+    items: usize,
+    change: &'f dyn Fn(&str) -> Option<String>,
+}
+
+/// An item's head: its major type, and its argument (`None` for an
+/// indefinite length).
+struct Head {
+    major: u8,
+    argument: Option<u64>,
+}
+
+impl Rewrite<'_, '_> {
+    fn head(&mut self) -> Option<Head> {
+        let first = *self.input.get(self.pos)?;
+        self.pos += 1;
+        let (major, info) = (first >> 5, first & 0x1f);
+        let width = match info {
+            0..=23 => {
+                return Some(Head {
+                    major,
+                    argument: Some(u64::from(info)),
+                });
+            }
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            // Indefinite lengths, and the break that ends them.
+            31 if matches!(major, 2..=5 | 7) => {
+                return Some(Head {
+                    major,
+                    argument: None,
+                });
+            }
+            _ => return None,
+        };
+        let bytes = self.input.get(self.pos..self.pos.checked_add(width)?)?;
+        self.pos += width;
+        let argument = bytes.iter().fold(0u64, |n, b| n << 8 | u64::from(*b));
+        Some(Head {
+            major,
+            argument: Some(argument),
+        })
+    }
+
+    /// Copy what was read since `start` as it was.
+    fn copy(&mut self, start: usize) {
+        self.out.extend_from_slice(&self.input[start..self.pos]);
+    }
+
+    fn take(&mut self, len: u64) -> Option<&[u8]> {
+        let len = usize::try_from(len).ok()?;
+        let bytes = self.input.get(self.pos..self.pos.checked_add(len)?)?;
+        self.pos += len;
+        Some(bytes)
+    }
+
+    fn at_break(&self) -> bool {
+        self.input.get(self.pos) == Some(&0xff)
+    }
+
+    fn item(&mut self, depth: usize) -> Option<()> {
+        self.items = self.items.checked_add(1)?;
+        if depth > MAX_DEPTH || self.items > MAX_ITEMS {
+            return None;
+        }
+        let start = self.pos;
+        let head = self.head()?;
+        match (head.major, head.argument) {
+            (0 | 1 | 7, Some(_)) => self.copy(start),
+            (2, Some(len)) => {
+                self.take(len)?;
+                self.copy(start);
+            }
+            (3, Some(len)) => {
+                let text = std::str::from_utf8(self.take(len)?).ok()?.to_string();
+                self.text(start, &text);
+            }
+            // A text string in chunks is one string: changed whole, or kept
+            // chunk for chunk.
+            (3, None) => {
+                let mut text = String::new();
+                while !self.at_break() {
+                    let chunk = self.head()?;
+                    let (3, Some(len)) = (chunk.major, chunk.argument) else {
+                        return None;
+                    };
+                    text.push_str(std::str::from_utf8(self.take(len)?).ok()?);
+                }
+                self.pos += 1;
+                self.text(start, &text);
+            }
+            (2, None) => {
+                while !self.at_break() {
+                    let chunk = self.head()?;
+                    let (2, Some(len)) = (chunk.major, chunk.argument) else {
+                        return None;
+                    };
+                    self.take(len)?;
+                }
+                self.pos += 1;
+                self.copy(start);
+            }
+            (4 | 5, count) => {
+                self.copy(start);
+                let per = if head.major == 5 { 2 } else { 1 };
+                match count {
+                    Some(n) => {
+                        for _ in 0..n.checked_mul(per)? {
+                            self.item(depth + 1)?;
+                        }
+                    }
+                    None => {
+                        while !self.at_break() {
+                            for _ in 0..per {
+                                self.item(depth + 1)?;
+                            }
+                        }
+                        self.pos += 1;
+                        self.out.push(0xff);
+                    }
+                }
+            }
+            (6, Some(_)) => {
+                self.copy(start);
+                self.item(depth + 1)?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// The text string read since `start`, changed or as it was.
+    fn text(&mut self, start: usize, text: &str) {
+        match (self.change)(text) {
+            Some(new) => {
+                head(&mut self.out, 3, new.len() as u64);
+                self.out.extend_from_slice(new.as_bytes());
+            }
+            None => self.copy(start),
+        }
+    }
+}
+
+/// The shortest head for major type `major` and argument `n`.
+fn head(out: &mut Vec<u8>, major: u8, n: u64) {
+    let major = major << 5;
+    match n {
+        0..=23 => out.push(major | n as u8),
+        24..=0xff => out.extend_from_slice(&[major | 24, n as u8]),
+        0x100..=0xffff => {
+            out.push(major | 25);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        0x1_0000..=0xffff_ffff => {
+            out.push(major | 26);
+            out.extend_from_slice(&(n as u32).to_be_bytes());
+        }
+        _ => {
+            out.push(major | 27);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +582,39 @@ mod tests {
         }
         // Trailing bytes after a complete value.
         assert_eq!(decode_cbor(&[0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn swaps_text_strings_and_keeps_everything_else() {
+        // {"QueueUrl": "q", "ReceiptHandle": "old", "N": 1.5, "B": h'00ff'}
+        let mut input = vec![0xa4, 0x68];
+        input.extend_from_slice(b"QueueUrl");
+        input.extend_from_slice(&[0x61, b'q', 0x6d]);
+        input.extend_from_slice(b"ReceiptHandle");
+        input.extend_from_slice(&[
+            0x63, b'o', b'l', b'd', 0x61, b'N', 0xf9, 0x3e, 0x00, 0x61, b'B',
+        ]);
+        input.extend_from_slice(&[0x42, 0x00, 0xff]);
+        let long = "n".repeat(300);
+        let out = map_text(&input, &|t| (t == "old").then(|| long.clone())).expect("rewritten");
+        let value = decode_cbor(&out).expect("still CBOR");
+        assert_eq!(value["ReceiptHandle"], long.as_str());
+        assert_eq!(value["QueueUrl"], "q");
+        assert_eq!(value["N"], 1.5);
+        assert_eq!(decode_cbor(&input).unwrap()["B"], value["B"]);
+        // A length past 255 takes a two-byte head.
+        assert!(out.windows(3).any(|w| w == [0x79, 0x01, 0x2c]));
+        // Nothing to change: the very same bytes.
+        assert_eq!(map_text(&input, &|_| None).unwrap(), input);
+
+        // An indefinite map and a text string in chunks.
+        let chunked = [
+            0xbf, 0x61, b'k', 0x7f, 0x62, b'o', b'l', 0x61, b'd', 0xff, 0xff,
+        ];
+        let out = map_text(&chunked, &|t| (t == "old").then(|| "new".into())).unwrap();
+        assert_eq!(decode_cbor(&out).unwrap()["k"], "new");
+        // Not CBOR, or more than one item.
+        assert!(map_text(&[0x62, b'a'], &|_| None).is_none());
+        assert!(map_text(&[0x01, 0x02], &|_| None).is_none());
     }
 }

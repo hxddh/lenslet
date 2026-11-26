@@ -408,12 +408,17 @@ __lenslet_hc=; __lenslet_hi=
 __lenslet_take() {{
   local w c=
   if [ -n "${{HISTIGNORE-}}" ]; then __lenslet_hi=$HISTIGNORE; HISTIGNORE=; fi
-  case ":${{HISTCONTROL-}}:" in *:ignore*) ;; *) return 0 ;; esac
+  # HISTCONTROL as Lenslet left it: the rules taken still hold. Set to
+  # anything else (cleared, too), the rules are what it says now.
+  [ "${{HISTCONTROL-}}" != "${{__lenslet_left-}}" ] || return 0
   __lenslet_hc=
   for w in ${{HISTCONTROL//:/ }}; do
-    case $w in ignorespace|ignoredups|ignoreboth) __lenslet_hc="$__lenslet_hc:$w" ;; *) c="$c:$w" ;; esac
+    case $w in ignorespace|ignoredups|ignoreboth|lenslet) ;; *) c="$c:$w" ;; esac
+    case $w in ignorespace|ignoredups|ignoreboth) __lenslet_hc="$__lenslet_hc:$w" ;; esac
   done
-  HISTCONTROL=${{c#:}}
+  # Rules taken leave a word bash passes over, so clearing it is told apart.
+  [ -z "$__lenslet_hc" ] || c="$c:lenslet"
+  HISTCONTROL=${{c#:}}; __lenslet_left=$HISTCONTROL
   return 0
 }}
 __lenslet_last() {{ local h; h=$(HISTTIMEFORMAT= builtin history 1); h=${{h#"${{h%%[![:space:]]*}}"}}; printf '%s' "${{h%%[!0-9]*}}"; }}
@@ -764,6 +769,28 @@ mod tests {
                 "debug trap: {debug_trap}: {out:?}"
             );
         }
+    }
+
+    /// `HISTCONTROL` cleared after it started with `ignoreboth`: a line with
+    /// a space first goes into history from then on.
+    #[cfg(unix)]
+    #[test]
+    fn bash_follows_histcontrol_cleared_midway() {
+        let Some((marks, out)) = bash_session(
+            "HISTCONTROL=ignoreboth\n",
+            &[
+                " echo before",
+                "HISTCONTROL=",
+                " echo after",
+                "history | grep -c 'echo [ab][ef]'",
+            ],
+            false,
+        ) else {
+            return;
+        };
+        assert!(marks.contains(&Mark::Start("echo after".into())));
+        // `echo after` only: `echo before` was kept out as the user asked then.
+        assert!(out.split(['\r', '\n']).any(|line| line == "1"), "{out:?}");
     }
 
     /// Run `lines` in an integrated bash whose profile is `profile`: the

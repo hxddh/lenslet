@@ -5,8 +5,10 @@
 //! recorded as internal calls, under the call they happened inside.
 //!
 //! While an account is rebuilt (a rewind, an opened account), its calls go
-//! to an engine of its own, and what AWS does inside them is not recorded;
-//! the account in use goes on being recorded as ever.
+//! to an engine of its own, and what that engine does is not recorded; the
+//! account in use goes on being recorded as ever, its background work (a
+//! queue's poller invoking a function) included. The router names the engine
+//! each call is made in.
 //!
 //! The parent is found two ways. On the same task: a call from outside is
 //! served inside [`within`], which holds a stack of the calls in progress on
@@ -37,16 +39,15 @@ use crate::{
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The calls of an account being rebuilt, on an engine of its own until it
-/// is done: never news, whatever the account in use does meanwhile.
+/// The engine an account is being rebuilt on, until it is done: what it does
+/// is never news, whatever the account in use does meanwhile. Every call is
+/// told by the engine that made it (its router's identity), so the account
+/// in use goes on being recorded, its pollers' calls included.
 #[derive(Default)]
 struct Offline {
-    /// A rebuild is under way.
-    active: bool,
-    /// The calls sent to the engine being built, and every call AWS made
-    /// inside them.
-    ids: std::collections::HashSet<u64>,
-    /// The ones AWS has in progress.
+    /// The engine being built, while one is.
+    router: Option<u64>,
+    /// The calls it has in progress.
     open: usize,
     /// When it last began or ended one, in ms since the epoch.
     last_ms: u64,
@@ -58,27 +59,23 @@ fn offline() -> std::sync::MutexGuard<'static, Offline> {
     OFFLINE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// An account being rebuilt on an engine of its own, while this lives.
+/// An account being rebuilt on the engine `router` names, while this lives.
 pub struct Rebuild(());
 
 impl Rebuild {
-    pub fn start() -> Rebuild {
-        let mut offline = offline();
-        offline.active = true;
-        offline.ids.clear();
-        offline.open = 0;
-        offline.last_ms = now_ms();
+    pub fn start(router: u64) -> Rebuild {
+        *offline() = Offline {
+            router: Some(router),
+            open: 0,
+            last_ms: now_ms(),
+        };
         Rebuild(())
     }
 
-    /// An id for a call sent to the engine being built: what it causes is
-    /// not recorded.
+    /// An id for a call sent to the engine being built.
     pub fn call(&self) -> u64 {
-        let id = next_id();
-        let mut offline = offline();
-        offline.ids.insert(id);
-        offline.last_ms = now_ms();
-        id
+        offline().last_ms = now_ms();
+        next_id()
     }
 
     /// The engine being built has nothing in progress, and has done nothing
@@ -90,11 +87,10 @@ impl Rebuild {
 }
 
 impl Drop for Rebuild {
+    /// The engine is the account in use now, or gone: what it does from now
+    /// on is recorded as any other.
     fn drop(&mut self) {
-        let mut offline = offline();
-        offline.active = false;
-        offline.ids.clear();
-        offline.open = 0;
+        *offline() = Offline::default();
     }
 }
 
@@ -169,7 +165,7 @@ pub fn chain_started(headers: &http::HeaderMap, id: u64) {
 static OBSERVER: std::sync::OnceLock<Arc<Observer>> = std::sync::OnceLock::new();
 
 impl CallObserver for Observer {
-    fn begin(&self, depth: u8, headers: &http::HeaderMap) -> u64 {
+    fn begin(&self, depth: u8, router: u64, headers: &http::HeaderMap) -> u64 {
         if depth == 0 {
             // Calls from outside are recorded where they arrive.
             return 0;
@@ -201,16 +197,11 @@ impl CallObserver for Observer {
             }
             on_task.or(on_chain)
         };
-        // Inside a call to the engine being rebuilt; or, while one is,
-        // inside nothing at all (a poller's), which cannot be told apart.
+        // Made by the engine being rebuilt, whatever it hangs under.
         let offline = {
             let mut offline = self::offline();
-            let inside = match parent {
-                Some(parent) => offline.ids.contains(&parent),
-                None => offline.active,
-            };
+            let inside = offline.router == Some(router);
             if inside {
-                offline.ids.insert(id);
                 offline.open += 1;
                 offline.last_ms = now_ms();
             }
@@ -335,5 +326,66 @@ pub fn install(session: Session, refresher: Refresher) {
     // One observer per process: the first engine's (the window has one).
     if OBSERVER.set(observer.clone()).is_ok() {
         set_call_observer(Some(observer));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observer() -> Observer {
+        Observer {
+            session: Session::default(),
+            refresher: Refresher::default(),
+            open: Mutex::new(HashMap::new()),
+            chains: Mutex::new(Chains::default()),
+        }
+    }
+
+    /// An SQS poller's call to Lambda: made inside nothing, with no tracing.
+    fn rootless(observer: &Observer, router: u64) -> u64 {
+        let token = observer.begin(1, router, &http::HeaderMap::new());
+        let (method, uri) = (
+            http::Method::POST,
+            http::Uri::from_static("/2015-03-31/functions/f/invocations"),
+        );
+        let response = http::Response::new(Bytes::from_static(b"{}"));
+        observer.end(
+            token,
+            1,
+            &ObservedCall {
+                method: &method,
+                uri: &uri,
+                headers: &http::HeaderMap::new(),
+                body: b"{}",
+                response: &response,
+            },
+        );
+        token
+    }
+
+    #[test]
+    fn the_account_in_use_is_recorded_while_another_is_rebuilt() {
+        let observer = observer();
+        let (live, building) = (0x1000, 0x2000);
+        let rebuild = Rebuild::start(building);
+        // The live account's poller invokes a function: recorded.
+        let token = rootless(&observer, live);
+        let calls = observer.session.snapshot().calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, token);
+        assert!(calls[0].internal);
+        // The engine being rebuilt does the same: not recorded, and while
+        // its call is open it is not settled.
+        let open = observer.begin(1, building, &http::HeaderMap::new());
+        assert!(!rebuild.settled(0));
+        observer.abort(open, 1);
+        rootless(&observer, building);
+        assert_eq!(observer.session.snapshot().calls.len(), 1);
+        assert!(rebuild.settled(0));
+        // Once adopted, the rebuilt engine is the account in use.
+        drop(rebuild);
+        rootless(&observer, building);
+        assert_eq!(observer.session.snapshot().calls.len(), 2);
     }
 }

@@ -30,7 +30,8 @@ pub struct Engine {
     rewinding: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// What a rewind sent again.
+/// What a rewind sent again: the calls that made the account (Lenslet's own
+/// grants, sent with their roles, are not among them), and how many failed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Replayed {
     pub sent: usize,
@@ -42,17 +43,10 @@ impl Engine {
     /// a free one when it is taken.
     pub fn start(port: u16) -> Result<Engine, String> {
         let chosen = std::env::var_os("LENSLET_PORT").is_some();
-        let listener = match server::bind(port) {
-            Ok(listener) => listener,
-            Err(e) if !chosen && e.kind() == std::io::ErrorKind::AddrInUse => {
-                server::bind(0).map_err(|e| format!("127.0.0.1: {e}"))?
-            }
-            Err(e) => return Err(format!("127.0.0.1:{port}: {e}")),
-        };
-        // Port 0 picks a free one; report the one it is.
+        // `127.0.0.1`, and `[::1]` where the machine has IPv6: `localhost`
+        // is either.
+        let (listener, listener_v6) = server::bind_both(port, chosen)?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        // `localhost` and `[::1]` reach it too, where the machine has IPv6.
-        let listener_v6 = server::bind_v6(port);
         let endpoint = format!("http://127.0.0.1:{port}");
         let emulator = Emulator::new(&endpoint);
         let session = Session::default();
@@ -455,7 +449,7 @@ async fn rebuild(
         .await
         .map_err(|_| "could not start a new engine".to_string())?;
     let built = emulator.offline(router);
-    let rebuild = crate::observe::Rebuild::start();
+    let rebuild = crate::observe::Rebuild::start(built.identity());
     let replayed = send_again(&built, &rebuild, log, max_gap_ms).await;
     Ok((built, replayed))
 }
@@ -468,29 +462,172 @@ const BUSY: &str = "Lenslet is rebuilding the account; try again when it is done
 struct Issued(Vec<(String, String)>);
 
 impl Issued {
-    /// `sent` naming the new account's ids instead of the first one's.
+    /// `text` naming the new ids, if it named any of the old ones.
+    fn swap(&self, text: &str) -> Option<String> {
+        self.0
+            .iter()
+            .any(|(old, _)| text.contains(old.as_str()))
+            .then(|| {
+                self.0.iter().fold(text.to_string(), |t, (old, new)| {
+                    t.replace(old.as_str(), new)
+                })
+            })
+    }
+
+    /// `sent` naming the new account's ids instead of the first one's: in its
+    /// address, and in its body as its protocol writes it.
     fn apply<'a>(&self, sent: &'a Sent) -> std::borrow::Cow<'a, Sent> {
-        let named = |text: &str| self.0.iter().any(|(old, _)| text.contains(old.as_str()));
-        let uri = sent.uri.to_string();
-        let body = std::str::from_utf8(&sent.body).ok();
-        if self.0.is_empty() || !(named(&uri) || body.is_some_and(named)) {
+        if self.0.is_empty() {
             return std::borrow::Cow::Borrowed(sent);
         }
-        let swap = |text: &str| {
-            self.0.iter().fold(text.to_string(), |t, (old, new)| {
-                t.replace(old.as_str(), new)
-            })
-        };
-        let mut sent = sent.clone();
-        if let Ok(local) = swap(&uri).parse() {
-            sent.uri = local;
+        let uri = self.uri(&sent.uri);
+        let body = self.body(sent);
+        if uri.is_none() && body.is_none() {
+            return std::borrow::Cow::Borrowed(sent);
         }
-        if let Some(body) = body.filter(|b| named(b)) {
-            sent.body = bytes::Bytes::from(swap(body));
-            sent.headers.remove(http::header::CONTENT_LENGTH);
+        let mut sent = sent.clone();
+        if let Some(uri) = uri {
+            sent.uri = uri;
+        }
+        if let Some(body) = body {
+            plain(&mut sent.headers, body.len());
+            sent.body = bytes::Bytes::from(body);
         }
         std::borrow::Cow::Owned(sent)
     }
+
+    /// The address with the new ids, each part of it read percent-decoded
+    /// (a receipt handle's `+`, `/` and `=` travel as `%2B`, `%2F`, `%3D`).
+    fn uri(&self, uri: &http::Uri) -> Option<http::Uri> {
+        let mut changed = false;
+        let mut swap = |part: &str| match self.swap(&lenslet_core::wire::percent_decode_path(part))
+        {
+            Some(new) => {
+                changed = true;
+                encode(&new)
+            }
+            None => part.to_string(),
+        };
+        let path: Vec<String> = uri.path().split('/').map(&mut swap).collect();
+        let mut local = path.join("/");
+        if let Some(query) = uri.query() {
+            let pairs: Vec<String> = query
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((key, value)) => format!("{key}={}", swap(value)),
+                    None => pair.to_string(),
+                })
+                .collect();
+            local = format!("{local}?{}", pairs.join("&"));
+        }
+        changed.then(|| local.parse().ok()).flatten()
+    }
+
+    /// The body with the new ids, unframed and inflated: CBOR rewritten item
+    /// for item, a Query form field by field, JSON and XML as text. An S3
+    /// body is an object's data (S3's ids are in the address): never touched.
+    fn body(&self, sent: &Sent) -> Option<Vec<u8>> {
+        if sent.body.is_empty() {
+            return None;
+        }
+        let path = sent.uri.path_and_query().map_or("/", |p| p.as_str());
+        if lenslet_core::wire::wire_info(&sent.headers, path).service == "s3" {
+            return None;
+        }
+        let payload = lenslet_core::body::decode(&sent.headers, &sent.body).bytes;
+        let kind = sent
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if kind.contains("cbor") {
+            let out = lenslet_core::cbor::map_text(&payload, &|text| self.swap(text))?;
+            return (out != *payload).then_some(out);
+        }
+        let text = std::str::from_utf8(&payload).ok()?;
+        if kind.starts_with("application/x-www-form-urlencoded")
+            || lenslet_core::wire::form_action(&payload).is_some()
+        {
+            let mut changed = false;
+            let form: Vec<String> = text
+                .split('&')
+                .map(|pair| {
+                    let swapped = pair.split_once('=').and_then(|(key, value)| {
+                        let new = self.swap(&lenslet_core::wire::percent_decode_query(value))?;
+                        Some(format!("{key}={}", encode(&new)))
+                    });
+                    changed |= swapped.is_some();
+                    swapped.unwrap_or_else(|| pair.to_string())
+                })
+                .collect();
+            return changed.then(|| form.join("&").into_bytes());
+        }
+        self.swap(text).map(String::into_bytes)
+    }
+}
+
+/// Percent-encoding for a URI part or a form value: all but the characters
+/// that never need it.
+fn encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The headers of a request whose body is now its plain payload of `len`
+/// bytes: no framing or compression said of it, no checksum of what it was.
+fn plain(headers: &mut http::HeaderMap, len: usize) {
+    let kept: Vec<String> = headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|e| e.trim().to_string())
+        .filter(|e| {
+            !["aws-chunked", "gzip", "x-gzip", ""].contains(&e.to_ascii_lowercase().as_str())
+        })
+        .collect();
+    headers.remove(http::header::CONTENT_ENCODING);
+    if !kept.is_empty()
+        && let Ok(value) = http::HeaderValue::from_str(&kept.join(", "))
+    {
+        headers.insert(http::header::CONTENT_ENCODING, value);
+    }
+    if headers
+        .get("x-amz-content-sha256")
+        .is_some_and(|v| v.as_bytes().starts_with(b"STREAMING-"))
+    {
+        headers.insert(
+            "x-amz-content-sha256",
+            http::HeaderValue::from_static("UNSIGNED-PAYLOAD"),
+        );
+    }
+    let stale: Vec<http::HeaderName> = headers
+        .keys()
+        .filter(|name| {
+            let name = name.as_str();
+            name.starts_with("x-amz-checksum-")
+                || matches!(
+                    name,
+                    "x-amz-decoded-content-length"
+                        | "x-amz-trailer"
+                        | "x-amz-sdk-checksum-algorithm"
+                        | "content-md5"
+                )
+        })
+        .cloned()
+        .collect();
+    for name in stale {
+        headers.remove(name);
+    }
+    headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from(len));
 }
 
 /// The ids a call's answer made up, for the calls that make them up: an S3
@@ -550,40 +687,49 @@ async fn send_again(
 ) -> Replayed {
     let mut replayed = Replayed::default();
     let mut issued = Issued::default();
-    for (i, sent) in log.iter().enumerate() {
+    // What Lenslet allowed roles, and the roles the new account has: a grant
+    // is sent once its role exists, and once more each time it is created.
+    let mut standing: Vec<((String, String), &Sent)> = Vec::new();
+    let mut roles = std::collections::HashSet::new();
+    let mut previous = None;
+    for sent in log {
+        if let Some(key) = sent.granted() {
+            standing.retain(|(k, _)| *k != key);
+            if roles.contains(&key.0) {
+                let _ = send_one(emulator, rebuild, sent).await;
+            }
+            standing.push((key, sent));
+            continue;
+        }
         // Keep the session's pace, up to a few seconds a gap: what the code
         // waited for (a table, a function becoming ready) is ready again
         // before the next call.
-        if let Some(previous) = i.checked_sub(1).map(|p| log[p].at_ms) {
+        if let Some(previous) = previous.replace(sent.at_ms) {
             let gap = sent.at_ms.saturating_sub(previous).min(max_gap_ms);
             tokio::time::sleep(std::time::Duration::from_millis(gap)).await;
         }
-        let sent = issued.apply(sent);
-        let answer = send_one(emulator, rebuild, &sent).await;
-        match answer {
-            Some(response) => {
-                if !sent.issued.is_empty() {
-                    let (_, operation) = crate::server::operation(
-                        &sent.method,
-                        &sent.uri,
-                        &sent.headers,
-                        &sent.body,
-                    );
-                    let new = issued_ids(&operation, response.body());
-                    issued.0.extend(sent.issued.iter().cloned().zip(new));
-                }
-                // A role created again gets what Lenslet allowed it.
-                if let Some(role) = sent.created_role() {
-                    for grant in log.iter().filter(|g| g.grant.as_deref() == Some(&role)) {
-                        let _ = send_one(emulator, rebuild, grant).await;
-                    }
-                }
-            }
-            // A grant to a role not created yet waits for the role.
-            None if sent.grant.is_some() => {}
-            None => replayed.failed += 1,
-        }
         replayed.sent += 1;
+        let sent = issued.apply(sent);
+        let Some(response) = send_one(emulator, rebuild, &sent).await else {
+            replayed.failed += 1;
+            continue;
+        };
+        if !sent.issued.is_empty() {
+            let (_, operation) =
+                crate::server::operation(&sent.method, &sent.uri, &sent.headers, &sent.body);
+            let new = issued_ids(&operation, response.body());
+            issued.0.extend(sent.issued.iter().cloned().zip(new));
+        }
+        if let Some(role) = sent.created_role() {
+            for (_, grant) in standing.iter().filter(|((r, _), _)| *r == role) {
+                let _ = send_one(emulator, rebuild, grant).await;
+            }
+            roles.insert(role);
+        } else if let Some(role) = sent.deleted_role() {
+            roles.remove(&role);
+        } else if let Some(key) = sent.deleted_policy() {
+            standing.retain(|(k, _)| *k != key);
+        }
     }
     // Let what the calls set off (deliveries, functions) finish: until AWS
     // has been quiet a moment, for at most a while.
@@ -696,5 +842,129 @@ mod tests {
             issued.apply(&other),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    /// A message's receipt handle, with the characters encodings change.
+    const OLD: &str = "AQEB+old/handle==";
+    const NEW: &str = "AQEB+new/handle/9=";
+
+    fn request(headers: &[(&'static str, &str)], uri: &str, body: Vec<u8>) -> Sent {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in headers {
+            map.append(*name, value.parse().unwrap());
+        }
+        Sent {
+            at_ms: 0,
+            method: http::Method::POST,
+            uri: uri.parse().unwrap(),
+            headers: map,
+            body: bytes::Bytes::from(body),
+            issued: Vec::new(),
+            grant: None,
+        }
+    }
+
+    fn scope(service: &str) -> String {
+        format!(
+            "AWS4-HMAC-SHA256 Credential=k/20260101/us-east-1/{service}/aws4_request, SignedHeaders=host, Signature=0"
+        )
+    }
+
+    #[test]
+    fn new_ids_are_written_as_each_encoding_writes_them() {
+        let issued = Issued(vec![(OLD.into(), NEW.into())]);
+        let sqs = scope("sqs");
+
+        // Smithy RPCv2 CBOR: valid CBOR, the new handle at its own length.
+        let mut cbor = vec![0xa2, 0x68];
+        cbor.extend_from_slice(b"QueueUrl");
+        cbor.extend_from_slice(&[0x61, b'q', 0x6d]);
+        cbor.extend_from_slice(b"ReceiptHandle");
+        cbor.push(0x60 | OLD.len() as u8);
+        cbor.extend_from_slice(OLD.as_bytes());
+        let sent = request(
+            &[
+                ("authorization", &sqs),
+                ("content-type", "application/cbor"),
+                ("smithy-protocol", "rpc-v2-cbor"),
+            ],
+            "/service/AmazonSQS/operation/DeleteMessage",
+            cbor,
+        );
+        let swapped = issued.apply(&sent);
+        let value = lenslet_core::cbor::decode_cbor(&swapped.body).expect("valid CBOR");
+        assert_eq!(value["ReceiptHandle"], NEW);
+        assert_eq!(value["QueueUrl"], "q");
+
+        // A gzip'd Query form, its handle percent-encoded: sent plain.
+        let form = format!(
+            "Action=DeleteMessage&QueueUrl=q&ReceiptHandle={}",
+            encode(OLD)
+        );
+        assert!(form.contains("%2Bold%2Fhandle%3D%3D"));
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, form.as_bytes()).unwrap();
+        let sent = request(
+            &[
+                ("authorization", &sqs),
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("content-encoding", "gzip"),
+                ("content-length", "999"),
+            ],
+            "/",
+            gz.finish().unwrap(),
+        );
+        let swapped = issued.apply(&sent);
+        let body = std::str::from_utf8(&swapped.body).unwrap();
+        assert_eq!(
+            lenslet_core::wire::form_field(body, "ReceiptHandle").as_deref(),
+            Some(NEW)
+        );
+        assert!(body.starts_with("Action=DeleteMessage&QueueUrl=q&"));
+        assert!(!swapped.headers.contains_key("content-encoding"));
+        assert_eq!(swapped.headers["content-length"], body.len().to_string());
+
+        // aws-chunked JSON with a trailing checksum: unframed, its framing
+        // and checksum headers gone.
+        let json = format!(r#"{{"QueueUrl":"q","ReceiptHandle":"{OLD}"}}"#);
+        let framed = format!(
+            "{:x}\r\n{json}\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n",
+            json.len()
+        );
+        let sent = request(
+            &[
+                ("authorization", &sqs),
+                ("content-type", "application/x-amz-json-1.0"),
+                ("content-encoding", "aws-chunked"),
+                ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+                ("x-amz-decoded-content-length", &json.len().to_string()),
+                ("x-amz-trailer", "x-amz-checksum-crc32"),
+            ],
+            "/",
+            framed.into_bytes(),
+        );
+        let swapped = issued.apply(&sent);
+        assert_eq!(&swapped.body[..], json.replace(OLD, NEW).as_bytes());
+        for gone in [
+            "content-encoding",
+            "x-amz-decoded-content-length",
+            "x-amz-trailer",
+        ] {
+            assert!(!swapped.headers.contains_key(gone), "{gone}");
+        }
+        assert_eq!(swapped.headers["x-amz-content-sha256"], "UNSIGNED-PAYLOAD");
+
+        // In the address, percent-encoded; an object's data is never changed.
+        let sent = request(
+            &[("authorization", &scope("s3"))],
+            &format!("/b/k?partNumber=1&uploadId={}", encode(OLD)),
+            format!("part data naming {OLD}").into_bytes(),
+        );
+        let swapped = issued.apply(&sent);
+        assert_eq!(
+            lenslet_core::wire::query_param(&swapped.uri.to_string(), "uploadId").as_deref(),
+            Some(NEW)
+        );
+        assert_eq!(swapped.body, sent.body);
     }
 }

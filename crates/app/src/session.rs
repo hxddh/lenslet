@@ -112,7 +112,10 @@ pub struct Exchange {
     /// inflated), or a note for data.
     pub body: String,
     pub bytes: usize,
-    /// `body` is exactly the bytes sent.
+    /// `body` is all of what the body says, decoded (unframed, inflated,
+    /// CBOR as JSON): the input to copy as a CLI command or boto3.
+    pub complete: bool,
+    /// `body` is exactly the bytes sent: what curl sends as it is.
     pub verbatim: bool,
     /// The bytes sent, when `body` is not them and they are small.
     pub raw: Option<bytes::Bytes>,
@@ -206,7 +209,37 @@ impl Sent {
 
     /// The role this call created, if it is IAM's `CreateRole`.
     pub fn created_role(&self) -> Option<String> {
-        created_role(&self.body)
+        self.iam("CreateRole").map(|(role, _)| role)
+    }
+
+    /// The role this call deleted, if it is IAM's `DeleteRole`.
+    pub fn deleted_role(&self) -> Option<String> {
+        self.iam("DeleteRole").map(|(role, _)| role)
+    }
+
+    /// The role and inline policy Lenslet allowed with this call.
+    pub fn granted(&self) -> Option<(String, String)> {
+        self.grant.as_ref()?;
+        self.iam("PutRolePolicy")
+    }
+
+    /// The role and inline policy this call deleted, if it is IAM's
+    /// `DeleteRolePolicy`.
+    pub fn deleted_policy(&self) -> Option<(String, String)> {
+        self.iam("DeleteRolePolicy")
+    }
+
+    /// The role (and policy) an IAM Query call with `action` names, read
+    /// under its wire encodings.
+    fn iam(&self, action: &str) -> Option<(String, String)> {
+        let form = lenslet_core::body::decode(&self.headers, &self.body).bytes;
+        if lenslet_core::wire::form_action(&form).as_deref() != Some(action) {
+            return None;
+        }
+        let form = std::str::from_utf8(&form).ok()?;
+        let field = |name| lenslet_core::wire::form_field(form, name).unwrap_or_default();
+        let role = field("RoleName");
+        (!role.is_empty()).then(|| (role, field("PolicyName")))
     }
 
     /// About how much memory it takes: its body and headers.
@@ -228,13 +261,19 @@ const MAX_LOG_CALLS: usize = 200_000;
 /// and only theirs, make up a run.
 pub const TERMINAL_KEY: &str = "lenslet-terminal";
 
-/// The role an IAM `CreateRole` request body creates.
-pub fn created_role(body: &[u8]) -> Option<String> {
-    let form = std::str::from_utf8(body).ok()?;
-    if lenslet_core::wire::form_action(body).as_deref() != Some("CreateRole") {
-        return None;
+/// The grants that stand at the end of `log`, in order: the latest for each
+/// role's policy, unless the policy was deleted after it.
+pub fn standing_grants(log: &[Sent]) -> Vec<&Sent> {
+    let mut standing: Vec<((String, String), &Sent)> = Vec::new();
+    for sent in log {
+        if let Some(key) = sent.granted() {
+            standing.retain(|(k, _)| *k != key);
+            standing.push((key, sent));
+        } else if let Some(key) = sent.deleted_policy() {
+            standing.retain(|(k, _)| *k != key);
+        }
     }
-    lenslet_core::wire::form_field(form, "RoleName").filter(|r| !r.is_empty())
+    standing.into_iter().map(|(_, sent)| sent).collect()
 }
 
 /// Whether a call's answer hands out credentials: STS's (`AssumeRole`,
@@ -623,6 +662,11 @@ impl Session {
         if generation != inner.generation || inner.log_broken {
             return;
         }
+        // A grant holds all its policy allows: the one it adds to goes.
+        if let Some(key) = sent.granted() {
+            inner.log.retain(|s| s.granted().as_ref() != Some(&key));
+            inner.log_bytes = inner.log.iter().map(Sent::size).sum();
+        }
         inner.log_bytes += sent.size();
         if inner.log_bytes > MAX_LOG_BYTES || inner.log.len() >= MAX_LOG_CALLS {
             inner.log.clear();
@@ -697,12 +741,11 @@ impl Session {
         Ok(())
     }
 
-    /// What Lenslet allowed the role `role`, in order: sent again when the
-    /// role is created again.
+    /// What Lenslet allowed the role `role` that stands (not since deleted),
+    /// in order: sent again when the role is created again.
     pub fn grants_for(&self, role: &str) -> Vec<Sent> {
-        self.lock()
-            .log
-            .iter()
+        standing_grants(&self.lock().log)
+            .into_iter()
             .filter(|s| s.grant.as_deref() == Some(role))
             .cloned()
             .collect()
@@ -912,6 +955,9 @@ mod tests {
         // Lenslet allows a role what run two was denied: it stands.
         let mut grant = sent(now_ms());
         grant.grant = Some("fn-role".into());
+        grant.body = bytes::Bytes::from_static(
+            b"Action=PutRolePolicy&RoleName=fn-role&PolicyName=p&PolicyDocument=d",
+        );
         session.keep(grant, session.generation());
         assert!(session.can_rewind(two));
         let log = rewind(two).expect("rewind");
@@ -927,6 +973,61 @@ mod tests {
         // A new account has none.
         session.fresh();
         assert!(session.grants_for("fn-role").is_empty());
+    }
+
+    fn iam(form: &str, grant: bool, at_ms: u64) -> Sent {
+        Sent {
+            at_ms,
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::from(form.to_string()),
+            issued: Vec::new(),
+            grant: grant.then(|| "fn-role".into()),
+        }
+    }
+
+    #[test]
+    fn grants_keep_only_their_latest_and_not_what_was_deleted() {
+        let session = Session::default();
+        let g = session.generation();
+        let put = |table: &str| {
+            format!(
+                "Action=PutRolePolicy&RoleName=fn-role&PolicyName=lenslet-dynamodb-PutItem&PolicyDocument={table}"
+            )
+        };
+        session.keep(iam("Action=CreateRole&RoleName=fn-role", false, 1), g);
+        session.keep(iam(&put("orders"), true, 2), g);
+        session.keep(iam(&put("orders+carts"), true, 3), g);
+        let other = "Action=PutRolePolicy&RoleName=fn-role&PolicyName=lenslet-sqs-SendMessage&PolicyDocument=q";
+        session.keep(iam(other, true, 4), g);
+        // The second grant of a policy holds the first: one each.
+        let log = session.log().unwrap();
+        assert_eq!(log.iter().filter(|s| s.grant.is_some()).count(), 2);
+        assert!(log.iter().any(|s| s.body.ends_with(b"orders+carts")));
+        assert!(!log.iter().any(|s| s.body.ends_with(b"=orders")));
+        assert_eq!(session.grants_for("fn-role").len(), 2);
+        // Deleted by the code since: no longer sent with the role.
+        session.keep(
+            iam(
+                "Action=DeleteRolePolicy&RoleName=fn-role&PolicyName=lenslet-sqs-SendMessage",
+                false,
+                5,
+            ),
+            g,
+        );
+        let standing = session.grants_for("fn-role");
+        assert_eq!(standing.len(), 1);
+        assert!(standing[0].body.ends_with(b"orders+carts"));
+        // Read under its wire encodings: a gzip'd CreateRole is one too.
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, b"Action=CreateRole&RoleName=fn-role").unwrap();
+        let mut created = iam("", false, 6);
+        created.body = bytes::Bytes::from(gz.finish().unwrap());
+        created
+            .headers
+            .insert("content-encoding", http::HeaderValue::from_static("gzip"));
+        assert_eq!(created.created_role().as_deref(), Some("fn-role"));
     }
 
     #[test]

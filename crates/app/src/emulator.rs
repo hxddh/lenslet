@@ -61,6 +61,15 @@ impl Emulator {
         }
     }
 
+    /// Which engine this is: what the observer is told each of its calls is
+    /// made in.
+    pub fn identity(&self) -> u64 {
+        self.router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .identity()
+    }
+
     /// Serve `router` from now on, if `commit` (run while no call can reach
     /// either engine) says so: the account and what is said about it change
     /// over together.

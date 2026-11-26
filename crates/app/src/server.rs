@@ -63,14 +63,59 @@ pub fn bind(port: u16) -> std::io::Result<std::net::TcpListener> {
     Ok(listener)
 }
 
-/// The same port on IPv6's loopback (`[::1]`, and `localhost` where it names
-/// that first), when the machine has one.
-pub fn bind_v6(port: u16) -> Option<std::net::TcpListener> {
+/// The same port on IPv6's loopback.
+fn bind_v6(port: u16) -> std::io::Result<std::net::TcpListener> {
     let listener =
-        std::net::TcpListener::bind(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))
-            .ok()?;
-    listener.set_nonblocking(true).ok()?;
-    Some(listener)
+        std::net::TcpListener::bind(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
+/// Listeners on `port` for both loopbacks: `127.0.0.1`, and `[::1]` where the
+/// machine has IPv6. On the default port (not `chosen`), a port another
+/// program holds on either one is passed over for a free port on both, so a
+/// client that resolves `localhost` to `::1` never reaches that program.
+pub fn bind_both(
+    port: u16,
+    chosen: bool,
+) -> Result<(std::net::TcpListener, Option<std::net::TcpListener>), String> {
+    bind_pair(port, chosen, bind, bind_v6, |l| {
+        l.local_addr().map(|a| a.port()).unwrap_or_default()
+    })
+}
+
+/// [`bind_both`], with the binding given.
+fn bind_pair<L>(
+    port: u16,
+    chosen: bool,
+    v4: impl Fn(u16) -> std::io::Result<L>,
+    v6: impl Fn(u16) -> std::io::Result<L>,
+    port_of: impl Fn(&L) -> u16,
+) -> Result<(L, Option<L>), String> {
+    use std::io::ErrorKind::AddrInUse;
+    let mut listener = match v4(port) {
+        Ok(listener) => listener,
+        Err(e) if !chosen && e.kind() == AddrInUse => {
+            v4(0).map_err(|e| format!("127.0.0.1: {e}"))?
+        }
+        Err(e) => return Err(format!("127.0.0.1:{port}: {e}")),
+    };
+    // A free port on one loopback can be taken on the other: a few tries.
+    for _ in 0..16 {
+        let port = port_of(&listener);
+        match v6(port) {
+            Ok(both) => return Ok((listener, Some(both))),
+            Err(e) if e.kind() == AddrInUse && chosen => {
+                return Err(format!("[::1]:{port}: {e}"));
+            }
+            Err(e) if e.kind() == AddrInUse => {
+                listener = v4(0).map_err(|e| format!("127.0.0.1: {e}"))?;
+            }
+            // No IPv6 here (no `::1`, or none at all): IPv4 alone.
+            Err(_) => return Ok((listener, None)),
+        }
+    }
+    Err("no port is free on both 127.0.0.1 and [::1]".into())
 }
 
 async fn handle(
@@ -343,9 +388,16 @@ struct Text {
     shown: String,
     /// `shown` is what the body says (not a note about it).
     readable: bool,
+    /// `shown` is only the first part of what it says.
+    truncated: bool,
     /// The encodings undone to read it (`aws-chunked`, `gzip`, `cbor`).
     encoding: Vec<&'static str>,
 }
+
+/// The most of a body read as a document: API requests and answers are far
+/// smaller; past it, a body (an object's, a large inflated one) is read only
+/// that far, and said to be cut short.
+const MAX_DOCUMENT: usize = 4 * 1024 * 1024;
 
 /// The body as text: its wire encodings undone (`aws-chunked` framing,
 /// gzip), CBOR decoded to JSON, UTF-8 as is, binary as a note.
@@ -353,12 +405,14 @@ fn text_of(headers: &http::HeaderMap, body: &Bytes, content_type: Option<&str>) 
     let note = |shown: String| Text {
         shown,
         readable: false,
+        truncated: false,
         encoding: Vec::new(),
     };
     if body.is_empty() {
         return Text {
             shown: String::new(),
             readable: true,
+            truncated: false,
             encoding: Vec::new(),
         };
     }
@@ -366,25 +420,36 @@ fn text_of(headers: &http::HeaderMap, body: &Bytes, content_type: Option<&str>) 
     if body.len() > MAX_TEXT {
         return note(format!("({} bytes)", body.len()));
     }
-    let decoded = lenslet_core::body::decode(headers, body);
-    let mut encoding = decoded.encoding;
-    if content_type.is_some_and(|t| t.contains("cbor"))
+    let decoded = lenslet_core::body::decode_within(headers, body, MAX_DOCUMENT);
+    let (mut encoding, truncated) = (decoded.encoding, decoded.truncated);
+    if !truncated
+        && content_type.is_some_and(|t| t.contains("cbor"))
         && let Some(json) = cbor::decode_cbor_json(&decoded.bytes)
     {
         encoding.push("cbor");
         return Text {
             shown: json,
             readable: true,
+            truncated: false,
             encoding,
         };
     }
-    match std::str::from_utf8(&decoded.bytes) {
-        Ok(text) => Text {
+    // Text cut short may end inside a character: what comes before it.
+    let text = match std::str::from_utf8(&decoded.bytes) {
+        Ok(text) => Some(text),
+        Err(e) if truncated && e.error_len().is_none() => {
+            std::str::from_utf8(&decoded.bytes[..e.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    };
+    match text {
+        Some(text) => Text {
             shown: text.to_string(),
             readable: true,
+            truncated,
             encoding,
         },
-        Err(_) => note(format!("({} bytes of binary data)", body.len())),
+        None => note(format!("({} bytes of binary data)", body.len())),
     }
 }
 
@@ -394,6 +459,7 @@ fn body_trace(body: &Bytes, text: &Text) -> Option<BodyTrace> {
         text: text.readable.then(|| text.shown.clone()),
         encoding: (!text.encoding.is_empty()).then(|| text.encoding.join(", ")),
         bytes: body.len() as u64,
+        truncated: text.truncated,
         binary: !text.readable,
         ..Default::default()
     })
@@ -410,16 +476,20 @@ fn exchange(
     raw: &Bytes,
 ) -> Exchange {
     let mut body = text.shown;
-    let mut verbatim = text.readable && text.encoding.is_empty();
+    let mut complete = text.readable && !text.truncated;
     if body.len() > MAX_BODY {
         let mut end = MAX_BODY;
         while !body.is_char_boundary(end) {
             end -= 1;
         }
         body.truncate(end);
-        body.push_str("\n…");
-        verbatim = false;
+        complete = false;
     }
+    if !complete && text.readable {
+        body.push_str("\n…");
+    }
+    // What was sent, byte for byte: the text, unless it had to be decoded.
+    let verbatim = complete && text.encoding.is_empty();
     Exchange {
         headers: headers
             .iter()
@@ -428,6 +498,7 @@ fn exchange(
         content_type,
         body,
         bytes: raw.len(),
+        complete,
         verbatim,
         raw: (!verbatim && !raw.is_empty() && raw.len() <= MAX_RAW).then(|| raw.clone()),
     }
@@ -594,6 +665,129 @@ mod tests {
             "no `*` for a body that was read"
         );
         assert_eq!(call.target.as_deref(), Some("queue/jobs"));
+    }
+
+    #[test]
+    fn framed_and_compressed_calls_copy_as_their_input_and_their_bytes() {
+        let framed = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:NhCmhg==\r\n\r\n";
+        let put = recorded(
+            &[
+                ("authorization", &scope("s3")),
+                ("host", "127.0.0.1:4510"),
+                ("content-encoding", "aws-chunked"),
+                ("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"),
+            ],
+            "PUT",
+            "/shop/notes.txt?x-id=PutObject",
+            framed,
+        );
+        assert!(put.request.complete && !put.request.verbatim);
+        assert_eq!(
+            crate::copy_as::aws_cli(&put).as_deref(),
+            Some("aws s3api put-object --bucket 'shop' --key 'notes.txt' --body 'notes.txt'")
+        );
+        let py = crate::copy_as::boto3(&put).unwrap();
+        assert!(py.contains("\"Body\": \"hello\""), "{py}");
+        // curl sends the frames, as the SDK did.
+        let curl = crate::copy_as::curl(&put, "http://127.0.0.1:4510");
+        assert!(
+            curl.starts_with(
+                "printf '5\\015\\012hello\\015\\0120\\015\\012x-amz-checksum-crc32:NhCmhg=="
+            ) && curl.ends_with("--data-binary @-"),
+            "{curl}"
+        );
+
+        let form = b"Action=Publish&Version=2010-03-31&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Anews&Message=hi";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, form).unwrap();
+        let publish = recorded(
+            &[
+                ("authorization", &scope("sns")),
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("content-encoding", "gzip"),
+            ],
+            "POST",
+            "/",
+            &gz.finish().unwrap(),
+        );
+        assert_eq!(
+            crate::copy_as::aws_cli(&publish).as_deref(),
+            Some(
+                "aws sns publish --message 'hi' --topic-arn 'arn:aws:sns:us-east-1:000000000000:news'"
+            )
+        );
+        assert!(crate::copy_as::boto3(&publish).is_some());
+        assert!(
+            crate::copy_as::curl(&publish, "http://127.0.0.1:4510")
+                .starts_with("printf '\\037\\213")
+        );
+    }
+
+    #[test]
+    fn a_body_that_inflates_far_is_read_only_so_far() {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut json = b"{\"Message\":\"".to_vec();
+        json.resize(MAX_DOCUMENT * 2, b'a');
+        std::io::Write::write_all(&mut gz, &json).unwrap();
+        let call = recorded(
+            &[
+                ("authorization", &scope("sqs")),
+                ("content-type", "application/x-amz-json-1.0"),
+                ("x-amz-target", "AmazonSQS.SendMessage"),
+                ("content-encoding", "gzip"),
+            ],
+            "POST",
+            "/",
+            &gz.finish().unwrap(),
+        );
+        assert!(call.request.body.len() <= MAX_BODY + 4);
+        assert!(!call.request.complete && call.request.body.ends_with('…'));
+        // What it names cannot be read in full: the permission stands as `*`.
+        assert_eq!(call.access[0].resource, "*");
+        assert!(crate::copy_as::aws_cli(&call).is_none());
+    }
+
+    #[test]
+    fn a_port_held_on_ipv6_is_passed_over_for_one_free_on_both() {
+        use std::io::{Error, ErrorKind};
+        let next = std::cell::Cell::new(50_000u16);
+        let v4 = |port: u16| {
+            Ok(if port == 0 {
+                next.set(next.get() + 1);
+                next.get()
+            } else {
+                port
+            })
+        };
+        // Another program holds [::1]:4510 and the first free port.
+        let taken = |port: u16| {
+            if port == 4510 || port == 50_001 {
+                Err(Error::from(ErrorKind::AddrInUse))
+            } else {
+                Ok(port)
+            }
+        };
+        let same = |l: &u16| *l;
+        assert_eq!(
+            bind_pair(4510, false, v4, taken, same),
+            Ok((50_002, Some(50_002)))
+        );
+        // A port the user chose is not changed: said why instead.
+        assert!(
+            bind_pair(4510, true, v4, taken, same)
+                .unwrap_err()
+                .starts_with("[::1]:4510")
+        );
+        // No IPv6 at all: IPv4 alone, on the port asked for.
+        let none = |_: u16| Err::<u16, _>(Error::from(ErrorKind::AddrNotAvailable));
+        assert_eq!(bind_pair(4510, false, v4, none, same), Ok((4510, None)));
+        let unsupported = |_: u16| Err::<u16, _>(Error::from(ErrorKind::Unsupported));
+        assert_eq!(
+            bind_pair(4510, true, v4, unsupported, same),
+            Ok((4510, None))
+        );
+        // Free on both: as asked.
+        assert_eq!(bind_pair(4510, false, v4, Ok, same), Ok((4510, Some(4510))));
     }
 
     #[test]
