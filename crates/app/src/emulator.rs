@@ -199,12 +199,14 @@ fn localize(
         Some(text) if kind.contains("json") => localize_json(text, endpoint, port).map(Bytes::from),
         Some(text) if kind.contains("xml") => localize_xml(text, endpoint, port).map(Bytes::from),
         // Smithy RPCv2 CBOR: the same fields, each string at its new length.
-        _ if document && kind.contains("cbor") => lenslet_core::cbor::map_values(&body, &|key, text| {
-            key.filter(|k| URL_FIELDS.contains(k))
-                .and_then(|_| local_url(text, endpoint, port))
-        })
-        .filter(|out| *out != body)
-        .map(Bytes::from),
+        _ if document && kind.contains("cbor") => {
+            lenslet_core::cbor::map_values(&body, &|key, text| {
+                key.filter(|k| URL_FIELDS.contains(k))
+                    .and_then(|_| local_url(text, endpoint, port))
+            })
+            .filter(|out| *out != body)
+            .map(Bytes::from)
+        }
         _ => None,
     };
     let body = match local {

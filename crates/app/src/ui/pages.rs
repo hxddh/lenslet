@@ -45,6 +45,7 @@ fn welcome_steps(ui: Ui) -> impl IntoElement {
         .child(
             view()
                 .gap(px(6.0))
+                .child(mark(44.0))
                 .child(
                     text(move || ts("Your local AWS account is ready", "你的本地 AWS 账户已就绪"))
                         .text_size(px(22.0))

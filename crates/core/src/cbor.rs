@@ -437,7 +437,7 @@ impl Rewrite<'_, '_> {
                 let map = head.major == 5;
                 // A map's values are under their keys; an array's items under
                 // the array's.
-                let mut pair = |this: &mut Self| -> Option<()> {
+                let pair = |this: &mut Self| -> Option<()> {
                     if map {
                         let name = this.item(depth + 1, None)?;
                         this.item(depth + 1, name.as_deref())?;
@@ -640,8 +640,14 @@ mod tests {
         let mut queues = vec![0xa1, 0x69];
         queues.extend_from_slice(b"QueueUrls");
         queues.extend_from_slice(&[0x82, 0x61, b'a', 0x61, b'b']);
-        let out = map_values(&queues, &|key, t| (key == Some("QueueUrls")).then(|| t.repeat(2))).unwrap();
-        assert_eq!(decode_cbor(&out).unwrap()["QueueUrls"], serde_json::json!(["aa", "bb"]));
+        let out = map_values(&queues, &|key, t| {
+            (key == Some("QueueUrls")).then(|| t.repeat(2))
+        })
+        .unwrap();
+        assert_eq!(
+            decode_cbor(&out).unwrap()["QueueUrls"],
+            serde_json::json!(["aa", "bb"])
+        );
         // Not CBOR, or more than one item.
         assert!(map_text(&[0x62, b'a'], &|_| None).is_none());
         assert!(map_text(&[0x01, 0x02], &|_| None).is_none());

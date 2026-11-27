@@ -456,7 +456,8 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
     );
     // What the function a call invoked printed in that run, read from its
     // log group when the call is selected.
-    let output = signal(None::<crate::functions::Run>);
+    // `None` while it is read; `Some(None)` when nothing of it is logged.
+    let output = signal(None::<Option<crate::functions::Run>>);
     let invokes = move || {
         call.with(|c| {
             c.as_ref()
@@ -473,8 +474,11 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
         ui.spawn(async move {
             let run = fetch.await;
             // Another call may be selected meanwhile.
-            if untracked(|| call.try_get()).flatten().is_some_and(|c| c.0.seq == asked) {
-                output.set(run);
+            if untracked(|| call.try_get())
+                .flatten()
+                .is_some_and(|c| c.0.seq == asked)
+            {
+                output.set(Some(run));
             }
         });
     });
@@ -485,8 +489,12 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
             .child(
                 text(move || {
                     output.with(|o| match o {
-                        Some(run) if !run.lines.is_empty() => run.lines.join("\n"),
-                        _ => ts("Nothing logged yet.", "还没有日志。"),
+                        Some(Some(run)) if !run.lines.is_empty() => run.lines.join("\n"),
+                        Some(_) => ts(
+                            "Nothing logged for this run. A function writes its log only when its role may (logs:CreateLogStream, logs:PutLogEvents).",
+                            "这次运行没有日志。函数的角色有权限（logs:CreateLogStream、logs:PutLogEvents）时才会写日志。",
+                        ),
+                        None => ts("Reading its log…", "正在读取日志…"),
                     })
                 })
                 .font_family(MONO)

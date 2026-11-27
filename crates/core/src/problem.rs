@@ -56,7 +56,12 @@ pub fn function_error(headers: &[HeaderTrace], body: &str) -> Option<Problem> {
         .map(|h| h.value.trim().to_string())
         .filter(|v| !v.is_empty())?;
     let error: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let text = |name: &str| error[name].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    let text = |name: &str| {
+        error[name]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     let mut message = text("errorMessage");
     // The innermost frames, where the code failed.
     let frames: Vec<String> = error["stackTrace"]
@@ -130,9 +135,14 @@ impl Denial {
 /// Which policy denied an access-denied call, from its message; `None` for
 /// another error, or a denial the message does not explain.
 pub fn denial(code: &str, message: &str) -> Option<Denial> {
-    let denied = ["AccessDenied", "AccessDeniedException", "UnauthorizedOperation", "Forbidden"]
-        .iter()
-        .any(|c| code.eq_ignore_ascii_case(c));
+    let denied = [
+        "AccessDenied",
+        "AccessDeniedException",
+        "UnauthorizedOperation",
+        "Forbidden",
+    ]
+    .iter()
+    .any(|c| code.eq_ignore_ascii_case(c));
     if !denied {
         return None;
     }
@@ -348,26 +358,30 @@ pub fn hint(code: &str, status: u16) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn header(name: &str, value: &str) -> HeaderTrace {
-        HeaderTrace {
-            name: name.into(),
-            value: value.into(),
-        }
-    }
-
     #[test]
     fn a_function_that_failed_is_a_failure_though_lambda_answered_200() {
         let body = r#"{"errorMessage":"boom","errorType":"ValueError","stackTrace":["  File \"/var/task/app.py\", line 2, in handler\n    raise ValueError('boom')\n"]}"#;
-        let problem = from_response(200, &[header("X-Amz-Function-Error", "Unhandled")], Some(body))
-            .expect("a failure");
+        let problem = from_response(
+            200,
+            &[header("X-Amz-Function-Error", "Unhandled")],
+            Some(body),
+        )
+        .expect("a failure");
         assert_eq!(problem.code, "ValueError");
         let message = problem.message.unwrap();
-        assert!(message.starts_with("boom\n") && message.contains("app.py\", line 2"), "{message}");
+        assert!(
+            message.starts_with("boom\n") && message.contains("app.py\", line 2"),
+            "{message}"
+        );
         assert!(problem.hint.unwrap().contains("Unhandled"));
         // A function that returned: no failure.
         assert!(from_response(200, &[], Some(r#"{"ok":true}"#)).is_none());
         // Not JSON: the kind is the code.
-        let problem = from_response(200, &[header("x-amz-function-error", "Handled")], Some("oops"));
+        let problem = from_response(
+            200,
+            &[header("x-amz-function-error", "Handled")],
+            Some("oops"),
+        );
         assert_eq!(problem.unwrap().code, "Handled");
     }
 
@@ -375,26 +389,53 @@ mod tests {
     fn tells_which_policy_denied_a_call() {
         let base = "User: arn:aws:sts::000000000000:assumed-role/r/s is not authorized to perform: dynamodb:PutItem on resource: t ";
         for (tail, expected) in [
-            ("because no identity-based policy allows the dynamodb:PutItem action", Denial::NotAllowed),
-            ("with an explicit deny in an identity-based policy: arn:aws:iam::0:policy/p", Denial::Denied),
-            ("because no session policy allows the dynamodb:PutItem action", Denial::Session),
-            ("because no permissions boundary allows the dynamodb:PutItem action", Denial::Boundary),
-            ("with an explicit deny in a resource-based policy", Denial::Resource),
-            ("because no VPC endpoint policy allows the s3:PutObject action", Denial::Resource),
+            (
+                "because no identity-based policy allows the dynamodb:PutItem action",
+                Denial::NotAllowed,
+            ),
+            (
+                "with an explicit deny in an identity-based policy: arn:aws:iam::0:policy/p",
+                Denial::Denied,
+            ),
+            (
+                "because no session policy allows the dynamodb:PutItem action",
+                Denial::Session,
+            ),
+            (
+                "because no permissions boundary allows the dynamodb:PutItem action",
+                Denial::Boundary,
+            ),
+            (
+                "with an explicit deny in a resource-based policy",
+                Denial::Resource,
+            ),
+            (
+                "because no VPC endpoint policy allows the s3:PutObject action",
+                Denial::Resource,
+            ),
         ] {
             let message = format!("{base}{tail}");
-            assert_eq!(denial("AccessDeniedException", &message), Some(expected), "{tail}");
+            assert_eq!(
+                denial("AccessDeniedException", &message),
+                Some(expected),
+                "{tail}"
+            );
             let problem = from_response(
                 400,
                 &[],
-                Some(&format!(r#"{{"__type":"AccessDeniedException","message":"{message}"}}"#)),
+                Some(&format!(
+                    r#"{{"__type":"AccessDeniedException","message":"{message}"}}"#
+                )),
             )
             .unwrap();
             assert_eq!(problem.hint.as_deref(), Some(expected.hint()));
         }
         assert!(Denial::NotAllowed.grantable() && !Denial::Resource.grantable());
         assert_eq!(denial("AccessDenied", "Access Denied"), None);
-        assert_eq!(denial("NoSuchKey", "because no identity-based policy allows"), None);
+        assert_eq!(
+            denial("NoSuchKey", "because no identity-based policy allows"),
+            None
+        );
     }
 
     fn header(name: &str, value: &str) -> HeaderTrace {

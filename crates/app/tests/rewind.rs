@@ -158,12 +158,18 @@ fn rewinding_a_run_puts_the_account_back() {
     let printed = runtime
         .block_on(engine.function_run(&invoked))
         .expect("its run is logged");
-    assert!(printed.ended && printed.lines.iter().any(|l| l.contains("about to fail")), "{printed:?}");
+    assert!(
+        printed.ended && printed.lines.iter().any(|l| l.contains("about to fail")),
+        "{printed:?}"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let notified = crasher(true);
         if notified.as_ref().is_some_and(|c| c.failed()) {
-            assert_eq!(notified.unwrap().failure.unwrap().code, "ValueError");
+            assert_eq!(
+                notified.unwrap().failure.as_ref().unwrap().code,
+                "ValueError"
+            );
             break;
         }
         assert!(

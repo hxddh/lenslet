@@ -827,7 +827,13 @@ impl<'a> Ask<'a> {
         serde_json::from_str(&self.rest(service, method, path).await?).ok()
     }
 
-    pub(crate) async fn json(&self, service: &str, target: &str, version: &str, body: Value) -> Option<Value> {
+    pub(crate) async fn json(
+        &self,
+        service: &str,
+        target: &str,
+        version: &str,
+        body: Value,
+    ) -> Option<Value> {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")

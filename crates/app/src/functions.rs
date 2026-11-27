@@ -42,10 +42,19 @@ pub fn invoked(call: &Call) -> Option<(String, String)> {
 
 /// The run of the invocation `request_id` of `function`, from its log group,
 /// looking from `since_ms` on; `None` while nothing of it is logged.
-pub async fn run(emulator: &Emulator, function: &str, request_id: &str, since_ms: u64) -> Option<Run> {
+pub async fn run(
+    emulator: &Emulator,
+    function: &str,
+    request_id: &str,
+    since_ms: u64,
+) -> Option<Run> {
     let ask = Ask::new(emulator);
     let group = ask
-        .rest_json("lambda", "GET", &format!("/2015-03-31/functions/{function}/configuration"))
+        .rest_json(
+            "lambda",
+            "GET",
+            &format!("/2015-03-31/functions/{function}/configuration"),
+        )
         .await
         .and_then(|c| c["LoggingConfig"]["LogGroup"].as_str().map(str::to_string))
         .filter(|g| !g.is_empty())
@@ -113,11 +122,18 @@ fn printed_failure(event: &str) -> Option<Failure> {
         Some(rest) => rest.trim(),
         None => line.split("\tERROR\t").nth(1)?.trim(),
     };
-    let (code, message) = rest.split_once(':').map_or((rest, ""), |(c, m)| (c.trim(), m.trim()));
-    let code = if code.is_empty() || code.contains(' ') { "Error" } else { code };
+    let (code, message) = rest
+        .split_once(':')
+        .map_or((rest, ""), |(c, m)| (c.trim(), m.trim()));
+    let code = if code.is_empty() || code.contains(' ') {
+        "Error"
+    } else {
+        code
+    };
     Some(Failure {
         code: code.to_string(),
-        message: Some(event.trim_end().to_string()).filter(|_| !message.is_empty() || event.contains('\n')),
+        message: Some(event.trim_end().to_string())
+            .filter(|_| !message.is_empty() || event.contains('\n')),
         hint: Some(FAILED_RUN.into()),
     })
 }
@@ -194,7 +210,9 @@ pub async fn watch(emulator: Emulator, session: Session) {
         let mut still = Vec::new();
         for p in pending {
             // The account it ran in is gone, or it has had its time.
-            if p.generation != generation || now.saturating_sub(p.at_ms) > WATCH_FOR.as_millis() as u64 {
+            if p.generation != generation
+                || now.saturating_sub(p.at_ms) > WATCH_FOR.as_millis() as u64
+            {
                 continue;
             }
             match run(&emulator, &p.function, &p.request_id, p.at_ms).await {
@@ -233,7 +251,10 @@ mod tests {
         ]);
         let run = read(&log, "bbb").expect("logged");
         assert!(run.ended);
-        assert_eq!(run.lines.first().unwrap(), "START RequestId: bbb Version: $LATEST");
+        assert_eq!(
+            run.lines.first().unwrap(),
+            "START RequestId: bbb Version: $LATEST"
+        );
         assert_eq!(run.lines.len(), 5);
         assert_eq!(run.failure.as_ref().unwrap().code, "KeyError");
         let ok = read(&log, "aaa").unwrap();

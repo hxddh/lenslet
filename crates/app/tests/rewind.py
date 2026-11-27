@@ -56,9 +56,14 @@ def one():
     key = kms.create_key(Description="app")["KeyMetadata"]["KeyId"]
     kms.create_alias(AliasName="alias/app", TargetKeyId=key)
     role = iam.create_role(RoleName="fn-role", AssumeRolePolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
-        {"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}))["Role"]["Arn"]
+        {"Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com", "states.amazonaws.com"]},
+         "Action": "sts:AssumeRole"}]}))["Role"]["Arn"]
     iam.put_role_policy(RoleName="fn-role", PolicyName="ddb", PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": [
-        {"Effect": "Allow", "Action": "dynamodb:PutItem", "Resource": "*"}]}))
+        {"Effect": "Allow", "Action": "dynamodb:PutItem", "Resource": "*"},
+        {"Effect": "Allow", "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+         "Resource": "*"},
+        {"Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+         "Resource": "*"}]}))
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("app.py", CODE)
@@ -102,6 +107,8 @@ def made_up(role):
     feed = sqs.create_queue(QueueName="feed")["QueueUrl"]
     feed_arn = sqs.get_queue_attributes(QueueUrl=feed, AttributeNames=["QueueArn"])["Attributes"]["QueueArn"]
     esm = lam.create_event_source_mapping(EventSourceArn=feed_arn, FunctionName="noop", BatchSize=10)["UUID"]
+    while lam.get_event_source_mapping(UUID=esm)["State"] != "Enabled":
+        time.sleep(0.5)
     lam.update_event_source_mapping(UUID=esm, BatchSize=5)
     # An execution named by the emulator, stopped after.
     machine = sfn.create_state_machine(name="waiter", roleArn=role, definition=json.dumps(

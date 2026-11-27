@@ -97,7 +97,6 @@ fn set(progress: &Progress, to: Option<(usize, usize)>) {
     *progress.lock().unwrap_or_else(|e| e.into_inner()) = to;
 }
 
-
 /// The ids the first account made up, and the new account's for them.
 #[derive(Default)]
 struct Issued(Vec<(String, String)>);
@@ -289,7 +288,10 @@ pub fn issued_ids(operation: &str, request: &[u8], response: &[u8]) -> Vec<Strin
         let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
         text.split(open.as_str())
             .skip(1)
-            .filter_map(|rest| rest.split_once(close.as_str()).map(|(id, _)| id.to_string()))
+            .filter_map(|rest| {
+                rest.split_once(close.as_str())
+                    .map(|(id, _)| id.to_string())
+            })
             .collect()
     };
     let json = || serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
@@ -309,7 +311,10 @@ pub fn issued_ids(operation: &str, request: &[u8], response: &[u8]) -> Vec<Strin
         let asked = String::from_utf8_lossy(request);
         // The request's own id is in some answers (the Query protocol's
         // `ResponseMetadata`): never named again.
-        let answer = match (text.find("<ResponseMetadata>"), text.find("</ResponseMetadata>")) {
+        let answer = match (
+            text.find("<ResponseMetadata>"),
+            text.find("</ResponseMetadata>"),
+        ) {
             (Some(a), Some(b)) if a < b => format!("{}{}", &text[..a], &text[b..]),
             _ => text.to_string(),
         };
@@ -382,7 +387,8 @@ async fn send_again(
         if let Some(previous) = previous.replace(sent.at_ms) {
             let gap = std::time::Duration::from_millis(sent.at_ms.saturating_sub(previous));
             let deadline = std::time::Instant::now() + gap.min(MAX_PACE);
-            while !rebuild.settled(QUIET.as_millis() as u64) && std::time::Instant::now() < deadline {
+            while !rebuild.settled(QUIET.as_millis() as u64) && std::time::Instant::now() < deadline
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
@@ -518,7 +524,11 @@ mod tests {
             r#"<R><SubscriptionArn>arn:aws:sns:us-east-1:0:t:{key}</SubscriptionArn><Of>{named}</Of><ResponseMetadata><RequestId>99999999-8888-7777-6666-555555555555</RequestId></ResponseMetadata></R>"#
         );
         assert_eq!(
-            issued_ids("Subscribe", format!("Endpoint={named}").as_bytes(), answer.as_bytes()),
+            issued_ids(
+                "Subscribe",
+                format!("Endpoint={named}").as_bytes(),
+                answer.as_bytes()
+            ),
             vec![key]
         );
         assert!(uuids("x1234abcd-12ab-34cd-56ef-1234567890abz").len() == 1);

@@ -49,8 +49,16 @@ fn failures(calls: &[Arc<Call>], id: u64) -> std::collections::BTreeSet<String> 
                 .failure
                 .as_ref()
                 .map_or_else(|| c.status.to_string(), |f| f.code.clone());
-            let target = c.target.as_deref().map(|t| format!(" {t}")).unwrap_or_default();
-            format!("{} {}{target} · {code}", service_title(&c.service), c.operation)
+            let target = c
+                .target
+                .as_deref()
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default();
+            format!(
+                "{} {}{target} · {code}",
+                service_title(&c.service),
+                c.operation
+            )
         })
         .collect()
 }
@@ -172,14 +180,22 @@ fn compared_line(c: &Compared) -> Option<String> {
         ));
     }
     if !c.new.is_empty() {
-        parts.push(format!("{} {} ({})", c.new.len(), t("new", "个新增"), names(&c.new)));
+        parts.push(format!(
+            "{} {} ({})",
+            c.new.len(),
+            t("new", "个新增"),
+            names(&c.new)
+        ));
     }
     if c.still > 0 {
         parts.push(format!("{} {}", c.still, t("still failing", "个仍失败")));
     }
     Some(format!(
         "{} {}",
-        t("Since the last run of this command:", "与上次运行这条命令相比："),
+        t(
+            "Since the last run of this command:",
+            "与上次运行这条命令相比："
+        ),
         parts.join(t(", ", "，"))
     ))
 }
@@ -319,10 +335,17 @@ pub fn summary(ui: Ui) -> impl IntoElement {
     let since = when(
         move || summary.with(|s| s.compared.as_ref().and_then(compared_line).is_some()),
         move || {
-            text(move || summary.with(|s| s.compared.as_ref().and_then(compared_line).unwrap_or_default()))
-                .text_size(body())
-                .text_color(secondary_text())
-                .selectable(true)
+            text(move || {
+                summary.with(|s| {
+                    s.compared
+                        .as_ref()
+                        .and_then(compared_line)
+                        .unwrap_or_default()
+                })
+            })
+            .text_size(body())
+            .text_color(secondary_text())
+            .selectable(true)
         },
     );
     let failure = when(
@@ -529,9 +552,16 @@ mod tests {
     #[test]
     fn says_whether_the_fix_worked_since_the_command_last_ran() {
         let runs = vec![run(1, "pytest"), run(2, "ls"), run(3, "pytest")];
-        let calls = vec![failed(1, "AccessDeniedException"), failed(1, "ValueError"), failed(3, "ValueError")];
+        let calls = vec![
+            failed(1, "AccessDeniedException"),
+            failed(1, "ValueError"),
+            failed(3, "ValueError"),
+        ];
         let c = compared(&calls, &runs, &runs[2]).expect("an earlier run of pytest");
-        assert_eq!(c.fixed, vec!["Lambda Invoke fn/resize · AccessDeniedException".to_string()]);
+        assert_eq!(
+            c.fixed,
+            vec!["Lambda Invoke fn/resize · AccessDeniedException".to_string()]
+        );
         assert!(c.new.is_empty());
         assert_eq!(c.still, 1);
         // No earlier run of `ls`; the first `pytest` has none before it.

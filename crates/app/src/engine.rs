@@ -4,9 +4,9 @@
 
 use crate::{
     emulator::Emulator,
+    replay::{Replayed, rebuild},
     resources::{self, Contents, Refresher},
     server,
-    replay::{Replayed, rebuild},
     session::{Resource, Session, Snapshot},
 };
 
@@ -32,7 +32,6 @@ pub struct Engine {
     /// How far the account being rebuilt is.
     progress: crate::replay::Progress,
 }
-
 
 impl Engine {
     /// Start the emulator and the endpoint on `port`; on the default port,
