@@ -16,14 +16,18 @@ inside AWS:
 - **What AWS did because of it.** The calls are a tree. Under the upload sits
   the function its notification invoked, and under the function its own calls
   to DynamoDB, and why one was denied. Deliveries, triggers and your
-  functions' code are all there. On AWS this takes CloudTrail, X-Ray and
-  CloudWatch together.
+  functions' code are all there: a function that failed is a failed call,
+  with its error and what it printed, whether you invoked it or a
+  notification did. On AWS this takes CloudTrail, X-Ray and CloudWatch
+  together.
 - **Your code or the emulator?** When a call fails, Lenslet says whether
   AWS Emulator is known to differ from AWS there, from the emulator's own
   list of what it does not do yet, with a link to the issue.
 - **Fix it, then go back and run it again.** A function denied by its role?
-  One click allows the role what it needed. Rewind puts the account back as
-  it was before any run. Run Again repeats the command.
+  One click allows the role what it needed (and when a Deny, a boundary or
+  the resource's own policy is in the way, Lenslet says which). Rewind puts
+  the account back as it was before any run, in seconds. Run Again repeats
+  the command, and the run says what changed since it last ran.
 - **Keep the account.** Save the account to a file and open it again later,
   or on a teammate's machine: Lenslet builds it again from the calls that
   made it.
@@ -120,6 +124,9 @@ The observer patch lets Lenslet see the calls AWS makes inside the emulator
 function's memory is not measured, so its memory size is not enforced; its
 timeout is.
 
+Format Lenslet's own crates with `cargo fmt -p lenslet -p lenslet-core`:
+`cargo fmt --all` reaches the emulator's crates too, and rewrites them.
+
 The tests that drive a whole app with boto3 (`chain`, `rewind`) need a
 Python with boto3:
 
@@ -139,9 +146,12 @@ way, `crates/core` reads it: which service and operation it is, which IAM
 permissions it needs on which resources, and why it failed. The observer
 patch reports the calls AWS makes inside the emulator too; Lenslet hangs each
 under its cause, on the same task, or through the X-Ray tracing header AWS
-carries onto everything a call causes. Rewind sends the calls that changed
-the account again, in order, to a new engine; a saved account is those
-calls in a file, and opening it sends them the same way. The build indexes
+carries onto everything a call causes. A function's run is read from its
+log group by the invocation's request id. Rewind sends the calls that
+changed the account again, in order, to a new engine of its own, each once
+what the one before set off is over, with the ids the emulator made up the
+first time swapped for the new ones; a saved account is those calls in a
+file, and opening it sends them the same way. The build indexes
 AWS Emulator's `issues/things-that-do-not-work/` by service and operation
 for the known differences a failed call shows. After a call
 that changes something, Lenslet asks the emulator for its resources with the

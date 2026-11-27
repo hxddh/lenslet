@@ -414,10 +414,17 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
         call.with(|c| {
             let c = c.as_ref()?;
             let f = c.0.failure.as_ref()?;
-            if !f.code.contains("AccessDenied") || c.0.access.is_empty() {
+            if c.0.access.is_empty() {
                 return None;
             }
-            crate::resources::denied_role(f.message.as_deref()?)
+            let message = f.message.as_deref()?;
+            // Only where allowing the role more lets the call through: not a
+            // Deny, a boundary, or a resource's own policy.
+            let denial = lenslet_core::problem::denial(&f.code, message);
+            if !denial.is_none_or(|d| d.grantable()) || !f.code.contains("AccessDenied") {
+                return None;
+            }
+            crate::resources::denied_role(message)
         })
     };
     let grant = when(
@@ -447,11 +454,55 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
             ))
         },
     );
+    // What the function a call invoked printed in that run, read from its
+    // log group when the call is selected.
+    let output = signal(None::<crate::functions::Run>);
+    let invokes = move || {
+        call.with(|c| {
+            c.as_ref()
+                .is_some_and(|c| crate::functions::invoked(&c.0).is_some())
+        })
+    };
+    effect(move || {
+        let held = call.get();
+        output.set(None);
+        let Some(held) = held.filter(|c| crate::functions::invoked(&c.0).is_some()) else {
+            return;
+        };
+        let (asked, fetch) = (held.0.seq, super::engine().function_run(&held.0));
+        ui.spawn(async move {
+            let run = fetch.await;
+            // Another call may be selected meanwhile.
+            if untracked(|| call.try_get()).flatten().is_some_and(|c| c.0.seq == asked) {
+                output.set(run);
+            }
+        });
+    });
+    let printed = when(invokes, move || {
+        view()
+            .gap(px(6.0))
+            .child(section(|| ts("What the function printed", "函数的输出")))
+            .child(
+                text(move || {
+                    output.with(|o| match o {
+                        Some(run) if !run.lines.is_empty() => run.lines.join("\n"),
+                        _ => ts("Nothing logged yet.", "还没有日志。"),
+                    })
+                })
+                .font_family(MONO)
+                .text_size(px(11.5))
+                .selectable(true)
+                .p(px(8.0))
+                .rounded(px(6.0))
+                .bg(fill_bg()),
+            )
+    });
     view()
         .gap(px(16.0))
         .pt(px(12.0))
         .child(failure)
         .child(grant)
+        .child(printed)
         .child(origin)
         .child(facts)
         .child(replay)

@@ -50,6 +50,13 @@ fn rewinding_a_run_puts_the_account_back() {
         .unwrap();
     let replayed = runtime.block_on(engine.rewind(run_two)).expect("rewind");
     println!("replayed {replayed:?} in {:?}", started.elapsed());
+    // Rebuilt at the pace of what the calls set off, not the session's.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "a rewind of {} calls took {:?}",
+        replayed.sent,
+        started.elapsed()
+    );
     assert_eq!(replayed.failed, 0, "every call sent again succeeded");
     // Run two is undone now: it cannot be rewound to again.
     assert!(
@@ -124,6 +131,47 @@ fn rewinding_a_run_puts_the_account_back() {
     mark(Mark::Start("deny".into()));
     assert_eq!(py(&engine, "deny"), "ok", "Run Again passes");
     mark(Mark::End(0));
+
+    // A function that fails: invoked, the call is a failure with the
+    // function's error, and what it printed is read from its log; invoked by
+    // a bucket's notification, its run is watched and the invoking call
+    // marked failed once it is over.
+    mark(Mark::Start("crash".into()));
+    assert_eq!(py(&engine, "crash"), "Unhandled");
+    mark(Mark::End(0));
+    let crasher = |internal: bool| {
+        engine
+            .snapshot()
+            .calls
+            .iter()
+            .rev()
+            .find(|c| {
+                c.internal == internal
+                    && c.operation == "Invoke"
+                    && c.target.as_deref() == Some("fn/crasher")
+            })
+            .cloned()
+    };
+    let invoked = crasher(false).expect("the invocation");
+    assert!(invoked.failed(), "{invoked:?}");
+    assert_eq!(invoked.failure.as_ref().unwrap().code, "ValueError");
+    let printed = runtime
+        .block_on(engine.function_run(&invoked))
+        .expect("its run is logged");
+    assert!(printed.ended && printed.lines.iter().any(|l| l.contains("about to fail")), "{printed:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let notified = crasher(true);
+        if notified.as_ref().is_some_and(|c| c.failed()) {
+            assert_eq!(notified.unwrap().failure.unwrap().code, "ValueError");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the notification's run was never marked failed: {notified:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 
     // Saved and opened again: the same account, the grants with it.
     let saved = py(&engine, "dump");
