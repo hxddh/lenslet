@@ -1,58 +1,62 @@
-# Lenslet 17.1.1
+# Lenslet 18.0.0
 
-Fixes where 17.1.0's parts meet: ids followed through every encoding,
-copying a call that was framed or compressed, and the account in use while
-another is rebuilt.
+The same loop (run your code, see what happened, fix it, go back, run it
+again), with no step left to guess: every failure has its reason, every
+rebuild is exact, and the loop does not keep you waiting. And a new mark.
 
-## Rewind and Open Account
-- **New ids are written as the call's encoding writes them.** A receipt
-  handle, upload id or key id is swapped in a CBOR body (with its new
-  length), in a Query form (`%2B`, `%2F`, `%3D` and all), in the address,
-  and in a gzip'd or `aws-chunked` body, which is then sent plain, with
-  its headers to match. An S3 body is an object's data and is never
-  changed.
-- **The account in use is recorded while another is rebuilt.** Each call
-  is told by the engine that made it, so a queue's poller invoking a
-  function in the account in use stays in the list, and never holds up
-  the rebuild.
-- Each grant is sent once its role exists, not once at its place and
-  again with the role, and is not counted among the calls sent again.
+## Every failure has its reason
+- **A function that failed is a failed call.** Lambda answers a crashed
+  function 200 and says so in a header; Lenslet counted it a success. Now
+  the call fails with the function's own error (`ValueError: boom`) and
+  where it was raised, and a run's first failure is that function.
+- **The same for a function a notification invoked.** Its call was
+  answered before it ran; Lenslet now follows the run to its end and marks
+  the call failed when the run was.
+- **What the function printed, with the call.** The inspector shows an
+  invocation's log, read by its request id; when there is none, it says
+  why (the function's role may not write logs).
+- **Which policy denied a call.** Lenslet tells a role that no policy
+  allows from a Deny, a session policy, a permissions boundary and the
+  resource's own policy, and offers Allow for role only where it lets the
+  call through.
 
-## Allow for role
-- Allowing a role again keeps one grant for its policy, the latest, not
-  every one before it.
-- A policy Lenslet added and your code then deleted stays deleted when
-  the role is created again.
-- A `CreateRole` sent gzip'd gets the role's grants too.
+## Every rebuild is exact
+- **Ids the emulator makes up are all followed.** Beyond multipart
+  uploads and receipt handles, any id an answer made up (a KMS key's, an
+  SNS subscription's, an event source mapping's, a Step Functions
+  execution's) is swapped for the new account's in the calls that name it.
+  The known limit is gone; each kind is tested end to end.
+- **Another account's background work stays out.** Each call is told by
+  the engine that made it: what a replaced account still does is no
+  account's, and several engines in one process each keep their own.
 
-## Copy as
-- **A framed or compressed call copies as AWS CLI and boto3.** An SDK's
-  streaming `PutObject` (`aws-chunked`) and a gzip'd Query or Lambda call
-  copy from what they say; curl still sends their bytes.
+## The loop does not keep you waiting
+- **Rewind in seconds.** The account is rebuilt at the pace of what the
+  calls set off (a delivery, a function's run), not the time you took
+  between commands, and the window says how far it is.
+- **Run Again says whether the fix worked.** A run's summary compares it
+  with the last run of the same command: what is fixed, what is new, what
+  still fails.
 
-## The endpoint
-- **A port another program holds on `[::1]` is passed over.** If
-  `127.0.0.1:4510` is free but `[::1]:4510` is not, Lenslet takes a port
-  free on both, so `localhost` never reaches the other program. On a
-  machine without IPv6 it serves `127.0.0.1` alone. A port set with
-  `LENSLET_PORT` is not changed: Lenslet says it is taken.
-- A body that inflates past 4 MB is read only that far, and said to be
-  cut short.
-- A call's permissions are worked out once, not once more for a policy
-  evaluation the window does not make.
+## Smaller
+- Queue URLs and other addresses in Smithy RPCv2 CBOR answers name Lenslet,
+  as they do in JSON and XML.
 
-## The window
-- A deleted resource's page says so ("This resource no longer exists.")
-  instead of "Loading…", and an empty one says it is empty.
+## A new mark
+- A call and the call it caused, an L seen through a lens: the app icon,
+  and the window. Linux gets a 512 × 512 icon and a scalable one.
 
-## The terminal
-- **bash:** clearing `HISTCONTROL` after starting with `ignoreboth` now
-  puts lines typed with a space first back into history. While Lenslet
-  applies the rules, `HISTCONTROL` holds the word `lenslet`, which bash
-  passes over.
+## Under the hood
+- **AWS Emulator** is at its latest; the macOS patch now sits in its shared
+  Python substrate.
+- **Native Shell 0.7.2** redraws only what changed, and pans on the GPU:
+  long call lists and the terminal draw less.
+- base64 0.23 (one copy in the build, not two), hyper 1.13.
+- CI on the current GitHub Actions (Node 24), Python 3.13; artifacts are
+  checked against their digests before a release is published.
+- Replaying moved to its own module; `cargo fmt -p lenslet -p lenslet-core`
+  is how to format (README), as `--all` reaches the emulator.
 
 ## Known limits
-- **Other ids made up by the emulator.** Rewinding or opening an account
-  follows multipart upload ids, KMS key ids and SQS receipt handles;
-  calls that name others it makes anew (a Lambda event source mapping's,
-  for one) can fail, and Lenslet reports them as failed.
+- On macOS a function's memory is not measured, so its memory size is not
+  enforced; its timeout is.
