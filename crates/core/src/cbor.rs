@@ -300,6 +300,16 @@ fn f16_to_f64(bits: u16) -> f64 {
 /// the length its new text has. `None` when `input` is not one well-formed
 /// CBOR item.
 pub fn map_text(input: &[u8], change: &dyn Fn(&str) -> Option<String>) -> Option<Vec<u8>> {
+    map_values(input, &|_, text| change(text))
+}
+
+/// [`map_text`], `change` told also the map key each text string is the
+/// value of (inside an array, the array's): `QueueUrl` for a queue's URL.
+/// A key is itself asked with no key.
+pub fn map_values(
+    input: &[u8],
+    change: &dyn Fn(Option<&str>, &str) -> Option<String>,
+) -> Option<Vec<u8>> {
     let mut rewrite = Rewrite {
         input,
         pos: 0,
@@ -307,7 +317,7 @@ pub fn map_text(input: &[u8], change: &dyn Fn(&str) -> Option<String>) -> Option
         items: 0,
         change,
     };
-    rewrite.item(0)?;
+    rewrite.item(0, None)?;
     (rewrite.pos == input.len()).then_some(rewrite.out)
 }
 
@@ -316,7 +326,7 @@ struct Rewrite<'a, 'f> {
     pos: usize,
     out: Vec<u8>,
     items: usize,
-    change: &'f dyn Fn(&str) -> Option<String>,
+    change: &'f dyn Fn(Option<&str>, &str) -> Option<String>,
 }
 
 /// An item's head: its major type, and its argument (`None` for an
@@ -376,13 +386,15 @@ impl Rewrite<'_, '_> {
         self.input.get(self.pos) == Some(&0xff)
     }
 
-    fn item(&mut self, depth: usize) -> Option<()> {
+    /// One item, under the map key `key`: its text, if it is a text string.
+    fn item(&mut self, depth: usize, key: Option<&str>) -> Option<Option<String>> {
         self.items = self.items.checked_add(1)?;
         if depth > MAX_DEPTH || self.items > MAX_ITEMS {
             return None;
         }
         let start = self.pos;
         let head = self.head()?;
+        let mut text = None;
         match (head.major, head.argument) {
             (0 | 1 | 7, Some(_)) => self.copy(start),
             (2, Some(len)) => {
@@ -390,22 +402,24 @@ impl Rewrite<'_, '_> {
                 self.copy(start);
             }
             (3, Some(len)) => {
-                let text = std::str::from_utf8(self.take(len)?).ok()?.to_string();
-                self.text(start, &text);
+                let read = std::str::from_utf8(self.take(len)?).ok()?.to_string();
+                self.text(start, key, &read);
+                text = Some(read);
             }
             // A text string in chunks is one string: changed whole, or kept
             // chunk for chunk.
             (3, None) => {
-                let mut text = String::new();
+                let mut read = String::new();
                 while !self.at_break() {
                     let chunk = self.head()?;
                     let (3, Some(len)) = (chunk.major, chunk.argument) else {
                         return None;
                     };
-                    text.push_str(std::str::from_utf8(self.take(len)?).ok()?);
+                    read.push_str(std::str::from_utf8(self.take(len)?).ok()?);
                 }
                 self.pos += 1;
-                self.text(start, &text);
+                self.text(start, key, &read);
+                text = Some(read);
             }
             (2, None) => {
                 while !self.at_break() {
@@ -420,18 +434,27 @@ impl Rewrite<'_, '_> {
             }
             (4 | 5, count) => {
                 self.copy(start);
-                let per = if head.major == 5 { 2 } else { 1 };
+                let map = head.major == 5;
+                // A map's values are under their keys; an array's items under
+                // the array's.
+                let pair = |this: &mut Self| -> Option<()> {
+                    if map {
+                        let name = this.item(depth + 1, None)?;
+                        this.item(depth + 1, name.as_deref())?;
+                    } else {
+                        this.item(depth + 1, key)?;
+                    }
+                    Some(())
+                };
                 match count {
                     Some(n) => {
-                        for _ in 0..n.checked_mul(per)? {
-                            self.item(depth + 1)?;
+                        for _ in 0..n {
+                            pair(self)?;
                         }
                     }
                     None => {
                         while !self.at_break() {
-                            for _ in 0..per {
-                                self.item(depth + 1)?;
-                            }
+                            pair(self)?;
                         }
                         self.pos += 1;
                         self.out.push(0xff);
@@ -440,16 +463,16 @@ impl Rewrite<'_, '_> {
             }
             (6, Some(_)) => {
                 self.copy(start);
-                self.item(depth + 1)?;
+                self.item(depth + 1, key)?;
             }
             _ => return None,
         }
-        Some(())
+        Some(text)
     }
 
     /// The text string read since `start`, changed or as it was.
-    fn text(&mut self, start: usize, text: &str) {
-        match (self.change)(text) {
+    fn text(&mut self, start: usize, key: Option<&str>, text: &str) {
+        match (self.change)(key, text) {
             Some(new) => {
                 head(&mut self.out, 3, new.len() as u64);
                 self.out.extend_from_slice(new.as_bytes());
@@ -613,6 +636,18 @@ mod tests {
         ];
         let out = map_text(&chunked, &|t| (t == "old").then(|| "new".into())).unwrap();
         assert_eq!(decode_cbor(&out).unwrap()["k"], "new");
+        // Told the key a value is under, inside arrays too.
+        let mut queues = vec![0xa1, 0x69];
+        queues.extend_from_slice(b"QueueUrls");
+        queues.extend_from_slice(&[0x82, 0x61, b'a', 0x61, b'b']);
+        let out = map_values(&queues, &|key, t| {
+            (key == Some("QueueUrls")).then(|| t.repeat(2))
+        })
+        .unwrap();
+        assert_eq!(
+            decode_cbor(&out).unwrap()["QueueUrls"],
+            serde_json::json!(["aa", "bb"])
+        );
         // Not CBOR, or more than one item.
         assert!(map_text(&[0x62, b'a'], &|_| None).is_none());
         assert!(map_text(&[0x01, 0x02], &|_| None).is_none());

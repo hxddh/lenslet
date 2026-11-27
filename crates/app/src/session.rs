@@ -13,7 +13,7 @@ use std::{
 use lenslet_core::access::Access;
 
 /// One AWS call, as the window shows it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Call {
     pub seq: usize,
     /// The call's id while it runs: the calls it causes name it as `parent`.
@@ -59,8 +59,10 @@ pub struct Call {
 }
 
 impl Call {
+    /// It failed: an error answer, or a function whose own code failed
+    /// (Lambda answers that 200, and says so).
     pub fn failed(&self) -> bool {
-        self.status >= 400
+        self.status >= 400 || self.failure.is_some()
     }
 
     /// A retry of an earlier attempt of the same SDK call.
@@ -798,6 +800,27 @@ impl Session {
 
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot_since(None).unwrap_or_default()
+    }
+
+    /// The calls recorded from the sequence number `seq` on, in order.
+    pub fn calls_from(&self, seq: usize) -> Vec<Arc<Call>> {
+        let inner = self.lock();
+        let at = inner.calls.partition_point(|c| c.seq < seq);
+        inner.calls[at..].to_vec()
+    }
+
+    /// The call `seq` failed after it was answered (an invoked function's
+    /// run): it is a failed call from now on.
+    pub fn fail(&self, seq: usize, failure: Failure) {
+        let mut inner = self.lock();
+        let Ok(at) = inner.calls.binary_search_by_key(&seq, |c| c.seq) else {
+            return;
+        };
+        let mut call = (*inner.calls[at]).clone();
+        call.failure = Some(failure);
+        inner.calls[at] = Arc::new(call);
+        inner.stats = Arc::new(Stats::of(&inner.calls));
+        inner.version += 1;
     }
 
     /// One call by its sequence number.

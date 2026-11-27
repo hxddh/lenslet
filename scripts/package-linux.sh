@@ -5,9 +5,11 @@ version="$1"; dist="$2"
 arch="$(uname -m)"
 name="lenslet-${version}-linux-${arch}"
 stage="$(mktemp -d)/${name}"
-mkdir -p "$stage/share/applications" "$stage/share/icons/hicolor/512x512/apps" "$dist"
+mkdir -p "$stage/share/applications" "$stage/share/icons/hicolor/512x512/apps" \
+  "$stage/share/icons/hicolor/scalable/apps" "$dist"
 install -Dm755 target/release/lenslet "$stage/bin/lenslet"
-cp assets/app-icon.png "$stage/share/icons/hicolor/512x512/apps/dev.lenslet.Lenslet.png"
+cp assets/app-icon-512.png "$stage/share/icons/hicolor/512x512/apps/dev.lenslet.Lenslet.png"
+cp assets/app-icon.svg "$stage/share/icons/hicolor/scalable/apps/dev.lenslet.Lenslet.svg"
 cat > "$stage/share/applications/dev.lenslet.Lenslet.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application

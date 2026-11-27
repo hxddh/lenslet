@@ -130,10 +130,36 @@ pub fn icon_colored(name: Icon, size: f32, color: AdaptiveColor) -> impl IntoEle
 }
 
 fn svg_uri(paths: &str, stroke: &str) -> String {
-    let doc = format!(
+    data_uri(&format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{stroke}' \
          stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>{paths}</svg>"
-    );
+    ))
+}
+
+/// Lenslet's mark, as the app icon draws it without its tile: a call (the
+/// white node) and the call it caused (the cyan one), seen through a lens.
+/// The L takes the label color, so it reads on light and dark.
+pub fn mark(size: f32) -> impl IntoElement {
+    svg(move || {
+        let ink = if dark() { "#ffffff" } else { "#1d1d1f" };
+        data_uri(&format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='220 220 584 584'>\
+             <defs><linearGradient id='lens' x1='0.15' y1='0.1' x2='0.85' y2='0.9'>\
+             <stop offset='0' stop-color='#8B8CFB'/><stop offset='1' stop-color='#22D3EE'/>\
+             </linearGradient></defs>\
+             <circle cx='512' cy='512' r='248' fill='none' stroke='url(#lens)' stroke-width='60'/>\
+             <path d='M381 302 V616 H737' fill='none' stroke='{ink}' stroke-width='56' \
+             stroke-linecap='round' stroke-linejoin='round'/>\
+             <circle cx='381' cy='302' r='62' fill='{ink}'/>\
+             <circle cx='737' cy='616' r='62' fill='#22D3EE'/></svg>"
+        ))
+    })
+    .w(px(size))
+    .h(px(size))
+}
+
+/// `doc` as a `data:` URI an `svg` element shows.
+fn data_uri(doc: &str) -> String {
     let mut uri = String::from("data:image/svg+xml,");
     for b in doc.bytes() {
         match b {

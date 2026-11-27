@@ -90,9 +90,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .child(when(
             move || os() != nsh_core::platform::Os::MacOs,
             move || {
-                text("Lenslet")
-                    .font_weight(FontWeight::SEMIBOLD)
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
                     .pl(px(6.0))
+                    .child(mark(16.0))
+                    .child(text("Lenslet").font_weight(FontWeight::SEMIBOLD))
             },
         ))
         .child(view().flex_1())

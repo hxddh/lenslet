@@ -1,17 +1,15 @@
-diff --git a/services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/run_memory.rs b/services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/run_memory.rs
-index 9b6d42bde..14fac343a 100644
---- a/services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/run_memory.rs
-+++ b/services/service-com-amazonaws-lambda-awsgirapiservice/src/state/execution/run_memory.rs
-@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
- const PAGE_BYTES: u64 = 4_096;
- 
- /// How many bytes of memory THIS thread has faulted in, as the host reports it.
+diff --git a/services/python-guest-substrate/src/lib.rs b/services/python-guest-substrate/src/lib.rs
+index 466f1f104..134ce0d0c 100644
+--- a/services/python-guest-substrate/src/lib.rs
++++ b/services/python-guest-substrate/src/lib.rs
+@@ -282,11 +282,23 @@ const PAGE_BYTES: u64 = 4_096;
+ /// The interpreter exposes no allocation seam, so the memory a run holds is sampled from
+ /// outside it, on the thread the run happens on. The count never falls, so the reading is an
+ /// UPPER bound on what the run holds — the side to err on for a figure a bound is judged on.
 +#[cfg(target_os = "linux")]
- pub(super) fn faulted_bytes() -> u64 {
-     match ::nix::sys::resource::getrusage(::nix::sys::resource::UsageWho::RUSAGE_THREAD) {
-         Ok(usage) => {
-@@ -37,6 +38,16 @@ pub(super) fn faulted_bytes() -> u64 {
-     }
+ #[must_use]
+ pub fn faulted_bytes() -> u64 {
+     page_bytes(::nix::sys::resource::UsageWho::RUSAGE_THREAD)
  }
  
 +/// Hosts other than Linux report no memory per thread, and a figure for the whole process
@@ -20,10 +18,11 @@ index 9b6d42bde..14fac343a 100644
 +/// `MemorySize` is not enforced and its "Max Memory Used" reads 0, while its `Timeout`
 +/// still bounds it, as on Linux.
 +#[cfg(not(target_os = "linux"))]
-+pub(super) fn faulted_bytes() -> u64 {
++#[must_use]
++pub fn faulted_bytes() -> u64 {
 +    0
 +}
 +
- /// What ONE run holds of the host: the baseline the host took for it, and the greatest
- /// reading taken since.
+ /// How many bytes of memory THIS PROCESS has faulted in, as the host reports it.
  ///
+ /// It is what a watch outside the run reads a growing run against: the faulted pages of a

@@ -206,7 +206,7 @@ async fn handle(
         started.elapsed().as_millis() as u64,
     );
     call.id = id;
-    let issued = crate::engine::issued_ids(&call.operation, &rbody);
+    let issued = crate::replay::issued_ids(&call.operation, &body, &rbody);
     // A receive that took messages changed the queue, and the handles it got
     // are what the deletes after it name.
     let received = call.operation == "ReceiveMessage" && !issued.is_empty();

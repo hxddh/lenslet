@@ -658,6 +658,13 @@ fn workbench() -> AnyElement {
             if taken.get().elapsed() < pace {
                 return;
             }
+            // An account being rebuilt says how far it is.
+            if let Some((done, total)) = engine().rebuild_progress() {
+                ui.toast.set(Some(format!(
+                    "{} {done} / {total}",
+                    t("Rebuilding the account:", "正在重建账户：")
+                )));
+            }
             if let Some(next) = engine().snapshot_since(version.get()) {
                 version.set(Some(next.version));
                 taken.set(std::time::Instant::now());

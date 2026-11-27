@@ -196,14 +196,23 @@ fn localize(
     let document = !invocation && !parts.headers.contains_key(http::header::ETAG);
     let text = std::str::from_utf8(&body).ok().filter(|_| document);
     let local = match text {
-        Some(text) if kind.contains("json") => localize_json(text, endpoint, port),
-        Some(text) if kind.contains("xml") => localize_xml(text, endpoint, port),
+        Some(text) if kind.contains("json") => localize_json(text, endpoint, port).map(Bytes::from),
+        Some(text) if kind.contains("xml") => localize_xml(text, endpoint, port).map(Bytes::from),
+        // Smithy RPCv2 CBOR: the same fields, each string at its new length.
+        _ if document && kind.contains("cbor") => {
+            lenslet_core::cbor::map_values(&body, &|key, text| {
+                key.filter(|k| URL_FIELDS.contains(k))
+                    .and_then(|_| local_url(text, endpoint, port))
+            })
+            .filter(|out| *out != body)
+            .map(Bytes::from)
+        }
         _ => None,
     };
     let body = match local {
-        Some(text) => {
+        Some(local) => {
             parts.headers.remove(http::header::CONTENT_LENGTH);
-            Bytes::from(text)
+            local
         }
         None => body,
     };
@@ -359,6 +368,24 @@ mod tests {
         assert_eq!(
             r.body(),
             "<R><QueueUrls>http://127.0.0.1:4510/0/q</QueueUrls><QueueUrl>http://localhost:4510/0/q</QueueUrl><Body>https://localhost:4510/0/q</Body></R>"
+        );
+        // CBOR: the URL rewritten in place, at its new length.
+        let url = "https://localhost:4510/000000000000/jobs";
+        let mut cbor = vec![0xa1, 0x68];
+        cbor.extend_from_slice(b"QueueUrl");
+        cbor.extend_from_slice(&[0x78, url.len() as u8]);
+        cbor.extend_from_slice(url.as_bytes());
+        let r = localize(
+            http::Response::builder()
+                .header("content-type", "application/cbor")
+                .body(Bytes::from(cbor))
+                .unwrap(),
+            endpoint,
+            false,
+        );
+        assert_eq!(
+            lenslet_core::cbor::decode_cbor(r.body()).unwrap()["QueueUrl"],
+            "http://localhost:4510/000000000000/jobs"
         );
         // What your code stored or a function answered is left as it is.
         for (kind, body, invocation) in [

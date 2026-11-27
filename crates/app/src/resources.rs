@@ -767,7 +767,7 @@ pub async fn object_text(emulator: &Emulator, bucket: &str, key: &str) -> Option
     Some(pretty_text(&body))
 }
 
-struct Ask<'a> {
+pub(crate) struct Ask<'a> {
     emulator: &'a Emulator,
 }
 
@@ -778,7 +778,12 @@ fn query_request() -> http::request::Builder {
         .header("content-type", "application/x-www-form-urlencoded")
 }
 
-impl Ask<'_> {
+impl<'a> Ask<'a> {
+    /// Ask `emulator`, in-process (never a call of the session's).
+    pub(crate) fn new(emulator: &'a Emulator) -> Self {
+        Ask { emulator }
+    }
+
     fn request(
         service: &str,
         request: http::request::Builder,
@@ -818,11 +823,17 @@ impl Ask<'_> {
         .await
     }
 
-    async fn rest_json(&self, service: &str, method: &str, path: &str) -> Option<Value> {
+    pub(crate) async fn rest_json(&self, service: &str, method: &str, path: &str) -> Option<Value> {
         serde_json::from_str(&self.rest(service, method, path).await?).ok()
     }
 
-    async fn json(&self, service: &str, target: &str, version: &str, body: Value) -> Option<Value> {
+    pub(crate) async fn json(
+        &self,
+        service: &str,
+        target: &str,
+        version: &str,
+        body: Value,
+    ) -> Option<Value> {
         let request = http::Request::builder()
             .method("POST")
             .uri("/")

@@ -67,19 +67,18 @@ impl Rebuild {
         *offline() = Offline {
             router: Some(router),
             open: 0,
-            last_ms: now_ms(),
+            last_ms: 0,
         };
         Rebuild(())
     }
 
     /// An id for a call sent to the engine being built.
     pub fn call(&self) -> u64 {
-        offline().last_ms = now_ms();
         next_id()
     }
 
-    /// The engine being built has nothing in progress, and has done nothing
-    /// for `quiet_ms`.
+    /// The engine being built has nothing of its own in progress (a delivery,
+    /// a function's run), and has done nothing for `quiet_ms`.
     pub fn settled(&self, quiet_ms: u64) -> bool {
         let offline = offline();
         offline.open == 0 && now_ms().saturating_sub(offline.last_ms) >= quiet_ms
@@ -112,13 +111,23 @@ struct Open {
     parent: Option<u64>,
     started: Instant,
     at_ms: u64,
+    /// The account it is recorded in: the engine's that made it; none for
+    /// the engine being rebuilt, or one no longer serving.
+    engine: Option<Recorder>,
     /// Made by the engine being rebuilt.
     offline: bool,
 }
 
-struct Observer {
+/// Where an engine's calls are recorded.
+#[derive(Clone)]
+struct Recorder {
     session: Session,
     refresher: Refresher,
+}
+
+struct Observer {
+    /// The engines serving, by their router's identity.
+    engines: Mutex<HashMap<u64, Recorder>>,
     open: Mutex<HashMap<u64, Open>>,
     chains: Mutex<Chains>,
 }
@@ -207,8 +216,14 @@ impl CallObserver for Observer {
             }
             inside
         };
-        if let Some(parent) = parent.filter(|_| !offline) {
-            self.session.link(id, parent);
+        let engine = self
+            .engines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&router)
+            .cloned();
+        if let (Some(engine), Some(parent)) = (&engine, parent) {
+            engine.session.link(id, parent);
         }
         self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(
             id,
@@ -216,6 +231,7 @@ impl CallObserver for Observer {
                 parent,
                 started: Instant::now(),
                 at_ms: now_ms(),
+                engine,
                 offline,
             },
         );
@@ -236,6 +252,9 @@ impl CallObserver for Observer {
         }
         self.forget(token, call.uri.path().ends_with("/invocations"));
         let Some(open) = self.close(token) else {
+            return;
+        };
+        let Some(engine) = open.engine.clone() else {
             return;
         };
         let body = Bytes::copy_from_slice(call.body);
@@ -265,9 +284,9 @@ impl CallObserver for Observer {
         // The emulator's own requests carry no client of yours.
         recorded.client = None;
         if changes_resources(&recorded) {
-            self.refresher.poke();
+            engine.refresher.poke();
         }
-        self.session.record(recorded);
+        engine.session.record(recorded);
     }
 }
 
@@ -315,31 +334,57 @@ impl Observer {
     }
 }
 
-/// Record the calls AWS makes inside the emulator into `session`.
-pub fn install(session: Session, refresher: Refresher) {
-    let observer = Arc::new(Observer {
-        session,
-        refresher,
-        open: Mutex::new(HashMap::new()),
-        chains: Mutex::new(Chains::default()),
-    });
-    // One observer per process: the first engine's (the window has one).
-    if OBSERVER.set(observer.clone()).is_ok() {
-        set_call_observer(Some(observer));
-    }
+fn observer() -> &'static Arc<Observer> {
+    OBSERVER.get_or_init(|| {
+        let observer = Arc::new(Observer {
+            engines: Mutex::new(HashMap::new()),
+            open: Mutex::new(HashMap::new()),
+            chains: Mutex::new(Chains::default()),
+        });
+        set_call_observer(Some(observer.clone()));
+        observer
+    })
+}
+
+/// Record the calls AWS makes inside the engine `router` names into
+/// `session`, from now on.
+pub fn attach(router: u64, session: Session, refresher: Refresher) {
+    observer()
+        .engines
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(router, Recorder { session, refresher });
+}
+
+/// The engine `router` names serves no longer (a new account took its
+/// place): what it still does is no account's.
+pub fn detach(router: u64) {
+    observer()
+        .engines
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&router);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn observer() -> Observer {
-        Observer {
-            session: Session::default(),
-            refresher: Refresher::default(),
+    /// An observer recording the engine `live` into `session`.
+    fn observing(live: u64, session: &Session) -> Observer {
+        let observer = Observer {
+            engines: Mutex::new(HashMap::new()),
             open: Mutex::new(HashMap::new()),
             chains: Mutex::new(Chains::default()),
-        }
+        };
+        observer.engines.lock().unwrap().insert(
+            live,
+            Recorder {
+                session: session.clone(),
+                refresher: Refresher::default(),
+            },
+        );
+        observer
     }
 
     /// An SQS poller's call to Lambda: made inside nothing, with no tracing.
@@ -366,12 +411,13 @@ mod tests {
 
     #[test]
     fn the_account_in_use_is_recorded_while_another_is_rebuilt() {
-        let observer = observer();
+        let session = Session::default();
         let (live, building) = (0x1000, 0x2000);
+        let observer = observing(live, &session);
         let rebuild = Rebuild::start(building);
         // The live account's poller invokes a function: recorded.
         let token = rootless(&observer, live);
-        let calls = observer.session.snapshot().calls;
+        let calls = session.snapshot().calls;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, token);
         assert!(calls[0].internal);
@@ -381,11 +427,21 @@ mod tests {
         assert!(!rebuild.settled(0));
         observer.abort(open, 1);
         rootless(&observer, building);
-        assert_eq!(observer.session.snapshot().calls.len(), 1);
+        assert_eq!(session.snapshot().calls.len(), 1);
         assert!(rebuild.settled(0));
-        // Once adopted, the rebuilt engine is the account in use.
+        // Once adopted, the rebuilt engine is the account in use, and the
+        // one it replaced is no account's.
         drop(rebuild);
+        observer.engines.lock().unwrap().insert(
+            building,
+            Recorder {
+                session: session.clone(),
+                refresher: Refresher::default(),
+            },
+        );
+        observer.engines.lock().unwrap().remove(&live);
         rootless(&observer, building);
-        assert_eq!(observer.session.snapshot().calls.len(), 2);
+        rootless(&observer, live);
+        assert_eq!(session.snapshot().calls.len(), 2);
     }
 }

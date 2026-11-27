@@ -25,10 +25,61 @@ struct Summary {
     more_changed: usize,
     permissions: usize,
     first_failure: Option<(usize, String, String)>,
+    /// What changed since the last run of the same command.
+    compared: Option<Compared>,
+}
+
+/// The failures a run no longer has, and the ones it has anew, since the
+/// last run of the same command: whether the fix worked.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Compared {
+    fixed: Vec<String>,
+    new: Vec<String>,
+    /// How many failures both have.
+    still: usize,
+}
+
+/// The failures of the run `id`, each once: what failed, and how.
+fn failures(calls: &[Arc<Call>], id: u64) -> std::collections::BTreeSet<String> {
+    calls
+        .iter()
+        .filter(|c| c.run == Some(id) && c.failed() && !c.unsupported)
+        .map(|c| {
+            let code = c
+                .failure
+                .as_ref()
+                .map_or_else(|| c.status.to_string(), |f| f.code.clone());
+            let target = c
+                .target
+                .as_deref()
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default();
+            format!(
+                "{} {}{target} · {code}",
+                service_title(&c.service),
+                c.operation
+            )
+        })
+        .collect()
+}
+
+/// `run` against the last run before it of the same command, both over.
+fn compared(calls: &[Arc<Call>], runs: &[Run], run: &Run) -> Option<Compared> {
+    run.ended_ms?;
+    let before = runs
+        .iter()
+        .filter(|r| r.id < run.id && r.command == run.command && r.ended_ms.is_some())
+        .last()?;
+    let (then, now) = (failures(calls, before.id), failures(calls, run.id));
+    Some(Compared {
+        fixed: then.difference(&now).cloned().collect(),
+        new: now.difference(&then).cloned().collect(),
+        still: then.intersection(&now).count(),
+    })
 }
 
 impl Summary {
-    fn of(calls: &[Arc<Call>], run: Option<Run>) -> Summary {
+    fn of(calls: &[Arc<Call>], run: Option<Run>, runs: &[Run]) -> Summary {
         let id = run.as_ref().map(|r| r.id);
         let scope: Vec<&Arc<Call>> = calls
             .iter()
@@ -83,7 +134,6 @@ impl Summary {
                 )
             });
         Summary {
-            run,
             calls: scope.len(),
             internal: scope.iter().filter(|c| c.internal).count(),
             failed: scope
@@ -96,8 +146,58 @@ impl Summary {
             more_changed,
             permissions: accesses.len(),
             first_failure,
+            compared: run.as_ref().and_then(|r| compared(calls, runs, r)),
+            run,
         }
     }
+}
+
+/// One line on what changed since the last run of the command; `None` when
+/// neither run failed.
+fn compared_line(c: &Compared) -> Option<String> {
+    let names = |list: &[String]| {
+        let mut shown: Vec<&str> = list.iter().take(2).map(String::as_str).collect();
+        if list.len() > 2 {
+            shown.push("…");
+        }
+        shown.join(", ")
+    };
+    if c.fixed.is_empty() && c.new.is_empty() {
+        return (c.still > 0).then(|| {
+            ts(
+                "Since the last run of this command: the same failures.",
+                "与上次运行这条命令相比：失败相同。",
+            )
+        });
+    }
+    let mut parts = Vec::new();
+    if !c.fixed.is_empty() {
+        parts.push(format!(
+            "{} {} ({})",
+            c.fixed.len(),
+            t("fixed", "个已修好"),
+            names(&c.fixed)
+        ));
+    }
+    if !c.new.is_empty() {
+        parts.push(format!(
+            "{} {} ({})",
+            c.new.len(),
+            t("new", "个新增"),
+            names(&c.new)
+        ));
+    }
+    if c.still > 0 {
+        parts.push(format!("{} {}", c.still, t("still failing", "个仍失败")));
+    }
+    Some(format!(
+        "{} {}",
+        t(
+            "Since the last run of this command:",
+            "与上次运行这条命令相比："
+        ),
+        parts.join(t(", ", "，"))
+    ))
 }
 
 pub fn summary(ui: Ui) -> impl IntoElement {
@@ -108,7 +208,7 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                 .with(|s| s.runs.iter().find(|r| r.id == id).cloned()),
             _ => None,
         };
-        ui.snap.with(|s| Summary::of(&s.calls, run))
+        ui.snap.with(|s| Summary::of(&s.calls, run, &s.runs))
     });
     let status = move || {
         summary.with(|s| match &s.run {
@@ -231,6 +331,23 @@ pub fn summary(ui: Ui) -> impl IntoElement {
             Box::new(|_| secondary_text()),
             Box::new(|| {}),
         ));
+    // Whether the fix worked: what changed since this command last ran.
+    let since = when(
+        move || summary.with(|s| s.compared.as_ref().and_then(compared_line).is_some()),
+        move || {
+            text(move || {
+                summary.with(|s| {
+                    s.compared
+                        .as_ref()
+                        .and_then(compared_line)
+                        .unwrap_or_default()
+                })
+            })
+            .text_size(body())
+            .text_color(secondary_text())
+            .selectable(true)
+        },
+    );
     let failure = when(
         move || summary.with(|s| s.first_failure.is_some()),
         move || {
@@ -389,6 +506,7 @@ pub fn summary(ui: Ui) -> impl IntoElement {
                 .child(rewind),
         )
         .child(chips)
+        .child(since)
         .child(failure)
         .child(changed)
         .child(permissions)
@@ -397,4 +515,57 @@ pub fn summary(ui: Ui) -> impl IntoElement {
 #[allow(dead_code)]
 fn unused(row: &calls::Row) -> usize {
     row.depth as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(id: u64, command: &str) -> Run {
+        Run {
+            id,
+            command: command.into(),
+            started_ms: id,
+            ended_ms: Some(id + 1),
+            exit: Some(0),
+            generation: 0,
+            undone: false,
+        }
+    }
+
+    fn failed(run: u64, code: &str) -> Arc<Call> {
+        let mut c = Call {
+            service: "lambda".into(),
+            ..Default::default()
+        };
+        c.run = Some(run);
+        c.operation = "Invoke".into();
+        c.target = Some("fn/resize".into());
+        c.failure = Some(crate::session::Failure {
+            code: code.into(),
+            message: None,
+            hint: None,
+        });
+        Arc::new(c)
+    }
+
+    #[test]
+    fn says_whether_the_fix_worked_since_the_command_last_ran() {
+        let runs = vec![run(1, "pytest"), run(2, "ls"), run(3, "pytest")];
+        let calls = vec![
+            failed(1, "AccessDeniedException"),
+            failed(1, "ValueError"),
+            failed(3, "ValueError"),
+        ];
+        let c = compared(&calls, &runs, &runs[2]).expect("an earlier run of pytest");
+        assert_eq!(
+            c.fixed,
+            vec!["Lambda Invoke fn/resize · AccessDeniedException".to_string()]
+        );
+        assert!(c.new.is_empty());
+        assert_eq!(c.still, 1);
+        // No earlier run of `ls`; the first `pytest` has none before it.
+        assert!(compared(&calls, &runs, &runs[1]).is_none());
+        assert!(compared(&calls, &runs, &runs[0]).is_none());
+    }
 }
