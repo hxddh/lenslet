@@ -236,7 +236,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 "回到这次运行之前…",
                             ))
                             .disabled(!finished)
-                            .on_select(move || ui.rewind(id)),
+                            .on_select(move || ui.rewind(id, false)),
+                            nsh_core::element::desktop::MenuItem::new(t(
+                                "Rewind and Run Again…",
+                                "回到之前并再运行一次…",
+                            ))
+                            .disabled(!finished)
+                            .on_select(move || ui.rewind(id, true)),
                         ],
                         e.page_position,
                     ))

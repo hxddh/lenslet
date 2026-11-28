@@ -844,6 +844,7 @@ mod tests {
                 raw: None,
             },
             response: Exchange::default(),
+            function: None,
         }
     }
 }

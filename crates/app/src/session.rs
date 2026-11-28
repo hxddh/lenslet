@@ -56,6 +56,8 @@ pub struct Call {
     pub request_id: Option<String>,
     pub request: Exchange,
     pub response: Exchange,
+    /// What the function it invoked spent, from its run's `REPORT`.
+    pub function: Option<crate::functions::Report>,
 }
 
 impl Call {
@@ -165,6 +167,9 @@ pub struct Run {
     /// What it did is no longer in the account (a rewind or a new account
     /// undid it): it cannot be rewound to.
     pub undone: bool,
+    /// Some of its calls are no longer kept (the list keeps the latest
+    /// 20,000): what is said of it is of the calls that are.
+    pub cut: bool,
 }
 
 /// A call from outside that changed the account, kept as it was sent, so
@@ -423,11 +428,16 @@ pub struct Tally {
     pub calls: usize,
     pub failed: usize,
     pub unsupported: usize,
+    /// Retries: attempts after an SDK call's first.
+    pub retried: usize,
 }
 
 impl Tally {
     fn add(&mut self, call: &Call) {
         self.calls += 1;
+        if call.is_retry() {
+            self.retried += 1;
+        }
         if call.unsupported {
             self.unsupported += 1;
         } else if call.failed() {
@@ -576,9 +586,18 @@ impl Session {
         Arc::make_mut(&mut inner.stats).add(&call);
         inner.calls.push(Arc::new(call));
         if inner.calls.len() > MAX_CALLS {
-            let gone: Vec<u64> = inner.calls.drain(..MAX_CALLS / 10).map(|c| c.id).collect();
-            for id in gone {
+            let gone: Vec<(u64, Option<u64>)> = inner
+                .calls
+                .drain(..MAX_CALLS / 10)
+                .map(|c| (c.id, c.run))
+                .collect();
+            let mut cut = std::collections::HashSet::new();
+            for (id, run) in gone {
                 inner.by_id.remove(&id);
+                cut.extend(run);
+            }
+            for run in inner.runs.iter_mut().filter(|r| cut.contains(&r.id)) {
+                run.cut = true;
             }
             inner.stats = Arc::new(Stats::of(&inner.calls));
             // The permissions keep only calls that are still listed.
@@ -611,6 +630,7 @@ impl Session {
             exit: None,
             generation,
             undone: false,
+            cut: false,
         });
         inner.current = Some(id);
         inner.version += 1;
@@ -812,14 +832,33 @@ impl Session {
     /// The call `seq` failed after it was answered (an invoked function's
     /// run): it is a failed call from now on.
     pub fn fail(&self, seq: usize, failure: Failure) {
+        self.change(seq, |call| call.failure = Some(failure));
+    }
+
+    /// The function the call `seq` invoked has run: what it spent, and how
+    /// it failed, if it did and the call does not already say so.
+    pub fn ran(&self, seq: usize, report: crate::functions::Report, failure: Option<Failure>) {
+        self.change(seq, |call| {
+            call.function = Some(report);
+            if call.failure.is_none() {
+                call.failure = failure;
+            }
+        });
+    }
+
+    fn change(&self, seq: usize, change: impl FnOnce(&mut Call)) {
         let mut inner = self.lock();
         let Ok(at) = inner.calls.binary_search_by_key(&seq, |c| c.seq) else {
             return;
         };
         let mut call = (*inner.calls[at]).clone();
-        call.failure = Some(failure);
+        let failed = call.failed();
+        change(&mut call);
+        let refailed = call.failed() != failed;
         inner.calls[at] = Arc::new(call);
-        inner.stats = Arc::new(Stats::of(&inner.calls));
+        if refailed {
+            inner.stats = Arc::new(Stats::of(&inner.calls));
+        }
         inner.version += 1;
     }
 
@@ -1176,6 +1215,7 @@ mod tests {
             request_id: None,
             request: Exchange::default(),
             response: Exchange::default(),
+            function: None,
         }
     }
 }

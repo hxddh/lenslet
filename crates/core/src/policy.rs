@@ -44,6 +44,45 @@ pub fn compile_value(access: &[Access]) -> Value {
     json!({ "Version": "2012-10-17", "Statement": statements })
 }
 
+/// The statement a resource's own policy (a bucket's, a queue's, a key's, a
+/// topic's) needs so `principal`, a role's or user's ARN, may do what
+/// `access` needs there.
+pub fn resource_statement(principal: &str, access: &[Access]) -> String {
+    let actions: BTreeSet<&str> = access.iter().map(|a| a.action.as_str()).collect();
+    let resources: BTreeSet<String> = access.iter().map(|a| aws_arn(&a.resource)).collect();
+    let one_or_all = |items: Vec<String>| match items.len() {
+        1 => Value::String(items[0].clone()),
+        _ => json!(items),
+    };
+    let statement = json!({
+        "Effect": "Allow",
+        "Principal": { "AWS": principal },
+        "Action": one_or_all(actions.into_iter().map(str::to_string).collect()),
+        "Resource": one_or_all(resources.into_iter().collect()),
+    });
+    let mut text = serde_json::to_string_pretty(&statement).unwrap_or_else(|_| "{}".into());
+    text.push('\n');
+    text
+}
+
+/// The caller an AWS denial names, as the ARN a resource policy allows: an
+/// assumed role's session names its role.
+pub fn caller(message: &str) -> Option<String> {
+    let arn = message
+        .split_whitespace()
+        .find(|w| w.starts_with("arn:aws:"))?
+        .trim_end_matches([',', '.', ';']);
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    let (account, name) = (parts.get(4)?, parts.get(5)?);
+    match name.strip_prefix("assumed-role/") {
+        Some(rest) => {
+            let role = rest.split('/').next().filter(|r| !r.is_empty())?;
+            Some(format!("arn:aws:iam::{account}:role/{role}"))
+        }
+        None => Some(arn.to_string()),
+    }
+}
+
 /// What a policy document allows: each action of an `Allow` statement on
 /// each of its resources. A document that is not one allows nothing.
 pub fn allowed(document: &str) -> Vec<Access> {
@@ -225,5 +264,31 @@ mod tests {
         assert!(resources.contains(&"arn:aws:s3:::shop-assets/*"));
         assert!(resources.contains(&"arn:aws:apigateway:*::/restapis/*"));
         assert!(resources.contains(&"arn:aws:iam::*:role/service-role/worker"));
+    }
+
+    #[test]
+    fn says_what_a_resource_policy_needs_for_the_caller() {
+        let message = "User: arn:aws:sts::000000000000:assumed-role/fn-role/resize is not authorized to perform: sqs:SendMessage on resource: arn:aws:sqs:us-east-1:000000000000:orders because no resource-based policy allows the sqs:SendMessage action";
+        let who = caller(message).unwrap();
+        assert_eq!(who, "arn:aws:iam::000000000000:role/fn-role");
+        let text = resource_statement(
+            &who,
+            &[Access::new(
+                "sqs:SendMessage",
+                "arn:aws:sqs:us-east-1:000000000000:orders",
+            )],
+        );
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["Principal"]["AWS"], who);
+        assert_eq!(value["Action"], "sqs:SendMessage");
+        assert_eq!(
+            value["Resource"],
+            "arn:aws:sqs:us-east-1:000000000000:orders"
+        );
+        assert_eq!(
+            caller("User: arn:aws:iam::000000000000:user/ci is not authorized").as_deref(),
+            Some("arn:aws:iam::000000000000:user/ci")
+        );
+        assert!(caller("Access Denied").is_none());
     }
 }

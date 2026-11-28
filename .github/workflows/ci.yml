@@ -39,7 +39,7 @@ jobs:
       # The end-to-end tests drive whole apps with boto3.
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: '3.14'
       - run: python -m pip install boto3
       - run: cargo fmt -p lenslet -p lenslet-core -- --check
       - run: cargo test --workspace --locked
@@ -71,7 +71,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: '3.14'
       - run: python -m pip install boto3
       - run: cargo test --workspace --locked
       - name: End to end (the call tree; rewind, grants, saved accounts)

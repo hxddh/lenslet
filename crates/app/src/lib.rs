@@ -6,6 +6,7 @@ pub mod account;
 pub mod copy_as;
 pub mod emulator;
 pub mod engine;
+pub mod executions;
 pub mod functions;
 pub mod gaps;
 pub mod observe;
