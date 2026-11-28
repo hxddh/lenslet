@@ -12,22 +12,26 @@ inside AWS:
 - **Every command is a run.** Each command you run in the terminal (`pytest`,
   `aws s3 cp …`, your script) becomes a run: how it ended, every call it
   made, and the first thing that failed and why. It also shows what the run
-  changed and the IAM policy it needed.
+  changed, the IAM policy it needed, and how it spent its time: waiting on
+  AWS, its slowest calls, each service, the SDKs' retries and throttling,
+  and what its functions spent (duration, cold starts, memory).
 - **What AWS did because of it.** The calls are a tree. Under the upload sits
   the function its notification invoked, and under the function its own calls
   to DynamoDB, and why one was denied. Deliveries, triggers and your
   functions' code are all there: a function that failed is a failed call,
-  with its error and what it printed, whether you invoked it or a
-  notification did. On AWS this takes CloudTrail, X-Ray and CloudWatch
-  together.
+  with its error, what it printed and what its run spent, whether you
+  invoked it or a notification did; so is a state machine's execution that
+  failed, with the state it failed in. On AWS this takes CloudTrail, X-Ray
+  and CloudWatch together.
 - **Your code or the emulator?** When a call fails, Lenslet says whether
   AWS Emulator is known to differ from AWS there, from the emulator's own
   list of what it does not do yet, with a link to the issue.
 - **Fix it, then go back and run it again.** A function denied by its role?
   One click allows the role what it needed (and when a Deny, a boundary or
-  the resource's own policy is in the way, Lenslet says which). Rewind puts
-  the account back as it was before any run, in seconds. Run Again repeats
-  the command, and the run says what changed since it last ran.
+  the resource's own policy is in the way, Lenslet says which, and gives
+  the statement a resource's policy needs). Rewind and Run Again puts the
+  account back as it was before the run, in seconds, and runs the command
+  again; the run says what changed since it last ran.
 - **Keep the account.** Save the account to a file and open it again later,
   or on a teammate's machine: Lenslet builds it again from the calls that
   made it.
@@ -68,7 +72,7 @@ endpoint says; the terminal's placeholder keys keep those away from your
 account. If port 4510 is taken, Lenslet takes a free port and shows it; set
 `LENSLET_PORT` to choose one.
 
-Runs come from the terminal's shell integration (bash and zsh): Lenslet adds
+Runs come from the terminal's shell integration (bash, zsh and fish): Lenslet adds
 marks around each command, after your own startup files. A run holds only
 the terminal's calls, told by the access key they are signed with (and the
 keys AWS hands the terminal's programs, as an assumed role's). Calls from

@@ -55,13 +55,20 @@ pub fn rows(
         .collect();
     let filtering = !query.is_empty() || filter != Filter::All || service.is_some();
     if filtering || sort.is_some() {
+        let retried: std::collections::HashSet<&str> = in_scope
+            .iter()
+            .filter(|c| filter == Filter::Retried && c.is_retry())
+            .filter_map(|c| c.invocation.as_deref())
+            .collect();
         let mut flat: Vec<Arc<Call>> = in_scope
-            .into_iter()
+            .iter()
             .filter(|c| match filter {
                 Filter::All => true,
                 Filter::Failed => c.failed() && !c.unsupported,
                 Filter::NotEmulated => c.unsupported,
+                Filter::Retried => c.invocation.as_deref().is_some_and(|i| retried.contains(i)),
             })
+            .map(|c| *c)
             .filter(|c| service.is_none_or(|s| s == c.service))
             .filter(|c| query.is_empty() || matches(c, query))
             .cloned()
@@ -435,7 +442,7 @@ pub fn resource_page(call: &Call, resources: &[crate::session::Group]) -> Option
         })
 }
 
-/// Which calls show: all, failed, not emulated; one service.
+/// Which calls show: all, failed, not emulated, retried; one service.
 fn scope_bar(ui: Ui) -> impl IntoElement {
     let segment = move |filter: Filter, label: fn() -> String, count: Box<dyn Fn() -> usize>| {
         let selected = move || ui.filter.get() == filter;
@@ -470,7 +477,7 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
                 .text_size(small())
                 .text_color(move || match filter {
                     Filter::Failed => red(),
-                    Filter::NotEmulated => orange(),
+                    Filter::NotEmulated | Filter::Retried => orange(),
                     Filter::All => secondary_text(),
                 }),
             )
@@ -500,6 +507,10 @@ fn scope_bar(ui: Ui) -> impl IntoElement {
         .child(segment(Filter::All, || ts("All", "全部"), Box::new(|| 0)))
         .child(segment(Filter::Failed, || ts("Failed", "失败"), Box::new(failed)))
         .child(segment(Filter::NotEmulated, || ts("Not Emulated", "未模拟"), Box::new(unsupported)))
+        .child(when(
+            move || tally().retried > 0 || ui.filter.get() == Filter::Retried,
+            move || segment(Filter::Retried, || ts("Retried", "重试"), Box::new(move || tally().retried)),
+        ))
         .child(view().flex_1())
         .child(
             nsh_base::select()

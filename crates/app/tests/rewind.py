@@ -5,6 +5,7 @@ python rewind.py two   -> change them
 python rewind.py deny  -> a function denied by its role; prints "denied" or "ok"
 python rewind.py invoke -> invoke that function again
 python rewind.py crash  -> a function that fails, invoked and by a notification
+python rewind.py observe -> a function that times out, an execution that fails
 python rewind.py policy -> print its role's inline policies
 python rewind.py dump  -> print the account's contents as JSON
 """
@@ -176,6 +177,30 @@ def crash():
         "LambdaFunctionConfigurations": [{"LambdaFunctionArn": fn, "Events": ["s3:ObjectCreated:*"]}]})
     s3.put_object(Bucket="crashes", Key="x", Body=b"x")
 
+SLOW = '''
+import time
+def handler(event, context):
+    time.sleep(3)
+'''
+
+def observe():
+    """What runs spend and how they end: a function past its timeout, an
+    execution that fails in a state."""
+    role = iam.get_role(RoleName="fn-role")["Role"]["Arn"]
+    lam.create_function(FunctionName="slow", Runtime="python3.12", Role=role, Handler="app.handler",
+                        Timeout=1, Code={"ZipFile": zipped(SLOW)})
+    lam.get_waiter("function_active_v2").wait(FunctionName="slow", WaiterConfig={"Delay": 1})
+    print(lam.invoke(FunctionName="slow").get("FunctionError", "none"), end=" ")
+    machine = sfn.create_state_machine(name="checkout", roleArn=role, definition=json.dumps(
+        {"StartAt": "Charge", "States": {"Charge": {"Type": "Fail", "Error": "CardDeclined", "Cause": "no funds"}}}))["stateMachineArn"]
+    run = sfn.start_execution(stateMachineArn=machine)["executionArn"]
+    for _ in range(40):
+        status = sfn.describe_execution(executionArn=run)["status"]
+        if status != "RUNNING":
+            break
+        time.sleep(0.25)
+    print(status, end="")
+
 def policy():
     names = iam.list_role_policies(RoleName="writer-role")["PolicyNames"]
     print(json.dumps({n: iam.get_role_policy(RoleName="writer-role", PolicyName=n)["PolicyDocument"] for n in names}))
@@ -211,4 +236,4 @@ def dump():
         out["roles"][r["RoleName"]] = sorted(iam.list_role_policies(RoleName=r["RoleName"])["PolicyNames"])
     print(json.dumps(out, sort_keys=True))
 
-{"one": one, "two": two, "deny": deny, "invoke": invoke, "crash": crash, "policy": policy, "dump": dump}[sys.argv[1]]()
+{"one": one, "two": two, "deny": deny, "invoke": invoke, "crash": crash, "observe": observe, "policy": policy, "dump": dump}[sys.argv[1]]()

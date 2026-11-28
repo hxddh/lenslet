@@ -179,6 +179,49 @@ fn rewinding_a_run_puts_the_account_back() {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
+    // What runs spend and how they end: the invocation's REPORT is read
+    // (the function past its timeout), and the execution that failed after
+    // StartExecution answered marks that call failed, with its state.
+    mark(Mark::Start("observe".into()));
+    assert_eq!(py(&engine, "observe"), "Unhandled FAILED");
+    mark(Mark::End(0));
+    let last = |operation: &str, target: &str| {
+        engine
+            .snapshot()
+            .calls
+            .iter()
+            .rev()
+            .find(|c| {
+                c.operation == operation && c.target.as_deref().is_some_and(|t| t.contains(target))
+            })
+            .cloned()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let slow = last("Invoke", "fn/slow");
+        let started = last("StartExecution", "checkout");
+        let spent = slow.as_ref().and_then(|c| c.function.clone());
+        let failed = started.as_ref().and_then(|c| c.failure.clone());
+        if let (Some(spent), Some(failed)) = (&spent, &failed) {
+            assert_eq!(spent.timeout_ms, Some(1000), "{spent:?}");
+            assert!(spent.near_timeout() && spent.billed_ms >= 900, "{spent:?}");
+            assert_eq!(failed.code, "CardDeclined");
+            let message = failed.message.as_deref().unwrap_or_default();
+            assert!(
+                message.contains("Charge") && message.contains("no funds"),
+                "{message}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never read: {spent:?} {failed:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // The crasher's runs are read too.
+    assert!(crasher(false).and_then(|c| c.function.clone()).is_some());
+
     // Saved and opened again: the same account, the grants with it.
     let saved = py(&engine, "dump");
     let text = runtime.block_on(engine.save_account()).expect("save");

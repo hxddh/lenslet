@@ -353,6 +353,7 @@ pub fn record(
         access: own.into_iter().chain(implied).collect(),
         request: exchange(&trace.request.headers, content_type, request_text, body),
         response: exchange(&trace.response.headers, response_type, response_text, rbody),
+        function: None,
     }
 }
 

@@ -64,6 +64,7 @@ impl Engine {
                     let listener = tokio::net::TcpListener::from_std(listener).expect("listen");
                     tokio::spawn(refresher.clone().run(emulator.clone(), session.clone()));
                     tokio::spawn(crate::functions::watch(emulator.clone(), session.clone()));
+                    tokio::spawn(crate::executions::watch(emulator.clone(), session.clone()));
                     if let Some(v6) =
                         listener_v6.and_then(|l| tokio::net::TcpListener::from_std(l).ok())
                     {

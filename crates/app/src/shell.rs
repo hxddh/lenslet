@@ -3,7 +3,7 @@
 //! Lenslet. What it prints collects in a buffer the window drains; what the
 //! user types goes to it as is.
 //!
-//! Bash and zsh also mark where each command starts and ends, as VS Code's
+//! Bash, zsh and fish also mark where each command starts and ends, as VS Code's
 //! shell integration does: the user's own startup files run first, then a
 //! hook prints an invisible mark (an OSC sequence Lenslet removes from the
 //! output) with the command line before it runs and its exit status after.
@@ -154,6 +154,23 @@ impl Shell {
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
         let output = Arc::new(Mutex::new(Vec::new()));
+        if !integrated && cfg!(unix) {
+            // Said once, where the user looks: why no runs appear.
+            let name = Path::new(&program)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("this shell");
+            output
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(
+                    format!(
+                        "Lenslet: {name} does not mark its commands, so they do not become runs; \
+                     their calls are under All Activity. Bash, zsh and fish do.\r\n"
+                    )
+                    .as_bytes(),
+                );
+        }
         let exited = Arc::new(AtomicBool::new(false));
         let gone = Arc::new(AtomicBool::new(false));
         {
@@ -344,13 +361,14 @@ fn write_new(path: &Path, text: &str) -> Option<()> {
     file.write_all(text.as_bytes()).ok()
 }
 
-/// The shell's start with its marks, for bash and zsh; `None` for others.
+/// The shell's start with its marks, for bash, zsh and fish; `None` for
+/// others.
 fn integrate(program: &str, env: &[(&str, String)]) -> Option<Integration> {
     if cfg!(windows) {
         return None;
     }
     let name = Path::new(program).file_name()?.to_str()?;
-    if name != "bash" && name != "zsh" {
+    if !matches!(name, "bash" | "zsh" | "fish") {
         return None;
     }
     let dir = private_dir()?;
@@ -531,6 +549,42 @@ add-zsh-hook precmd __lenslet_first
             if let Some(user) = std::env::var_os("ZDOTDIR") {
                 command.env("LENSLET_USER_ZDOTDIR", user);
             }
+            Some(Integration {
+                command,
+                prefix,
+                dir: dir.to_path_buf(),
+            })
+        }
+        "fish" => {
+            // Fish reads the user's own config as always, then this file
+            // (`--init-command`): its events mark each command.
+            let quote = |v: &str| format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"));
+            let mut ours = String::new();
+            for name in DROPPED {
+                ours.push_str(&format!("set -e {name}\n"));
+            }
+            for (name, value) in env {
+                ours.push_str(&format!("set -gx {name} {}\n", quote(value)));
+            }
+            let mark = format!(r"\e]6973;L;{key};");
+            let script = format!(
+                r#"# Lenslet: after the user's config, marks around each command.
+{ours}for __lenslet_v in (set -n | string match 'AWS_ENDPOINT_URL_*'); set -e $__lenslet_v; end
+set -e __lenslet_v
+function __lenslet_preexec --on-event fish_preexec
+    printf '{mark}S;%s\a' (printf '%s' $argv[1] | {HEX})
+end
+function __lenslet_postexec --on-event fish_postexec
+    set -l s $status
+    printf '{mark}E;%s\a' $s
+end
+"#
+            );
+            let init = dir.join("init.fish");
+            write_new(&init, &script)?;
+            let mut command = CommandBuilder::new(program);
+            command.args(["-l", "-i", "--init-command"]);
+            command.arg(format!("source {}", quote(init.to_str()?)));
             Some(Integration {
                 command,
                 prefix,
@@ -872,8 +926,38 @@ mod tests {
         Some((marks[from..].to_vec(), out))
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn fish_marks_commands() {
+        let Some(fish) = [
+            "/usr/bin/fish",
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+        ]
+        .into_iter()
+        .find(|p| Path::new(p).exists()) else {
+            return;
+        };
+        shell_marks_with(
+            fish,
+            false,
+            "echo $AWS_ENDPOINT_URL '' && false",
+            "http://127.0.0.1:4999 \r\n",
+        );
+    }
+
     #[cfg(unix)]
     fn shell_marks(program: &str, debug_trap: bool) {
+        shell_marks_with(
+            program,
+            debug_trap,
+            "echo \"$AWS_ENDPOINT_URL\" \"${ZDOTDIR-}\" && false",
+            "http://127.0.0.1:4999 \r\n",
+        );
+    }
+
+    #[cfg(unix)]
+    fn shell_marks_with(program: &str, debug_trap: bool, line: &str, printed_out: &str) {
         use std::time::{Duration, Instant};
         if !Path::new(program).exists() {
             return;
@@ -923,9 +1007,7 @@ mod tests {
             }
         });
         std::thread::sleep(Duration::from_millis(500));
-        writer
-            .write_all(b"echo \"$AWS_ENDPOINT_URL\" \"${ZDOTDIR-}\" && false\r")
-            .unwrap();
+        writer.write_all(format!("{line}\r").as_bytes()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             let marks = seen.lock().unwrap().clone();
@@ -933,15 +1015,12 @@ mod tests {
             if let Some(i) = start
                 && marks[i + 1..].contains(&Mark::End(1))
             {
-                assert_eq!(
-                    marks[i],
-                    Mark::Start("echo \"$AWS_ENDPOINT_URL\" \"${ZDOTDIR-}\" && false".into())
-                );
+                assert_eq!(marks[i], Mark::Start(line.into()));
                 let _ = child.kill();
                 let _ = std::fs::remove_dir_all(&rc);
                 // Lenslet's endpoint, and ZDOTDIR as the user had it (unset).
                 let out = String::from_utf8_lossy(&printed.lock().unwrap()).into_owned();
-                assert!(out.contains("http://127.0.0.1:4999 \r\n"), "{out:?}");
+                assert!(out.contains(printed_out), "{out:?}");
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

@@ -102,6 +102,8 @@ pub enum Filter {
     All,
     Failed,
     NotEmulated,
+    /// The SDK calls that took more than one attempt, every attempt.
+    Retried,
 }
 
 /// The inspector's tabs.
@@ -306,8 +308,9 @@ impl Ui {
         });
     }
 
-    /// Put the account back as it was before the run `id`, once the user confirms.
-    pub fn rewind(&self, id: u64) {
+    /// Put the account back as it was before the run `id`, once the user
+    /// confirms; `again`, then run its command again: the loop after a fix.
+    pub fn rewind(&self, id: u64, again: bool) {
         let ui = *self;
         let command = self.snap.with_untracked(|s| {
             s.runs
@@ -317,16 +320,25 @@ impl Ui {
         });
         let Some(command) = command else { return };
         let answer = nsh_base::alert_dialog()
-            .title(match lang().get_untracked() {
-                Lang::Zh => format!("回到“{command}”运行之前？"),
-                Lang::En => format!("Rewind to before “{command}”?"),
+            .title(match (lang().get_untracked(), again) {
+                (Lang::Zh, false) => format!("回到“{command}”运行之前？"),
+                (Lang::En, false) => format!("Rewind to before “{command}”?"),
+                (Lang::Zh, true) => format!("回到“{command}”运行之前，再运行一次？"),
+                (Lang::En, true) => format!("Rewind to before “{command}” and run it again?"),
             })
             .description(t(
                 "The account goes back to how it was when this command started: what it and later commands created, changed or deleted is undone. The calls stay in the list.",
                 "账户会回到这条命令开始时的样子：它和之后的命令所做的创建、修改、删除都会撤销。调用记录保留。",
             ))
             .cancel("cancel", t("Cancel", "取消"))
-            .destructive("rewind", t("Rewind", "回到之前"))
+            .destructive(
+                "rewind",
+                if again {
+                    t("Rewind and Run", "回到之前并运行")
+                } else {
+                    t("Rewind", "回到之前")
+                },
+            )
             .close_on_escape(true)
             .show();
         ui.spawn(async move {
@@ -334,7 +346,12 @@ impl Ui {
                 return;
             }
             ui.hold(ts("Rewinding…", "正在回到之前…"));
-            match engine().rewind(id).await {
+            let rewound = engine().rewind(id).await;
+            if again && rewound.is_ok() {
+                ui.terminal.set(true);
+                ui.run.set(Some(command));
+            }
+            match rewound {
                 Ok(r) if r.failed == 0 => ui.say(format!(
                     "{} {} {}",
                     t("Rewound: replayed", "已回到之前：重放了"),
@@ -1197,6 +1214,12 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 ui.filter.set(Filter::NotEmulated);
                 ui.show_calls();
             }),
+            check("Retried Calls", "重试过的调用", filter == Filter::Retried).on_select(
+                move || {
+                    ui.filter.set(Filter::Retried);
+                    ui.show_calls();
+                },
+            ),
             MenuItem::separator(),
             check("Sidebar", "侧栏", ui.sidebar.get_untracked())
                 .shortcut(&sidebar_key())
@@ -1243,7 +1266,17 @@ fn menu(ui: Ui) -> Vec<MenuItem> {
                 })
                 .on_select(move || {
                     if let Page::Run(id) = ui.page.get_untracked() {
-                        ui.rewind(id);
+                        ui.rewind(id, false);
+                    }
+                }),
+            MenuItem::new(t("Rewind and Run Again…", "回到之前并再运行一次…"))
+                .disabled(!match ui.page.get_untracked() {
+                    Page::Run(id) => ui.snap.with_untracked(|s| s.can_rewind(id)),
+                    _ => false,
+                })
+                .on_select(move || {
+                    if let Page::Run(id) = ui.page.get_untracked() {
+                        ui.rewind(id, true);
                     }
                 }),
             MenuItem::separator(),

@@ -239,6 +239,20 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
             Box::new(|c| Some(format!("{} ms", c.ms))),
         ))
         .child(field(
+            || ts("Function", "函数运行"),
+            Box::new(|c| {
+                let r = c.function.as_ref()?;
+                let mut line = r.line();
+                if r.near_timeout() {
+                    line.push_str(t(" · near its timeout", " · 接近超时"));
+                }
+                if r.near_memory() {
+                    line.push_str(t(" · near its memory size", " · 接近内存上限"));
+                }
+                Some(line)
+            }),
+        ))
+        .child(field(
             || ts("Client", "客户端"),
             Box::new(|c| c.client.clone()),
         ))
@@ -381,8 +395,22 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
                             .hover(|s| s.bg(hover_bg()))
                             .child(
                                 text(move || {
+                                    let after = call.with(|c| c.as_ref().map(|c| c.0.at_ms)).unwrap_or(0);
                                     cause()
-                                        .map(|p| format!("{} {} ↗", service_title(&p.service), p.operation))
+                                        .map(|p| {
+                                            let name = format!("{} {} ↗", service_title(&p.service), p.operation);
+                                            // How long AWS took to act on it: a trigger or a
+                                            // delivery, not a function's own call.
+                                            if crate::functions::invoked(&p).is_some() {
+                                                return name;
+                                            }
+                                            let lag = after.saturating_sub(p.at_ms);
+                                            format!(
+                                                "{name} · {} {}",
+                                                crate::functions::ms_label(lag as f64),
+                                                t("later", "之后")
+                                            )
+                                        })
                                         .unwrap_or_default()
                                 })
                                 .text_size(small())
@@ -454,6 +482,46 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
             ))
         },
     );
+    // A call a resource's own policy denied: the statement that policy needs
+    // for the caller, to add there. Lenslet does not change the policy.
+    let resource_statement = move || {
+        call.with(|c| {
+            let c = c.as_ref()?;
+            let f = c.0.failure.as_ref()?;
+            let message = f.message.as_deref()?;
+            if c.0.access.is_empty()
+                || lenslet_core::problem::denial(&f.code, message)
+                    != Some(lenslet_core::problem::Denial::Resource)
+                || !message.contains("resource-based policy")
+            {
+                return None;
+            }
+            let who = lenslet_core::policy::caller(message)?;
+            Some(lenslet_core::policy::resource_statement(&who, &c.0.access))
+        })
+    };
+    let statement = when(
+        move || resource_statement().is_some(),
+        move || {
+            view().flex_row().child(push_button(
+                || {
+                    ts(
+                        "Copy Statement for the Resource Policy",
+                        "复制资源策略所需的语句",
+                    )
+                },
+                move || {
+                    if let Some(text) = resource_statement() {
+                        ui.copy(
+                            text,
+                            "Copied: add it to the resource's policy",
+                            "已复制：把它加入该资源的策略",
+                        );
+                    }
+                },
+            ))
+        },
+    );
     // What the function a call invoked printed in that run, read from its
     // log group when the call is selected.
     // `None` while it is read; `Some(None)` when nothing of it is logged.
@@ -510,6 +578,7 @@ fn summary(ui: Ui, call: Held) -> impl IntoElement {
         .pt(px(12.0))
         .child(failure)
         .child(grant)
+        .child(statement)
         .child(printed)
         .child(origin)
         .child(facts)
